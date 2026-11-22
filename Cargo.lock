@@ -638,6 +638,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kavach-parsers"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "sha2",
+]
+
+[[package]]
 name = "kavach-policy"
 version = "0.1.0"
 dependencies = [
