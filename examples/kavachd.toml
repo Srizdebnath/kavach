@@ -1,0 +1,20 @@
+# /etc/kavach/kavachd.toml — host configuration for kavachd (policy itself comes in signed bundles).
+
+# Interfaces for XDP (blocklist + rate limit) and TC (flow tracking + ingress policy).
+interfaces = ["eth0"]
+xdp_mode   = "auto"          # auto | native | generic
+tc         = true
+lsm        = true            # identity-aware egress (needs `bpf` in /sys/kernel/security/lsm)
+
+trusted_keys_dir = "/etc/kavach/trusted_keys"   # *.pub, hex or raw ed25519
+revoked_keys     = []                           # hex key ids (first 8 bytes of SHA-256(pk))
+fleet            = "default"
+
+# Members of this group may use read/operate commands; kill-switch stays root-only.
+# control_group = "kavach"
+
+sample_rate = 64            # 1-in-N verdict events to the ring buffer (0 = off)
+
+[ratelimit]                 # per-source GCRA at XDP; IPv6 sources share a /64 budget
+pps   = 20000
+burst = 40000

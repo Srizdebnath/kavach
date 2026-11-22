@@ -77,3 +77,14 @@ impl Config {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn example_config_parses() {
+        let c: super::Config =
+            toml::from_str(include_str!("../../../examples/kavachd.toml")).unwrap();
+        assert_eq!(c.interfaces, ["eth0"]);
+        assert_eq!(c.ratelimit.unwrap().pps, 20000);
+    }
+}

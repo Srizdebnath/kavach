@@ -1,0 +1,39 @@
+[Unit]
+Description=Kavach kernel-native firewall
+Documentation=https://github.com/Srizdebnath/kavach
+After=local-fs.target sys-fs-bpf.mount
+Before=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/kavachd --config /etc/kavach/kavachd.toml
+# Enforcement lives in the kernel and survives restarts; never detach on stop.
+KillMode=process
+Restart=always
+RestartSec=1s
+RuntimeDirectory=kavach
+RuntimeDirectoryMode=0750
+StateDirectory=kavach
+LogsDirectory=kavach
+ConfigurationDirectory=kavach
+
+# Least privilege: only what loading/attaching BPF and reading executables needs.
+CapabilityBoundingSet=CAP_BPF CAP_PERFMON CAP_NET_ADMIN CAP_SYS_ADMIN CAP_SYS_RESOURCE CAP_DAC_READ_SEARCH CAP_SYS_PTRACE
+AmbientCapabilities=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/sys/fs/bpf /var/lib/kavach /var/log/kavach /run/kavach
+ProtectHome=read-only
+PrivateTmp=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+LimitMEMLOCK=infinity
+
+[Install]
+WantedBy=multi-user.target
