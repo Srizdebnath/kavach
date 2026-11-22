@@ -4,6 +4,7 @@ members = [
     "crates/kavach-common",
     "crates/kavach-core",
     "crates/kavach-policy",
+    "crates/kavach-api",
     "xtask",
 ]
 
@@ -29,6 +30,7 @@ kavach-common = { path = "crates/kavach-common" }
 kavach-parsers = { path = "crates/kavach-parsers" }
 kavach-core = { path = "crates/kavach-core" }
 kavach-policy = { path = "crates/kavach-policy" }
+kavach-api = { path = "crates/kavach-api" }
 anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
