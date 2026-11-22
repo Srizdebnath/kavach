@@ -18,8 +18,17 @@ use crate::daemon::{self, Daemon};
 /// Work for the identity broker.
 #[derive(Debug, Clone, Copy)]
 pub enum IdentityJob {
-    Exec { pid: u32, key: ExeKey },
-    Tainted { key: ExeKey },
+    Exec {
+        pid: u32,
+        key: ExeKey,
+    },
+    Tainted {
+        key: ExeKey,
+    },
+    /// kavachd opened a policy-named executable; this is its kernel key.
+    Report {
+        key: ExeKey,
+    },
 }
 
 pub fn decode(bytes: &[u8]) -> Option<Event> {
@@ -67,7 +76,11 @@ pub fn render(e: &Event, rule_name: Option<String>) -> EventRecord {
     EventRecord {
         ts_ns: e.ts_ns,
         kind: kind.into(),
-        verdict: if is_flow { verdict_name(e.verdict).into() } else { String::new() },
+        verdict: if is_flow {
+            verdict_name(e.verdict).into()
+        } else {
+            String::new()
+        },
         reason: reason_name(e.reason).into(),
         proto: e.key.proto,
         src: if is_flow { addr(e.key.src) } else { None },
@@ -103,8 +116,21 @@ pub async fn reader(
         while let Some(item) = rb.next() {
             let Some(e) = decode(&item) else { continue };
             drop(item);
+            if e.kind == EventKind::KeyReport as u8 {
+                let key = ExeKey {
+                    dev: e.rule_id,
+                    generation: e.generation,
+                    ino: e.identity,
+                };
+                let _ = jobs.try_send(IdentityJob::Report { key });
+                continue; // internal bookkeeping, not an operator-facing event
+            }
             if e.kind == EventKind::Exec as u8 || e.kind == EventKind::ExeTainted as u8 {
-                let key = ExeKey { dev: e.rule_id, generation: e.generation, ino: e.identity };
+                let key = ExeKey {
+                    dev: e.rule_id,
+                    generation: e.generation,
+                    ino: e.identity,
+                };
                 let job = if e.kind == EventKind::Exec as u8 {
                     IdentityJob::Exec { pid: e.pid, key }
                 } else {
@@ -118,7 +144,10 @@ pub async fn reader(
                 .then(|| {
                     let st = state.lock().ok()?;
                     let p = st.active()?;
-                    p.rules.iter().find(|r| r.id == e.rule_id).map(|r| r.name.clone())
+                    p.rules
+                        .iter()
+                        .find(|r| r.id == e.rule_id)
+                        .map(|r| r.name.clone())
                 })
                 .flatten();
             let rec = render(&e, rule_name);
@@ -130,7 +159,8 @@ pub async fn reader(
                 if audit_window.1 < 10 {
                     audit_window.1 += 1;
                     if let Ok(mut st) = state.lock() {
-                        st.audit.record("verdict", serde_json::to_value(&rec).unwrap_or_default());
+                        st.audit
+                            .record("verdict", serde_json::to_value(&rec).unwrap_or_default());
                     }
                 }
             }
@@ -147,7 +177,35 @@ pub async fn identity_broker(state: Arc<Mutex<Daemon>>, mut jobs: mpsc::Receiver
             IdentityJob::Tainted { key } => {
                 if let Ok(mut st) = state.lock() {
                     st.exe_cache.remove(&key);
-                    st.audit.record("exe_tainted", serde_json::json!({ "ino": key.ino, "dev": key.dev }));
+                    st.audit.record(
+                        "exe_tainted",
+                        serde_json::json!({ "ino": key.ino, "dev": key.dev }),
+                    );
+                }
+            }
+            IdentityJob::Report { key } => {
+                let pending = {
+                    let Ok(mut st) = state.lock() else { continue };
+                    let Some(path) = st.pending_reports.remove(&key.ino) else {
+                        continue;
+                    };
+                    match st.k().and_then(|k| k.exe_dirty(&key)) {
+                        Ok(seq) => Some((seq, path)),
+                        Err(_) => None,
+                    }
+                };
+                let Some((seq, path)) = pending else { continue };
+                let p2 = path.clone();
+                let r = tokio::task::spawn_blocking(move || daemon::hash_path(&p2, key.ino)).await;
+                match r.unwrap_or_else(|e| Err(anyhow::anyhow!(e))) {
+                    Ok(info) => {
+                        if let Ok(mut st) = state.lock()
+                            && let Err(e) = st.write_classification(key, info, seq)
+                        {
+                            warn!(path, error = %e, "pre-classification failed");
+                        }
+                    }
+                    Err(e) => debug!(path, error = %e, "could not pre-classify"),
                 }
             }
             IdentityJob::Exec { pid, key } => {
@@ -163,19 +221,22 @@ pub async fn identity_broker(state: Arc<Mutex<Daemon>>, mut jobs: mpsc::Receiver
                 let (seq, info) = match cached {
                     (seq, Some(info)) => (seq, Ok(info)),
                     (seq, None) => {
-                        let r = tokio::task::spawn_blocking(move || daemon::hash_exe(pid, key.ino)).await;
+                        let r = tokio::task::spawn_blocking(move || daemon::hash_exe(pid, key.ino))
+                            .await;
                         (seq, r.unwrap_or_else(|e| Err(anyhow::anyhow!(e))))
                     }
                 };
                 match info {
                     Ok(info) => {
-                        if let Ok(mut st) = state.lock() {
-                            if let Err(e) = st.write_classification(key, info, seq) {
-                                warn!(pid, error = %e, "writing exe classification failed");
-                            }
+                        if let Ok(mut st) = state.lock()
+                            && let Err(e) = st.write_classification(key, info, seq)
+                        {
+                            warn!(pid, error = %e, "writing exe classification failed");
                         }
                     }
-                    Err(e) => debug!(pid, error = %e, "could not hash executable (process exited?)"),
+                    Err(e) => {
+                        debug!(pid, error = %e, "could not hash executable (process exited?)")
+                    }
                 }
             }
         }

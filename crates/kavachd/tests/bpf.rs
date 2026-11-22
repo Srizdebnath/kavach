@@ -35,7 +35,10 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let n = N.fetch_add(1, Ordering::SeqCst);
-        let pin = std::path::PathBuf::from(format!("/sys/fs/bpf/kavach-test-{}-{n}", std::process::id()));
+        let pin = std::path::PathBuf::from(format!(
+            "/sys/fs/bpf/kavach-test-{}-{n}",
+            std::process::id()
+        ));
         let k = Kernel::load(&pin).expect("load (are you root?)");
         let tmp = tempfile::tempdir().unwrap();
         let cfg = Config {
@@ -45,7 +48,10 @@ impl Fixture {
             trusted_keys_dir: tmp.path().join("keys"),
             ..Config::default()
         };
-        Self { daemon: Some(Daemon::new(cfg, k)), _tmp: tmp }
+        Self {
+            daemon: Some(Daemon::new(cfg, k)),
+            _tmp: tmp,
+        }
     }
     fn d(&mut self) -> &mut Daemon {
         self.daemon.as_mut().unwrap()
@@ -54,14 +60,26 @@ impl Fixture {
         self.d().kernel.as_mut().unwrap()
     }
     fn xdp(&mut self, pkt: &[u8]) -> u32 {
-        let prog: &mut Xdp = self.k().bpf_mut().program_mut("kavach_xdp").unwrap().try_into().unwrap();
+        let prog: &mut Xdp = self
+            .k()
+            .bpf_mut()
+            .program_mut("kavach_xdp")
+            .unwrap()
+            .try_into()
+            .unwrap();
         if prog.fd().is_err() {
             prog.load().unwrap();
         }
         run(prog, pkt).unwrap()
     }
     fn tc(&mut self, name: &str, pkt: &[u8]) -> u32 {
-        let prog: &mut SchedClassifier = self.k().bpf_mut().program_mut(name).unwrap().try_into().unwrap();
+        let prog: &mut SchedClassifier = self
+            .k()
+            .bpf_mut()
+            .program_mut(name)
+            .unwrap()
+            .try_into()
+            .unwrap();
         if prog.fd().is_err() {
             prog.load().unwrap();
         }
@@ -71,7 +89,11 @@ impl Fixture {
         self.k().stats().unwrap()[r as usize]
     }
     fn apply_toml(&mut self, src: &str) -> Arc<kavach_policy::CompiledPolicy> {
-        let p = Arc::new(kavach_policy::compile(src, kernel::unix_ns() / 1_000_000_000).expect("policy").policy);
+        let p = Arc::new(
+            kavach_policy::compile(src, kernel::unix_ns() / 1_000_000_000)
+                .expect("policy")
+                .policy,
+        );
         let serial = self.d().serial + 1;
         self.d().stage(p.clone(), serial).expect("stage");
         p
@@ -80,21 +102,26 @@ impl Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        if let Some(mut d) = self.daemon.take() {
-            if let Some(k) = d.kernel.take() {
-                let _ = k.kill_switch();
-            }
+        if let Some(mut d) = self.daemon.take()
+            && let Some(k) = d.kernel.take()
+        {
+            let _ = k.kill_switch();
         }
     }
 }
 
-fn run<P: TestRun<Opts<'static> = TestRunOptions<'static>, Result = aya::programs::TestRunResult>>(
+fn run<
+    P: TestRun<Opts<'static> = TestRunOptions<'static>, Result = aya::programs::TestRunResult>,
+>(
     p: &P,
     pkt: &[u8],
 ) -> Result<u32, ProgramError> {
     // SAFETY-free lifetime laundering is not needed: copy into a leaked buffer for 'static opts.
     let data: &'static [u8] = Box::leak(pkt.to_vec().into_boxed_slice());
-    let opts = TestRunOptions { data_in: Some(data), ..Default::default() };
+    let opts = TestRunOptions {
+        data_in: Some(data),
+        ..Default::default()
+    };
     p.test_run(opts).map(|r| r.return_value)
 }
 
@@ -136,7 +163,15 @@ fn l4(proto: u8, sport: u16, dport: u16, flags: u8) -> Vec<u8> {
     }
 }
 
-fn v4_pkt(src: Ipv4Addr, dst: Ipv4Addr, proto: u8, sport: u16, dport: u16, flags: u8, vlans: &[u16]) -> Vec<u8> {
+fn v4_pkt(
+    src: Ipv4Addr,
+    dst: Ipv4Addr,
+    proto: u8,
+    sport: u16,
+    dport: u16,
+    flags: u8,
+    vlans: &[u16],
+) -> Vec<u8> {
     let mut p = eth(0x0800, vlans);
     let body = l4(proto, sport, dport, flags);
     let mut ip = vec![0x45, 0, 0, 0, 0, 0, 0x40, 0, 64, proto, 0, 0];
@@ -164,12 +199,27 @@ fn v6_pkt(src: Ipv6Addr, dst: Ipv6Addr, proto: u8, sport: u16, dport: u16, flags
 }
 
 fn syn(src: [u8; 4], dport: u16) -> Vec<u8> {
-    v4_pkt(Ipv4Addr::from(src), Ipv4Addr::new(10, 9, 9, 9), 6, 40000, dport, TCP_SYN, &[])
+    v4_pkt(
+        Ipv4Addr::from(src),
+        Ipv4Addr::new(10, 9, 9, 9),
+        6,
+        40000,
+        dport,
+        TCP_SYN,
+        &[],
+    )
 }
 
 fn enable_xdp(f: &mut Fixture, flags: u32, pps: u64, burst: u64) {
     let (emission_ns, tau_ns) = kernel::gcra(pps, burst);
-    f.k().set_xdp_config(XdpConfig { emission_ns, tau_ns, sample_rate: 1, flags }).unwrap();
+    f.k()
+        .set_xdp_config(XdpConfig {
+            emission_ns,
+            tau_ns,
+            sample_rate: 1,
+            flags,
+        })
+        .unwrap();
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -181,18 +231,36 @@ fn enable_xdp(f: &mut Fixture, flags: u32, pps: u64, burst: u64) {
 fn xdp_blocklist_v4_v6_vlan() {
     let mut f = Fixture::new();
     enable_xdp(&mut f, KV_XDP_F_BLOCKLIST, 1, 1);
-    f.k().block_add("203.0.113.0/24".parse().unwrap(), 0, 7).unwrap();
-    f.k().block_add("2001:db8:bad::/48".parse().unwrap(), 0, 8).unwrap();
+    f.k()
+        .block_add("203.0.113.0/24".parse().unwrap(), 0, 7)
+        .unwrap();
+    f.k()
+        .block_add("2001:db8:bad::/48".parse().unwrap(), 0, 8)
+        .unwrap();
 
     assert_eq!(f.xdp(&syn([203, 0, 113, 77], 443)), XDP_DROP);
     assert_eq!(f.xdp(&syn([203, 0, 114, 1], 443)), XDP_PASS);
     // QinQ-tagged frame from a blocked source
-    let q = v4_pkt(Ipv4Addr::new(203, 0, 113, 1), Ipv4Addr::new(10, 0, 0, 1), 17, 5, 53, 0, &[10, 20]);
+    let q = v4_pkt(
+        Ipv4Addr::new(203, 0, 113, 1),
+        Ipv4Addr::new(10, 0, 0, 1),
+        17,
+        5,
+        53,
+        0,
+        &[10, 20],
+    );
     assert_eq!(f.xdp(&q), XDP_DROP);
     let bad6: Ipv6Addr = "2001:db8:bad:1::5".parse().unwrap();
     let ok6: Ipv6Addr = "2001:db8:600d::5".parse().unwrap();
-    assert_eq!(f.xdp(&v6_pkt(bad6, Ipv6Addr::LOCALHOST, 6, 1, 2, TCP_SYN)), XDP_DROP);
-    assert_eq!(f.xdp(&v6_pkt(ok6, Ipv6Addr::LOCALHOST, 6, 1, 2, TCP_SYN)), XDP_PASS);
+    assert_eq!(
+        f.xdp(&v6_pkt(bad6, Ipv6Addr::LOCALHOST, 6, 1, 2, TCP_SYN)),
+        XDP_DROP
+    );
+    assert_eq!(
+        f.xdp(&v6_pkt(ok6, Ipv6Addr::LOCALHOST, 6, 1, 2, TCP_SYN)),
+        XDP_PASS
+    );
     assert_eq!(f.stat(StatReason::XdpDropBlocklist), 3);
 
     // Removing the entry lets traffic through again; listing shows the v6 entry.
@@ -209,9 +277,21 @@ fn xdp_blocklist_expiry() {
     let mut f = Fixture::new();
     enable_xdp(&mut f, KV_XDP_F_BLOCKLIST, 1, 1);
     let past = kernel::boot_ns() - 1;
-    f.k().block_add("198.51.100.0/24".parse().unwrap(), past, 0).unwrap();
-    f.k().block_add("198.51.101.0/24".parse().unwrap(), kernel::boot_ns() + 60_000_000_000, 0).unwrap();
-    assert_eq!(f.xdp(&syn([198, 51, 100, 1], 80)), XDP_PASS, "expired entry ignored");
+    f.k()
+        .block_add("198.51.100.0/24".parse().unwrap(), past, 0)
+        .unwrap();
+    f.k()
+        .block_add(
+            "198.51.101.0/24".parse().unwrap(),
+            kernel::boot_ns() + 60_000_000_000,
+            0,
+        )
+        .unwrap();
+    assert_eq!(
+        f.xdp(&syn([198, 51, 100, 1], 80)),
+        XDP_PASS,
+        "expired entry ignored"
+    );
     assert_eq!(f.xdp(&syn([198, 51, 101, 1], 80)), XDP_DROP);
     assert_eq!(f.d().purge_blocklist().unwrap(), 1);
 }
@@ -297,16 +377,48 @@ fn tc_ingress_rules_and_always_pass() {
     assert_eq!(f.tc("kavach_tc_ingress", &syn([8, 8, 8, 8], 443)), TC_OK);
     assert_eq!(f.tc("kavach_tc_ingress", &syn([8, 8, 8, 8], 3306)), TC_SHOT);
     // Mid-stream TCP with no state passes (FR-TC-3)
-    let mid = v4_pkt(Ipv4Addr::new(8, 8, 4, 4), Ipv4Addr::new(10, 9, 9, 9), 6, 1, 3306, TCP_ACK, &[]);
+    let mid = v4_pkt(
+        Ipv4Addr::new(8, 8, 4, 4),
+        Ipv4Addr::new(10, 9, 9, 9),
+        6,
+        1,
+        3306,
+        TCP_ACK,
+        &[],
+    );
     assert_eq!(f.tc("kavach_tc_ingress", &mid), TC_OK);
     // DHCP reply and ICMP errors always pass; ICMP echo request is judged (default drop)
-    let dhcp = v4_pkt(Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::BROADCAST, 17, 67, 68, 0, &[]);
+    let dhcp = v4_pkt(
+        Ipv4Addr::new(10, 0, 0, 1),
+        Ipv4Addr::BROADCAST,
+        17,
+        67,
+        68,
+        0,
+        &[],
+    );
     assert_eq!(f.tc("kavach_tc_ingress", &dhcp), TC_OK);
-    let mut unreach = v4_pkt(Ipv4Addr::new(8, 8, 8, 8), Ipv4Addr::new(10, 9, 9, 9), 1, 0, 0, 0, &[]);
+    let mut unreach = v4_pkt(
+        Ipv4Addr::new(8, 8, 8, 8),
+        Ipv4Addr::new(10, 9, 9, 9),
+        1,
+        0,
+        0,
+        0,
+        &[],
+    );
     let off = 14 + 20;
     unreach[off] = 3;
     assert_eq!(f.tc("kavach_tc_ingress", &unreach), TC_OK);
-    let echo = v4_pkt(Ipv4Addr::new(8, 8, 8, 8), Ipv4Addr::new(10, 9, 9, 9), 1, 0, 0, 0, &[]);
+    let echo = v4_pkt(
+        Ipv4Addr::new(8, 8, 8, 8),
+        Ipv4Addr::new(10, 9, 9, 9),
+        1,
+        0,
+        0,
+        0,
+        &[],
+    );
     assert_eq!(f.tc("kavach_tc_ingress", &echo), TC_SHOT);
     // Cached verdict on the second packet of the denied flow
     let hits = f.stat(StatReason::FlowCacheHit);
@@ -343,7 +455,14 @@ fn differential_tc_ingress_vs_core() {
     let mut f = Fixture::new();
     let p = f.apply_toml(INGRESS_POLICY);
     let generation = f.d().generation;
-    let table = p.to_kernel(generation, 1, kavach_policy::kernel::Clocks { unix_ns: 0, boot_ns: 0 });
+    let table = p.to_kernel(
+        generation,
+        1,
+        kavach_policy::kernel::Clocks {
+            unix_ns: 0,
+            boot_ns: 0,
+        },
+    );
     let snap = Snapshot::new(&table, generation).unwrap();
     let offline = OfflineTables::new(&p, &Facts::default(), &[], generation & 1);
 
@@ -354,7 +473,13 @@ fn differential_tc_ingress_vs_core() {
         seed ^= seed << 17;
         seed
     };
-    let srcs: [[u8; 4]; 5] = [[10, 0, 0, 0], [192, 0, 2, 0], [8, 8, 8, 0], [172, 16, 0, 0], [10, 255, 255, 0]];
+    let srcs: [[u8; 4]; 5] = [
+        [10, 0, 0, 0],
+        [192, 0, 2, 0],
+        [8, 8, 8, 0],
+        [172, 16, 0, 0],
+        [10, 255, 255, 0],
+    ];
     let ports = [22u16, 53, 80, 443, 3306, 8080];
     let mut checked = 0;
     for i in 0..400u32 {
@@ -365,7 +490,15 @@ fn differential_tc_ingress_vs_core() {
         let dport = ports[((r >> 8) % 6) as usize];
         let proto = if (r >> 16) & 1 == 0 { 6 } else { 17 };
         let sport = 20000 + i as u16; // unique 5-tuple => always a new flow
-        let pkt = v4_pkt(Ipv4Addr::from(src), Ipv4Addr::new(10, 9, 9, 9), proto, sport, dport, TCP_SYN, &[]);
+        let pkt = v4_pkt(
+            Ipv4Addr::from(src),
+            Ipv4Addr::new(10, 9, 9, 9),
+            proto,
+            sport,
+            dport,
+            TCP_SYN,
+            &[],
+        );
         let kernel_verdict = f.tc("kavach_tc_ingress", &pkt);
         let q = FlowQuery {
             dir: KV_DIR_INGRESS,
@@ -375,8 +508,15 @@ fn differential_tc_ingress_vs_core() {
             proto,
         };
         let d = kavach_core::evaluate(&offline, &snap, &q, 0);
-        let core_verdict = if d.verdict == Verdict::Drop { TC_SHOT } else { TC_OK };
-        assert_eq!(kernel_verdict, core_verdict, "divergence on {src:?} {proto}/{dport}: core={d:?}");
+        let core_verdict = if d.verdict == Verdict::Drop {
+            TC_SHOT
+        } else {
+            TC_OK
+        };
+        assert_eq!(
+            kernel_verdict, core_verdict,
+            "divergence on {src:?} {proto}/{dport}: core={d:?}"
+        );
         checked += 1;
     }
     assert_eq!(checked, 400);
@@ -405,7 +545,11 @@ fn lsm_identity_egress_end_to_end() {
     while let Some(item) = rb.next() {
         let e = kavachd::events::decode(&item).unwrap();
         if e.kind == EventKind::Exec as u8 && e.pid == me {
-            key = Some(ExeKey { dev: e.rule_id, generation: e.generation, ino: e.identity });
+            key = Some(ExeKey {
+                dev: e.rule_id,
+                generation: e.generation,
+                ino: e.identity,
+            });
         }
     }
     let key = key.expect("task scan reported this process");
@@ -439,25 +583,35 @@ log = {{ to = "192.0.2.0/24" }}
 
     // TCP connect to the denied destination fails with EPERM straight from the LSM hook.
     let denied: SocketAddr = "192.0.2.1:9".parse().unwrap();
-    let err = TcpStream::connect_timeout(&denied, std::time::Duration::from_millis(200)).unwrap_err();
-    assert_eq!(err.raw_os_error(), Some(nix::libc::EPERM), "expected EPERM, got {err:?} (exe {exe:?})");
+    let err =
+        TcpStream::connect_timeout(&denied, std::time::Duration::from_millis(200)).unwrap_err();
+    assert_eq!(
+        err.raw_os_error(),
+        Some(nix::libc::EPERM),
+        "expected EPERM, got {err:?} (exe {exe:?})"
+    );
 
     // Unconnected UDP sendto is judged per destination (uid selector).
     let sock = UdpSocket::bind("0.0.0.0:0").unwrap();
     let err = sock.send_to(b"x", "192.0.2.7:9").unwrap_err();
     assert_eq!(err.raw_os_error(), Some(nix::libc::EPERM));
     // Other destinations/ports are untouched (the log rule only logs).
-    sock.send_to(b"x", "192.0.2.7:10").expect("allowed (logged)");
+    sock.send_to(b"x", "192.0.2.7:10")
+        .expect("allowed (logged)");
     // Loopback is exempt by default.
     let lo = UdpSocket::bind("127.0.0.1:0").unwrap();
-    sock.send_to(b"x", lo.local_addr().unwrap()).expect("loopback bypass");
+    sock.send_to(b"x", lo.local_addr().unwrap())
+        .expect("loopback bypass");
 
     assert!(f.stat(StatReason::EgressDrop) >= 2);
     assert!(f.stat(StatReason::EgressLog) >= 1);
     let mut saw_drop = false;
     while let Some(item) = rb.next() {
         let e = kavachd::events::decode(&item).unwrap();
-        if e.kind == EventKind::EgressVerdict as u8 && e.verdict == Verdict::Drop as u8 && e.pid == me {
+        if e.kind == EventKind::EgressVerdict as u8
+            && e.verdict == Verdict::Drop as u8
+            && e.pid == me
+        {
             saw_drop = true;
         }
     }
@@ -468,20 +622,47 @@ log = {{ to = "192.0.2.0/24" }}
     let dir = tempfile::tempdir_in("/var/tmp").unwrap();
     let copy = dir.path().join("kv-true");
     std::fs::copy("/usr/bin/true", &copy).unwrap();
-    assert!(std::process::Command::new(&copy).status().unwrap().success());
+    assert!(
+        std::process::Command::new(&copy)
+            .status()
+            .unwrap()
+            .success()
+    );
     let mut copy_key = None;
     while let Some(item) = rb.next() {
         let e = kavachd::events::decode(&item).unwrap();
         if e.kind == EventKind::Exec as u8 && e.comm.starts_with(b"kv-true") {
-            copy_key = Some(ExeKey { dev: e.rule_id, generation: e.generation, ino: e.identity });
+            copy_key = Some(ExeKey {
+                dev: e.rule_id,
+                generation: e.generation,
+                ino: e.identity,
+            });
         }
     }
     let copy_key = copy_key.expect("exec of the copy was reported");
     // (creating the 0755 copy already counted as a write-open of an executable)
     let s0 = f.k().exe_dirty(&copy_key).unwrap();
-    f.k().set_exe_class(&copy_key, ExeClass { mask: [1, 1], seq_at_hash: s0, _reserved: 0 }).unwrap();
-    drop(std::fs::OpenOptions::new().append(true).open(&copy).unwrap());
-    assert_eq!(f.k().exe_dirty(&copy_key).unwrap(), s0 + 1, "write-open bumped the dirty sequence");
+    f.k()
+        .set_exe_class(
+            &copy_key,
+            ExeClass {
+                mask: [1, 1],
+                seq_at_hash: s0,
+                _reserved: 0,
+            },
+        )
+        .unwrap();
+    drop(
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&copy)
+            .unwrap(),
+    );
+    assert_eq!(
+        f.k().exe_dirty(&copy_key).unwrap(),
+        s0 + 1,
+        "write-open bumped the dirty sequence"
+    );
     let mut tainted = false;
     while let Some(item) = rb.next() {
         let e = kavachd::events::decode(&item).unwrap();

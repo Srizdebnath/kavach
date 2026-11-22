@@ -1,0 +1,36 @@
+# Example Kavach policy — lives in git, reviewed like code, compiled + signed in CI.
+#
+#   kavachctl compile examples/kavach.toml
+#   kavachctl sign examples/kavach.toml --key ci.key -o policy.kvb --fleet default
+#   kavachctl apply policy.kvb --dry-run && kavachctl apply policy.kvb
+version = 1
+
+[defaults]
+egress  = "allow"     # observe-first: flip to "drop" for zero-trust egress
+ingress = "drop"      # new inbound flows only; replies to our own flows always pass
+fail    = "closed"
+
+[sets]
+resolvers = ["1.1.1.1", "1.0.0.1", "9.9.9.9", "2606:4700:4700::1111"]
+testnet   = ["192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24"]
+
+[[rule]]
+id      = "no-curl-to-testnet"
+comment = "identity, not IP: only this binary is blocked"
+who     = { exe = "/usr/bin/curl" }
+deny    = { to = "@testnet" }
+
+[[rule]]
+id    = "dns-only-to-resolvers-for-root"
+who   = { user = "root" }
+log   = { to = "@resolvers", port = 53, proto = "udp" }
+
+[[rule]]
+id    = "temporary-debug-port"
+deny  = { to = "203.0.113.50", port = "8000-8999", proto = "tcp" }
+ttl   = "7d"
+
+[[rule]]
+id        = "ssh-from-lan"
+direction = "ingress"
+allow     = { from = ["10.0.0.0/8", "192.168.0.0/16"], port = 22, proto = "tcp" }

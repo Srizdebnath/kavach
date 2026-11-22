@@ -50,11 +50,17 @@ impl BlockKey {
     /// Build a blocklist key from a CIDR. Host bits are cleared.
     pub fn from_cidr(ip: IpAddr, len: u8) -> Self {
         let prefixlen = mapped_prefix(ip, len);
-        Self { prefixlen, addr: mask_addr(to_mapped(ip), prefixlen) }
+        Self {
+            prefixlen,
+            addr: mask_addr(to_mapped(ip), prefixlen),
+        }
     }
     /// Full-length key used to look up a single address.
     pub fn host(ip: IpAddr) -> Self {
-        Self { prefixlen: 128, addr: to_mapped(ip) }
+        Self {
+            prefixlen: 128,
+            addr: to_mapped(ip),
+        }
     }
 }
 
@@ -64,10 +70,18 @@ impl AddrKey {
 
     pub fn from_cidr(slot: u32, ip: IpAddr, len: u8) -> Self {
         let p = mapped_prefix(ip, len);
-        Self { prefixlen: Self::HEADER_BITS + p, slot, addr: mask_addr(to_mapped(ip), p) }
+        Self {
+            prefixlen: Self::HEADER_BITS + p,
+            slot,
+            addr: mask_addr(to_mapped(ip), p),
+        }
     }
     pub fn host(slot: u32, addr: [u8; 16]) -> Self {
-        Self { prefixlen: Self::HEADER_BITS + 128, slot, addr }
+        Self {
+            prefixlen: Self::HEADER_BITS + 128,
+            slot,
+            addr,
+        }
     }
 }
 
@@ -77,7 +91,9 @@ impl SrcKey {
         let m = to_mapped(ip);
         match ip {
             IpAddr::V4(_) => Self { addr: m },
-            IpAddr::V6(_) => Self { addr: mask_addr(m, KV_RATE_V6_PREFIX) },
+            IpAddr::V6(_) => Self {
+                addr: mask_addr(m, KV_RATE_V6_PREFIX),
+            },
         }
     }
 }

@@ -160,6 +160,15 @@ struct {
 	__type(value, __u32);
 } policy_gen SEC(".maps");
 
+/* tgid of kavachd (for KeyReport events). */
+struct {
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, __u32);
+} self_tgid SEC(".maps");
+
 struct {
 	__uint(pinning, LIBBPF_PIN_BY_NAME);
 	__uint(type, BPF_MAP_TYPE_RINGBUF);

@@ -73,14 +73,25 @@ fn rule(id: u32, verdict: Verdict) -> Rule {
 }
 
 fn q(remote: [u8; 16], port: u16, mask: u64) -> FlowQuery {
-    FlowQuery { dir: KV_DIR_EGRESS, mask, remote, port, proto: KV_PROTO_TCP }
+    FlowQuery {
+        dir: KV_DIR_EGRESS,
+        mask,
+        remote,
+        port,
+        proto: KV_PROTO_TCP,
+    }
 }
 
 #[test]
 fn default_applies_when_nothing_matches() {
     let p = policy(&[], Verdict::Log);
     let s = Snapshot::new(&p, 4).unwrap();
-    let d = evaluate(&Mem::default(), &s, &q(to_mapped(v4(1, 1, 1, 1)), 443, 0), 0);
+    let d = evaluate(
+        &Mem::default(),
+        &s,
+        &q(to_mapped(v4(1, 1, 1, 1)), 443, 0),
+        0,
+    );
     assert_eq!(d.verdict, Verdict::Log);
     assert_eq!(d.rule_id, 0);
 }
@@ -115,13 +126,26 @@ fn remote_set_uses_longest_prefix_bitmap() {
     let net = mask_addr(to_mapped(v4(10, 0, 0, 0)), 104);
     t.sets.push((1, 104, net, 0b100));
     // the more specific prefix is flattened by the compiler to include set 3 too
-    t.sets.push((1, 120, mask_addr(to_mapped(v4(10, 1, 2, 0)), 120), 0b101));
-    assert_eq!(evaluate(&t, &s, &q(to_mapped(v4(10, 9, 9, 9)), 1, 0), 0).verdict, Verdict::Allow);
-    assert_eq!(evaluate(&t, &s, &q(to_mapped(v4(10, 1, 2, 3)), 1, 0), 0).verdict, Verdict::Allow);
-    assert_eq!(evaluate(&t, &s, &q(to_mapped(v4(11, 0, 0, 1)), 1, 0), 0).verdict, Verdict::Drop);
+    t.sets
+        .push((1, 120, mask_addr(to_mapped(v4(10, 1, 2, 0)), 120), 0b101));
+    assert_eq!(
+        evaluate(&t, &s, &q(to_mapped(v4(10, 9, 9, 9)), 1, 0), 0).verdict,
+        Verdict::Allow
+    );
+    assert_eq!(
+        evaluate(&t, &s, &q(to_mapped(v4(10, 1, 2, 3)), 1, 0), 0).verdict,
+        Verdict::Allow
+    );
+    assert_eq!(
+        evaluate(&t, &s, &q(to_mapped(v4(11, 0, 0, 1)), 1, 0), 0).verdict,
+        Verdict::Drop
+    );
     // slot 0 entries are invisible to a slot-1 snapshot
     let s0 = Snapshot::new(&p, 2).unwrap();
-    assert_eq!(evaluate(&t, &s0, &q(to_mapped(v4(10, 9, 9, 9)), 1, 0), 0).verdict, Verdict::Drop);
+    assert_eq!(
+        evaluate(&t, &s0, &q(to_mapped(v4(10, 9, 9, 9)), 1, 0), 0).verdict,
+        Verdict::Drop
+    );
 }
 
 #[test]
@@ -131,8 +155,14 @@ fn ttl_expires_rule() {
     let p = policy(&[r], Verdict::Drop);
     let s = Snapshot::new(&p, 0).unwrap();
     let t = Mem::default();
-    assert_eq!(evaluate(&t, &s, &q([0; 16], 1, 0), 999).verdict, Verdict::Allow);
-    assert_eq!(evaluate(&t, &s, &q([0; 16], 1, 0), 1_000).verdict, Verdict::Drop);
+    assert_eq!(
+        evaluate(&t, &s, &q([0; 16], 1, 0), 999).verdict,
+        Verdict::Allow
+    );
+    assert_eq!(
+        evaluate(&t, &s, &q([0; 16], 1, 0), 1_000).verdict,
+        Verdict::Drop
+    );
 }
 
 #[test]
@@ -163,21 +193,52 @@ fn identity_mask_and_selectors() {
     p.hdr.wild_cgroup = !0b10;
     p.hdr.sel_used = 0b11;
     let s = Snapshot::new(&p, 3).unwrap(); // slot 1
-    let exe = ExeKey { dev: 8, generation: 1, ino: 42 };
+    let exe = ExeKey {
+        dev: 8,
+        generation: 1,
+        ino: 42,
+    };
     let mut t = Mem::default();
-    t.exe.insert(exe, ExeClass { mask: [0, 0b01], seq_at_hash: 0, _reserved: 0 });
+    t.exe.insert(
+        exe,
+        ExeClass {
+            mask: [0, 0b01],
+            seq_at_hash: 0,
+            _reserved: 0,
+        },
+    );
     t.uid.insert(1000, ClassVal { mask: [0, 0b01] });
     t.cg.insert(77, ClassVal { mask: [0, 0b10] });
 
-    let ok = Who { exe, uid: 1000, cgroups: &[5] };
+    let ok = Who {
+        exe,
+        uid: 1000,
+        cgroups: &[5],
+    };
     assert_eq!(identity_mask(&t, &s, &ok), 0b01);
-    let wrong_uid = Who { exe, uid: 0, cgroups: &[5] };
+    let wrong_uid = Who {
+        exe,
+        uid: 0,
+        cgroups: &[5],
+    };
     assert_eq!(identity_mask(&t, &s, &wrong_uid), 0);
     // cgroup 77 is an ancestor of the leaf
-    let in_tree = Who { exe: ExeKey::default(), uid: 0, cgroups: &[99, 77, 1] };
+    let in_tree = Who {
+        exe: ExeKey::default(),
+        uid: 0,
+        cgroups: &[99, 77, 1],
+    };
     assert_eq!(identity_mask(&t, &s, &in_tree), 0b10);
 
-    let d = decide_egress(&t, &Clock(0), &s, &ok, to_mapped(v4(8, 8, 8, 8)), 53, KV_PROTO_UDP);
+    let d = decide_egress(
+        &t,
+        &Clock(0),
+        &s,
+        &ok,
+        to_mapped(v4(8, 8, 8, 8)),
+        53,
+        KV_PROTO_UDP,
+    );
     assert_eq!(d.rule_id, 10);
 }
 
@@ -187,11 +248,26 @@ fn dirty_executable_loses_identity() {
     p.hdr.wild_exe = !1;
     p.hdr.sel_used = 1;
     let s = Snapshot::new(&p, 0).unwrap();
-    let exe = ExeKey { dev: 1, generation: 0, ino: 9 };
+    let exe = ExeKey {
+        dev: 1,
+        generation: 0,
+        ino: 9,
+    };
     let mut t = Mem::default();
-    t.exe.insert(exe, ExeClass { mask: [1, 0], seq_at_hash: 3, _reserved: 0 });
+    t.exe.insert(
+        exe,
+        ExeClass {
+            mask: [1, 0],
+            seq_at_hash: 3,
+            _reserved: 0,
+        },
+    );
     t.dirty.insert(exe, 3);
-    let who = Who { exe, uid: 0, cgroups: &[] };
+    let who = Who {
+        exe,
+        uid: 0,
+        cgroups: &[],
+    };
     assert_eq!(identity_mask(&t, &s, &who), 1);
     t.dirty.insert(exe, 4); // written after hashing
     assert_eq!(identity_mask(&t, &s, &who), 0);
@@ -204,11 +280,17 @@ fn loopback_bypass() {
     let t = Mem::default();
     let who = Who::default();
     let lo = to_mapped(v4(127, 0, 0, 1));
-    assert_eq!(decide_egress(&t, &Clock(0), &s, &who, lo, 80, 6).verdict, Verdict::Allow);
+    assert_eq!(
+        decide_egress(&t, &Clock(0), &s, &who, lo, 80, 6).verdict,
+        Verdict::Allow
+    );
     let mut p2 = policy(&[], Verdict::Drop);
     p2.hdr.flags |= KV_POL_F_NO_LOOPBACK_BYPASS;
     let s2 = Snapshot::new(&p2, 0).unwrap();
-    assert_eq!(decide_egress(&t, &Clock(0), &s2, &who, lo, 80, 6).verdict, Verdict::Drop);
+    assert_eq!(
+        decide_egress(&t, &Clock(0), &s2, &who, lo, 80, 6).verdict,
+        Verdict::Drop
+    );
 }
 
 #[test]
@@ -221,9 +303,18 @@ fn explain_trace_reports_reasons() {
     let p = policy(&[a, b, c], Verdict::Drop);
     let s = Snapshot::new(&p, 0).unwrap();
     let mut seen = Vec::new();
-    let d = evaluate_traced(&Mem::default(), &s, &q([0; 16], 1, 1), 0, |i, m| seen.push((i, m)));
+    let d = evaluate_traced(&Mem::default(), &s, &q([0; 16], 1, 1), 0, |i, m| {
+        seen.push((i, m))
+    });
     assert_eq!(d.rule_id, 3);
-    assert_eq!(seen, [(0, Some(Miss::Protocol)), (1, Some(Miss::Identity)), (2, None)]);
+    assert_eq!(
+        seen,
+        [
+            (0, Some(Miss::Protocol)),
+            (1, Some(Miss::Identity)),
+            (2, None)
+        ]
+    );
 }
 
 mod prop {
@@ -231,7 +322,16 @@ mod prop {
     use proptest::prelude::*;
 
     fn arb_rule() -> impl Strategy<Value = Rule> {
-        (any::<u64>(), 1u32..1000, 0u32..4, any::<u16>(), any::<u16>(), 0u8..3, 0u8..4, 0u8..2)
+        (
+            any::<u64>(),
+            1u32..1000,
+            0u32..4,
+            any::<u16>(),
+            any::<u16>(),
+            0u8..3,
+            0u8..4,
+            0u8..2,
+        )
             .prop_map(|(sel, id, set, a, b, p, v, f)| Rule {
                 sel: sel & 0b111,
                 id,

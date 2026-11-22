@@ -129,6 +129,9 @@ pub enum EventKind {
     Exec = 4,
     /// A classified executable was opened for write; its classification was revoked.
     ExeTainted = 5,
+    /// kavachd itself opened a file read-only: here is the kernel's key for that inode
+    /// (exact pre-classification of policy-named executables, even on btrfs/overlayfs).
+    KeyReport = 6,
 }
 
 // ---------------------------------------------------------------------------------------------

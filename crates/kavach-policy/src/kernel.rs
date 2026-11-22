@@ -138,7 +138,11 @@ impl Selector {
     pub fn cgroup_matches(&self, path: &str) -> bool {
         let path = path.trim_matches('/');
         self.cgroups.iter().any(|c| {
-            c.is_empty() || path == c || path.strip_prefix(c.as_str()).is_some_and(|r| r.starts_with('/'))
+            c.is_empty()
+                || path == c
+                || path
+                    .strip_prefix(c.as_str())
+                    .is_some_and(|r| r.starts_with('/'))
         })
     }
     pub fn matches(&self, f: &Facts<'_>) -> bool {
@@ -158,7 +162,11 @@ pub struct FlatPrefix {
 
 impl FlatPrefix {
     pub fn key(&self, slot: u32) -> AddrKey {
-        AddrKey { prefixlen: AddrKey::HEADER_BITS + self.prefix, slot, addr: self.addr }
+        AddrKey {
+            prefixlen: AddrKey::HEADER_BITS + self.prefix,
+            slot,
+            addr: self.addr,
+        }
     }
 }
 
@@ -174,7 +182,11 @@ pub fn flatten_sets(entries: &[(u32, IpNet)]) -> Vec<FlatPrefix> {
         .map(|(id, net)| {
             let ip: IpAddr = net.network();
             let prefix = mapped_prefix(ip, net.prefix_len());
-            FlatPrefix { prefix, addr: mask_addr(to_mapped(ip), prefix), bitmap: 1 << (id - 1) }
+            FlatPrefix {
+                prefix,
+                addr: mask_addr(to_mapped(ip), prefix),
+                bitmap: 1 << (id - 1),
+            }
         })
         .collect();
     // Merge identical prefixes first.
@@ -207,28 +219,49 @@ pub struct OfflineTables {
 }
 
 impl OfflineTables {
-    pub fn new(policy: &CompiledPolicy, facts: &Facts<'_>, extra: &[(u32, IpNet)], slot: u32) -> Self {
+    pub fn new(
+        policy: &CompiledPolicy,
+        facts: &Facts<'_>,
+        extra: &[(u32, IpNet)],
+        slot: u32,
+    ) -> Self {
         let mut entries = policy.static_set_entries();
         entries.extend_from_slice(extra);
-        Self { mask: policy.selector_mask(facts), slot, flat: flatten_sets(&entries) }
+        Self {
+            mask: policy.selector_mask(facts),
+            slot,
+            flat: flatten_sets(&entries),
+        }
     }
 }
 
-const PROBE_KEY: ExeKey = ExeKey { dev: u32::MAX, generation: u32::MAX, ino: u64::MAX };
+const PROBE_KEY: ExeKey = ExeKey {
+    dev: u32::MAX,
+    generation: u32::MAX,
+    ino: u64::MAX,
+};
 
 impl kavach_core::Tables for OfflineTables {
     fn exe_class(&self, key: &ExeKey) -> Option<ExeClass> {
         // The facts were matched host-side: expose them as one pre-classified "executable".
-        (*key == PROBE_KEY).then_some(ExeClass { mask: [self.mask; 2], seq_at_hash: 0, _reserved: 0 })
+        (*key == PROBE_KEY).then_some(ExeClass {
+            mask: [self.mask; 2],
+            seq_at_hash: 0,
+            _reserved: 0,
+        })
     }
     fn exe_dirty(&self, _key: &ExeKey) -> u64 {
         0
     }
     fn uid_class(&self, uid: u32) -> Option<ClassVal> {
-        (uid == u32::MAX).then_some(ClassVal { mask: [self.mask; 2] })
+        (uid == u32::MAX).then_some(ClassVal {
+            mask: [self.mask; 2],
+        })
     }
     fn cgroup_class(&self, id: u64) -> Option<ClassVal> {
-        (id == u64::MAX).then_some(ClassVal { mask: [self.mask; 2] })
+        (id == u64::MAX).then_some(ClassVal {
+            mask: [self.mask; 2],
+        })
     }
     fn remote_sets(&self, slot: u32, addr: &[u8; 16]) -> u64 {
         if slot != self.slot {
@@ -245,6 +278,10 @@ impl kavach_core::Tables for OfflineTables {
 impl OfflineTables {
     /// The `Who` that makes `kavach_core::identity_mask` return exactly `self.mask`.
     pub fn who(&self) -> kavach_core::Who<'static> {
-        kavach_core::Who { exe: PROBE_KEY, uid: u32::MAX, cgroups: &[u64::MAX] }
+        kavach_core::Who {
+            exe: PROBE_KEY,
+            uid: u32::MAX,
+            cgroups: &[u64::MAX],
+        }
     }
 }

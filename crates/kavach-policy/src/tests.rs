@@ -3,8 +3,8 @@ use kavach_common::addr::{to_mapped, v4};
 use kavach_core::{FlowQuery, Snapshot, Tables};
 
 use crate::bundle::{self, BundleError, TrustPolicy};
-use crate::compile::{compile, parse_duration, Severity};
-use crate::kernel::{flatten_sets, Clocks, Facts, OfflineTables};
+use crate::compile::{Severity, compile, parse_duration};
+use crate::kernel::{Clocks, Facts, OfflineTables, flatten_sets};
 
 const SHA_A: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -48,7 +48,11 @@ budget = { calls_per_min = 60, usd_per_day = 5.0 }
 fn errors(src: &str) -> Vec<String> {
     match compile(src, 1_000) {
         Ok(_) => vec![],
-        Err(d) => d.into_iter().filter(|d| d.severity == Severity::Error).map(|d| d.to_string()).collect(),
+        Err(d) => d
+            .into_iter()
+            .filter(|d| d.severity == Severity::Error)
+            .map(|d| d.to_string())
+            .collect(),
     }
 }
 
@@ -101,7 +105,9 @@ deny = {}
 
 #[test]
 fn require_ttl_enforced() {
-    let e = errors("version = 1\n[defaults]\nrequire_ttl = true\n[[rule]]\nid='x'\nallow={ to='1.1.1.1' }\n");
+    let e = errors(
+        "version = 1\n[defaults]\nrequire_ttl = true\n[[rule]]\nid='x'\nallow={ to='1.1.1.1' }\n",
+    );
     assert!(e.iter().any(|m| m.contains("ttl is required")));
 }
 
@@ -117,7 +123,10 @@ id = "block-evil"
 deny = { to = "198.51.100.0/24", port = 443, proto = "tcp" }
 "#;
     let e = errors(src).join("\n");
-    assert!(e.contains("[block-evil]") && e.contains("contradicts"), "{e}");
+    assert!(
+        e.contains("[block-evil]") && e.contains("contradicts"),
+        "{e}"
+    );
 
     let src = r#"
 version = 1
@@ -128,8 +137,15 @@ allow = { to = "10.0.0.0/8" }
 id = "narrow"
 allow = { to = "10.1.0.0/16", port = 22, proto = "tcp" }
 "#;
-    assert!(errors(src).join("\n").contains("shadowed by earlier rule \"wide\""));
-    let relaxed = src.replace("version = 1", "version = 1\n[defaults]\nallow_shadowed = true");
+    assert!(
+        errors(src)
+            .join("\n")
+            .contains("shadowed by earlier rule \"wide\"")
+    );
+    let relaxed = src.replace(
+        "version = 1",
+        "version = 1\n[defaults]\nallow_shadowed = true",
+    );
     let out = compile(&relaxed, 0).expect("warning only");
     assert!(out.warnings.iter().any(|w| w.message.contains("redundant")));
 
@@ -148,7 +164,9 @@ allow = { to = "10.0.0.0/8" }
 
 #[test]
 fn ingress_who_and_v04_selectors_rejected() {
-    let e = errors("version=1\n[[rule]]\nid='i'\ndirection='ingress'\nwho={user=0}\nallow={from='1.1.1.1'}\n");
+    let e = errors(
+        "version=1\n[[rule]]\nid='i'\ndirection='ingress'\nwho={user=0}\nallow={from='1.1.1.1'}\n",
+    );
     assert!(e[0].contains("v0.4"));
     let e = errors("version=1\n[[rule]]\nid='k'\nwho={k8s='app=db'}\ndeny={}\n");
     assert!(e[0].contains("v0.4"));
@@ -156,8 +174,16 @@ fn ingress_who_and_v04_selectors_rejected() {
 
 #[test]
 fn interpreter_warning() {
-    let out = compile("version=1\n[[rule]]\nid='py'\nwho={exe='/usr/bin/python3'}\nallow={}\n", 0).unwrap();
-    assert!(out.warnings.iter().any(|w| w.message.contains("interpreter")));
+    let out = compile(
+        "version=1\n[[rule]]\nid='py'\nwho={exe='/usr/bin/python3'}\nallow={}\n",
+        0,
+    )
+    .unwrap();
+    assert!(
+        out.warnings
+            .iter()
+            .any(|w| w.message.contains("interpreter"))
+    );
 }
 
 #[test]
@@ -188,7 +214,10 @@ fn flatten_unions_covering_sets() {
 #[test]
 fn kernel_lowering_and_offline_explain() {
     let p = compile(EXAMPLE, 0).unwrap().policy;
-    let clocks = Clocks { unix_ns: 0, boot_ns: 5 };
+    let clocks = Clocks {
+        unix_ns: 0,
+        boot_ns: 5,
+    };
     let k = p.to_kernel(7, 42, clocks);
     assert_eq!(k.hdr.n_rules, 5);
     assert_eq!(k.hdr.generation, 7);
@@ -200,7 +229,11 @@ fn kernel_lowering_and_offline_explain() {
     assert_eq!(k.rules[0].not_after_ns, 5 + 30 * 86_400 * 1_000_000_000);
 
     let sha: [u8; 32] = [0xaa; 32];
-    let facts = Facts { sha256: Some(sha), user_name: Some("svc-pay"), ..Default::default() };
+    let facts = Facts {
+        sha256: Some(sha),
+        user_name: Some("svc-pay"),
+        ..Default::default()
+    };
     let t = OfflineTables::new(&p, &facts, &[], 1);
     assert_eq!(t.mask, 0b01);
     let snap = Snapshot::new(&k, 7).unwrap(); // gen 7 → slot 1
@@ -217,13 +250,22 @@ fn kernel_lowering_and_offline_explain() {
     assert_eq!((d.verdict, d.rule_id), (Verdict::Allow, 1));
     // Same flow from someone else → default drop.
     let q2 = FlowQuery { mask: 0, ..q };
-    assert_eq!(kavach_core::evaluate(&t, &snap, &q2, 0).verdict, Verdict::Drop);
+    assert_eq!(
+        kavach_core::evaluate(&t, &snap, &q2, 0).verdict,
+        Verdict::Drop
+    );
     assert!(t.remote_sets(0, &q.remote) == 0, "slot isolation");
     let _ = SHA_A;
 }
 
 fn trust(vk: crate::VerifyingKey) -> TrustPolicy {
-    TrustPolicy { trusted: vec![vk], revoked: vec![], fleet: "prod".into(), active_serial: 1, now_unix: 100 }
+    TrustPolicy {
+        trusted: vec![vk],
+        revoked: vec![],
+        fleet: "prod".into(),
+        active_serial: 1,
+        now_unix: 100,
+    }
 }
 
 #[test]
@@ -238,11 +280,17 @@ fn bundle_roundtrip_and_rejections() {
     // tamper with the payload
     let mut bad = b.clone();
     bad[bundle::HEADER_LEN + 3] ^= 1;
-    assert_eq!(bundle::verify(&bad, &trust(sk.verifying_key()), true), Err(BundleError::Signature));
+    assert_eq!(
+        bundle::verify(&bad, &trust(sk.verifying_key()), true),
+        Err(BundleError::Signature)
+    );
     // tamper with the header serial (signed too)
     let mut bad = b.clone();
     bad[8] ^= 1;
-    assert_eq!(bundle::verify(&bad, &trust(sk.verifying_key()), true), Err(BundleError::Signature));
+    assert_eq!(
+        bundle::verify(&bad, &trust(sk.verifying_key()), true),
+        Err(BundleError::Signature)
+    );
     // wrong key
     let other = bundle::generate_key();
     assert!(matches!(
@@ -252,22 +300,37 @@ fn bundle_roundtrip_and_rejections() {
     // revoked
     let mut t = trust(sk.verifying_key());
     t.revoked.push(bundle::key_id(&sk.verifying_key()));
-    assert!(matches!(bundle::verify(&b, &t, true), Err(BundleError::RevokedKey(_))));
+    assert!(matches!(
+        bundle::verify(&b, &t, true),
+        Err(BundleError::RevokedKey(_))
+    ));
     // rollback
     let mut t = trust(sk.verifying_key());
     t.active_serial = 2;
-    assert!(matches!(bundle::verify(&b, &t, true), Err(BundleError::Rollback { .. })));
+    assert!(matches!(
+        bundle::verify(&b, &t, true),
+        Err(BundleError::Rollback { .. })
+    ));
     // fleet
     let mut t = trust(sk.verifying_key());
     t.fleet = "staging".into();
-    assert!(matches!(bundle::verify(&b, &t, true), Err(BundleError::Fleet { .. })));
+    assert!(matches!(
+        bundle::verify(&b, &t, true),
+        Err(BundleError::Fleet { .. })
+    ));
     // expiry: strict refuses, non-strict flags
     let mut t = trust(sk.verifying_key());
     t.now_unix = 5_000;
-    assert!(matches!(bundle::verify(&b, &t, true), Err(BundleError::Expired(1_000))));
+    assert!(matches!(
+        bundle::verify(&b, &t, true),
+        Err(BundleError::Expired(1_000))
+    ));
     assert!(bundle::verify(&b, &t, false).unwrap().expired);
     // truncation
-    assert_eq!(bundle::verify(&b[..b.len() - 1], &trust(sk.verifying_key()), true), Err(BundleError::Size));
+    assert_eq!(
+        bundle::verify(&b[..b.len() - 1], &trust(sk.verifying_key()), true),
+        Err(BundleError::Size)
+    );
 }
 
 #[test]
@@ -278,7 +341,10 @@ fn diff_reports_changes() {
         "[[rule]]\nid = \"new\"\ndeny = { to = \"192.0.2.1\" }\n\n[[agent]]",
     );
     let b = compile(&src_b, 0).unwrap().policy;
-    let d: Vec<String> = crate::diff::diff(&a, &b).iter().map(ToString::to_string).collect();
+    let d: Vec<String> = crate::diff::diff(&a, &b)
+        .iter()
+        .map(ToString::to_string)
+        .collect();
     assert!(d.contains(&"~ rule dns".to_string()), "{d:?}");
     assert!(d.contains(&"+ rule new".to_string()), "{d:?}");
 }

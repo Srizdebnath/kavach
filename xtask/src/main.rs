@@ -27,7 +27,10 @@ enum Cmd {
 }
 
 fn root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .to_path_buf()
 }
 
 fn main() -> Result<()> {
@@ -61,7 +64,8 @@ fn render_header() -> Result<String> {
         h = h.replace(from, to);
     }
     // Mirror the Rust layout assertions on the C side.
-    let mut asserts = String::from("\n/* Layout must match crates/kavach-common (checked at compile time). */\n");
+    let mut asserts =
+        String::from("\n/* Layout must match crates/kavach-common (checked at compile time). */\n");
     for (name, size) in kavach_common::abi::LAYOUT {
         asserts.push_str(&format!(
             "_Static_assert(sizeof(struct {name}) == {size}, \"ABI drift: {name}\");\n"
@@ -96,7 +100,14 @@ fn codegen(check: bool) -> Result<()> {
 fn vmlinux() -> Result<()> {
     let path = root().join("bpf/include/vmlinux.h");
     let out = Command::new("bpftool")
-        .args(["btf", "dump", "file", "/sys/kernel/btf/vmlinux", "format", "c"])
+        .args([
+            "btf",
+            "dump",
+            "file",
+            "/sys/kernel/btf/vmlinux",
+            "format",
+            "c",
+        ])
         .output()
         .context("running bpftool (install `bpf`/`bpftool`)")?;
     if !out.status.success() {

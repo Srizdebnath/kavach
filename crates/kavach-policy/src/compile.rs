@@ -192,7 +192,11 @@ pub fn parse_duration(s: &str) -> Result<u64, String> {
         "h" => 3600,
         "d" => 86_400,
         "w" => 7 * 86_400,
-        _ => return Err(format!("invalid duration unit in {s:?} (use s, m, h, d, w)")),
+        _ => {
+            return Err(format!(
+                "invalid duration unit in {s:?} (use s, m, h, d, w)"
+            ));
+        }
     };
     n.checked_mul(mul)
         .filter(|v| *v > 0)
@@ -211,7 +215,9 @@ fn parse_proto(p: Option<&str>) -> Result<u8, String> {
 }
 
 fn parse_ports(p: &Option<OneOrMany<PortSpec>>) -> Result<Vec<(u16, u16)>, String> {
-    let Some(p) = p else { return Ok(vec![(0, u16::MAX)]) };
+    let Some(p) = p else {
+        return Ok(vec![(0, u16::MAX)]);
+    };
     let mut out = Vec::new();
     for spec in p.to_vec() {
         match spec {
@@ -220,8 +226,14 @@ fn parse_ports(p: &Option<OneOrMany<PortSpec>>) -> Result<Vec<(u16, u16)>, Strin
                 let (a, b) = r
                     .split_once('-')
                     .ok_or_else(|| format!("invalid port range {r:?} (use \"lo-hi\")"))?;
-                let a: u16 = a.trim().parse().map_err(|_| format!("invalid port {a:?}"))?;
-                let b: u16 = b.trim().parse().map_err(|_| format!("invalid port {b:?}"))?;
+                let a: u16 = a
+                    .trim()
+                    .parse()
+                    .map_err(|_| format!("invalid port {a:?}"))?;
+                let b: u16 = b
+                    .trim()
+                    .parse()
+                    .map_err(|_| format!("invalid port {b:?}"))?;
                 if a > b {
                     return Err(format!("port range {r:?} is reversed"));
                 }
@@ -239,7 +251,8 @@ fn parse_sha256(s: &str) -> Result<[u8; 32], String> {
         .strip_prefix("sha256:")
         .ok_or_else(|| format!("binary {s:?} must look like \"sha256:<64 hex digits>\""))?;
     let v = hex::decode(hexpart).map_err(|_| format!("binary {s:?}: invalid hex"))?;
-    v.try_into().map_err(|_| format!("binary {s:?}: digest must be 32 bytes"))
+    v.try_into()
+        .map_err(|_| format!("binary {s:?}: digest must be 32 bytes"))
 }
 
 fn is_fqdn(s: &str) -> bool {
@@ -275,7 +288,9 @@ fn parse_remote(
             if depth > 4 {
                 return Err(format!("set reference cycle at {item:?}"));
             }
-            let inner = named.get(name).ok_or_else(|| format!("unknown set {item:?}"))?;
+            let inner = named
+                .get(name)
+                .ok_or_else(|| format!("unknown set {item:?}"))?;
             match parse_remote(inner, named, depth + 1)? {
                 Remote::Any => return Ok(Remote::Any),
                 Remote::Entries(c, f) => {
@@ -311,7 +326,11 @@ fn net_contains(outer: &IpNet, inner: &IpNet) -> bool {
 /// Compile policy source. `now_unix` anchors TTLs (pass the CI build time).
 pub fn compile(src: &str, now_unix: u64) -> Result<CompileOutput, Vec<Diagnostic>> {
     let file = PolicyFile::parse(src).map_err(|e| {
-        vec![Diagnostic { severity: Severity::Error, rule: None, message: e.to_string() }]
+        vec![Diagnostic {
+            severity: Severity::Error,
+            rule: None,
+            message: e.to_string(),
+        }]
     })?;
     compile_file(&file, src.as_bytes(), now_unix)
 }
@@ -323,7 +342,10 @@ pub fn compile_file(
 ) -> Result<CompileOutput, Vec<Diagnostic>> {
     let mut d = Diags::default();
     if file.version != 1 {
-        d.err(None, format!("unsupported policy version {} (expected 1)", file.version));
+        d.err(
+            None,
+            format!("unsupported policy version {} (expected 1)", file.version),
+        );
     }
 
     let mut selectors: BTreeMap<Selector, usize> = BTreeMap::new();
@@ -428,7 +450,10 @@ pub fn compile_file(
             sel.cgroups.dedup();
         }
         if dir == Direction::Ingress && !sel.is_any() {
-            d.err(rid, "ingress rules cannot use `who` yet (local service identity lands in v0.4)");
+            d.err(
+                rid,
+                "ingress rules cannot use `who` yet (local service identity lands in v0.4)",
+            );
         }
         let sel_mask = if sel.is_any() {
             0
@@ -439,7 +464,10 @@ pub fn compile_file(
                 n
             });
             if bit >= KV_MAX_SELECTORS as usize {
-                d.err(rid, format!("more than {KV_MAX_SELECTORS} distinct selectors"));
+                d.err(
+                    rid,
+                    format!("more than {KV_MAX_SELECTORS} distinct selectors"),
+                );
                 0
             } else {
                 1u64 << bit
@@ -475,11 +503,18 @@ pub fn compile_file(
                         _ => format!("rule:{}", r.id),
                     };
                     let id = *sets.entry((c.clone(), f.clone())).or_insert_with(|| {
-                        set_list.push(AddrSet { name, cidrs: c, fqdns: f });
+                        set_list.push(AddrSet {
+                            name,
+                            cidrs: c,
+                            fqdns: f,
+                        });
                         n
                     });
                     if id >= KV_MAX_SETS as usize {
-                        d.err(rid, format!("more than {KV_MAX_SETS} distinct address sets"));
+                        d.err(
+                            rid,
+                            format!("more than {KV_MAX_SETS} distinct address sets"),
+                        );
                         0
                     } else {
                         id as u32 + 1
@@ -538,14 +573,26 @@ pub fn compile_file(
     }
 
     if rules.len() > KV_MAX_RULES as usize {
-        d.err(None, format!("{} compiled rules exceed the limit of {KV_MAX_RULES}", rules.len()));
+        d.err(
+            None,
+            format!(
+                "{} compiled rules exceed the limit of {KV_MAX_RULES}",
+                rules.len()
+            ),
+        );
     }
     let entries: usize = set_list.iter().map(|s| s.cidrs.len() + s.fqdns.len()).sum();
     if entries > MAX_SET_ENTRIES {
-        d.err(None, format!("{entries} address-set entries exceed the limit of {MAX_SET_ENTRIES}"));
+        d.err(
+            None,
+            format!("{entries} address-set entries exceed the limit of {MAX_SET_ENTRIES}"),
+        );
     }
     if !file.agents.is_empty() {
-        d.warn(None, "[[agent]] policies are carried in the bundle but enforced only by the v0.4 gateway");
+        d.warn(
+            None,
+            "[[agent]] policies are carried in the bundle but enforced only by the v0.4 gateway",
+        );
     }
     if file.defaults.ingress == Action::Punt || file.defaults.egress == Action::Punt {
         d.err(None, "defaults cannot be `punt`");
@@ -571,7 +618,10 @@ pub fn compile_file(
         rules,
         agents: file.agents.clone(),
     };
-    Ok(CompileOutput { policy, warnings: d.0 })
+    Ok(CompileOutput {
+        policy,
+        warnings: d.0,
+    })
 }
 
 /// Executables whose identity says nothing about the code they run.
@@ -591,7 +641,9 @@ fn set_covers(sets: &[AddrSet], outer: u32, inner: u32) -> bool {
     // FQDNs resolve at runtime, so only CIDR-only sets can be proven to cover each other.
     o.fqdns.is_empty()
         && i.fqdns.is_empty()
-        && i.cidrs.iter().all(|ic| o.cidrs.iter().any(|oc| net_contains(oc, ic)))
+        && i.cidrs
+            .iter()
+            .all(|ic| o.cidrs.iter().any(|oc| net_contains(oc, ic)))
 }
 
 /// Rule `outer` matches every flow `inner` matches (so `inner`, if later, never fires).
@@ -626,7 +678,10 @@ fn check_shadowing(rules: &[CompiledRule], sets: &[AddrSet], allow: bool, d: &mu
                     ),
                 );
             } else if allow {
-                d.warn(Some(&inner.name), format!("redundant: shadowed by {:?}", outer.name));
+                d.warn(
+                    Some(&inner.name),
+                    format!("redundant: shadowed by {:?}", outer.name),
+                );
             } else {
                 d.err(
                     Some(&inner.name),

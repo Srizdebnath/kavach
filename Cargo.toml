@@ -6,6 +6,7 @@ members = [
     "crates/kavach-policy",
     "crates/kavach-api",
     "crates/kavachd",
+    "crates/kavachctl",
     "xtask",
 ]
 

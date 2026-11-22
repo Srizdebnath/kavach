@@ -198,7 +198,11 @@ pub fn peek_header(bytes: &[u8]) -> Result<BundleHeader, BundleError> {
 
 /// Verify and decode a bundle under `trust`. Strict mode rejects expired bundles; non-strict
 /// (used when re-loading the active bundle at boot) returns them flagged `expired`.
-pub fn verify(bytes: &[u8], trust: &TrustPolicy, strict_expiry: bool) -> Result<VerifiedBundle, BundleError> {
+pub fn verify(
+    bytes: &[u8],
+    trust: &TrustPolicy,
+    strict_expiry: bool,
+) -> Result<VerifiedBundle, BundleError> {
     if bytes.len() < HEADER_LEN + SIG_LEN || bytes.len() > HEADER_LEN + MAX_PAYLOAD + SIG_LEN {
         return Err(BundleError::Size);
     }
@@ -222,10 +226,16 @@ pub fn verify(bytes: &[u8], trust: &TrustPolicy, strict_expiry: bool) -> Result<
         .map_err(|_| BundleError::Signature)?;
     // Authenticated from here on.
     if header.fleet != trust.fleet {
-        return Err(BundleError::Fleet { got: header.fleet, want: trust.fleet.clone() });
+        return Err(BundleError::Fleet {
+            got: header.fleet,
+            want: trust.fleet.clone(),
+        });
     }
     if header.serial <= trust.active_serial {
-        return Err(BundleError::Rollback { got: header.serial, active: trust.active_serial });
+        return Err(BundleError::Rollback {
+            got: header.serial,
+            active: trust.active_serial,
+        });
     }
     let expired = header.not_after_unix != 0 && trust.now_unix >= header.not_after_unix;
     if expired && strict_expiry {
@@ -233,5 +243,9 @@ pub fn verify(bytes: &[u8], trust: &TrustPolicy, strict_expiry: bool) -> Result<
     }
     let policy: CompiledPolicy =
         postcard::from_bytes(payload).map_err(|e| BundleError::Decode(e.to_string()))?;
-    Ok(VerifiedBundle { header, policy, expired })
+    Ok(VerifiedBundle {
+        header,
+        policy,
+        expired,
+    })
 }

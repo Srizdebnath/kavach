@@ -70,11 +70,16 @@ pub fn exe_mask<T: Tables + ?Sized>(t: &T, key: &ExeKey, slot: u32) -> u64 {
 pub fn identity_mask<T: Tables + ?Sized>(t: &T, snap: &Snapshot<'_>, who: &Who<'_>) -> u64 {
     let h = &snap.policy.hdr;
     let slot = snap.slot();
-    let exe_m = if h.wild_exe == u64::MAX { 0 } else { exe_mask(t, &who.exe, slot) };
+    let exe_m = if h.wild_exe == u64::MAX {
+        0
+    } else {
+        exe_mask(t, &who.exe, slot)
+    };
     let uid_m = if h.wild_uid == u64::MAX {
         0
     } else {
-        t.uid_class(who.uid).map_or(0, |c| c.mask[(slot & 1) as usize])
+        t.uid_class(who.uid)
+            .map_or(0, |c| c.mask[(slot & 1) as usize])
     };
     let cg_m = if h.wild_cgroup == u64::MAX {
         0
@@ -185,12 +190,21 @@ pub fn evaluate_traced<T: Tables + ?Sized, F: FnMut(usize, Option<Miss>)>(
                     Verdict::Punt => (Verdict::Log, true),
                     other => (other, false),
                 };
-                return Decision { verdict, rule_id: r.id, rule_index: Some(i), punted };
+                return Decision {
+                    verdict,
+                    rule_id: r.id,
+                    rule_index: Some(i),
+                    punted,
+                };
             }
             Err(m) => trace(i, Some(m)),
         }
     }
-    let d = if q.dir == KV_DIR_EGRESS { pol.hdr.default_egress } else { pol.hdr.default_ingress };
+    let d = if q.dir == KV_DIR_EGRESS {
+        pol.hdr.default_egress
+    } else {
+        pol.hdr.default_ingress
+    };
     Decision {
         verdict: Verdict::from_u8(d).unwrap_or(Verdict::Drop),
         rule_id: 0,
@@ -223,10 +237,21 @@ pub fn decide_egress<T: Tables + ?Sized, P: Platform + ?Sized>(
     if snap.policy.hdr.flags & KV_POL_F_NO_LOOPBACK_BYPASS == 0
         && kavach_common::addr::is_loopback(remote)
     {
-        return Decision { verdict: Verdict::Allow, rule_id: 0, rule_index: None, punted: false };
+        return Decision {
+            verdict: Verdict::Allow,
+            rule_id: 0,
+            rule_index: None,
+            punted: false,
+        };
     }
     let mask = identity_mask(t, snap, who);
-    let q = FlowQuery { dir: KV_DIR_EGRESS, mask, remote, port, proto };
+    let q = FlowQuery {
+        dir: KV_DIR_EGRESS,
+        mask,
+        remote,
+        port,
+        proto,
+    };
     evaluate(t, snap, &q, p.now_ns())
 }
 

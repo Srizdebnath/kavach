@@ -10,7 +10,7 @@ pub mod diff;
 pub mod kernel;
 pub mod schema;
 
-pub use compile::{compile, CompileOutput, CompiledPolicy, Diagnostic, Severity};
+pub use compile::{CompileOutput, CompiledPolicy, Diagnostic, Severity, compile};
 pub use ed25519_dalek::{SigningKey, VerifyingKey};
 
 #[cfg(test)]

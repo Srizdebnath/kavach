@@ -267,11 +267,21 @@ int BPF_PROG(kavach_file_open, struct file *file, int ret)
 {
 	if (ret)
 		return ret;
-	if (!(BPF_CORE_READ(file, f_mode) & FMODE_WRITE))
-		return 0;
 	struct inode *ino = BPF_CORE_READ(file, f_inode);
-	if (ino)
+	if (!ino)
+		return 0;
+	if (BPF_CORE_READ(file, f_mode) & FMODE_WRITE) {
 		kv_taint(ino);
+		return 0;
+	}
+	/* Read-open by kavachd: report the kernel key of this inode (pre-classification). */
+	__u32 zero = 0;
+	__u32 *self = bpf_map_lookup_elem(&self_tgid, &zero);
+	if (self && *self && *self == (__u32)(bpf_get_current_pid_tgid() >> 32)) {
+		struct kv_exe_key k = {};
+		kv_inode_key(ino, &k);
+		kv_emit_exe(KV_EVENT_KIND_KEY_REPORT, &k);
+	}
 	return 0;
 }
 

@@ -10,7 +10,11 @@ pub enum Change {
     Added(String),
     Removed(String),
     Modified(String),
-    Moved { name: String, from: usize, to: usize },
+    Moved {
+        name: String,
+        from: usize,
+        to: usize,
+    },
     Defaults,
 }
 
@@ -46,7 +50,10 @@ fn describe(p: &CompiledPolicy, r: &CompiledRule) -> String {
         .join("|");
     let set = match r.remote_set {
         0 => "any".to_owned(),
-        n => p.sets.get(n as usize - 1).map_or("?".into(), |s| format!("{:?}{:?}", s.cidrs, s.fqdns)),
+        n => p
+            .sets
+            .get(n as usize - 1)
+            .map_or("?".into(), |s| format!("{:?}{:?}", s.cidrs, s.fqdns)),
     };
     format!(
         "dir={} sel={sel} proto={} ports={}-{} remote={set} verdict={} fail={} ttl={}",
@@ -63,12 +70,18 @@ pub fn diff(old: &CompiledPolicy, new: &CompiledPolicy) -> Vec<Change> {
     let order_a: Vec<&String> = {
         let mut v: Vec<_> = a.iter().collect();
         v.sort_by_key(|(_, (i, _))| *i);
-        v.into_iter().map(|(n, _)| n).filter(|n| b.contains_key(*n)).collect()
+        v.into_iter()
+            .map(|(n, _)| n)
+            .filter(|n| b.contains_key(*n))
+            .collect()
     };
     let order_b: Vec<&String> = {
         let mut v: Vec<_> = b.iter().collect();
         v.sort_by_key(|(_, (i, _))| *i);
-        v.into_iter().map(|(n, _)| n).filter(|n| a.contains_key(*n)).collect()
+        v.into_iter()
+            .map(|(n, _)| n)
+            .filter(|n| a.contains_key(*n))
+            .collect()
     };
     for (name, (_, desc)) in &a {
         match b.get(name) {
@@ -85,9 +98,14 @@ pub fn diff(old: &CompiledPolicy, new: &CompiledPolicy) -> Vec<Change> {
     // Order matters (first match wins): report relative moves among surviving rules.
     for (to, name) in order_b.iter().enumerate() {
         if let Some(from) = order_a.iter().position(|n| n == name)
-            && from != to {
-                out.push(Change::Moved { name: (*name).clone(), from, to });
-            }
+            && from != to
+        {
+            out.push(Change::Moved {
+                name: (*name).clone(),
+                from,
+                to,
+            });
+        }
     }
     out
 }

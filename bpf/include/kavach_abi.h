@@ -185,6 +185,11 @@ enum kv_event_kind
    * A classified executable was opened for write; its classification was revoked.
    */
   KV_EVENT_KIND_EXE_TAINTED = 5,
+  /**
+   * kavachd itself opened a file read-only: here is the kernel's key for that inode
+   * (exact pre-classification of policy-named executables, even on btrfs/overlayfs).
+   */
+  KV_EVENT_KIND_KEY_REPORT = 6,
 };
 #if __STDC_VERSION__ >= 202311L
 typedef enum kv_event_kind kv_event_kind;

@@ -71,7 +71,14 @@ impl Kernel {
             aya::maps::Map::Array(d) => Some(d),
             _ => None,
         });
-        Ok(Self { bpf, pin_dir: Some(pin_dir.to_path_buf()), sync_inner, xdp: vec![], tc: vec![], lsm: false })
+        Ok(Self {
+            bpf,
+            pin_dir: Some(pin_dir.to_path_buf()),
+            sync_inner,
+            xdp: vec![],
+            tc: vec![],
+            lsm: false,
+        })
     }
 
     fn link_pin(&self, name: &str) -> Option<PathBuf> {
@@ -98,7 +105,8 @@ impl Kernel {
         if let Some(pin) = pin.as_ref().filter(|p| p.exists()) {
             let old = PinnedLink::from_pin(pin).context("re-adopting pinned XDP link")?;
             let fd: FdLink = old.into();
-            prog.attach_to_link(aya::programs::xdp::XdpLink::try_from(fd)?).context("replacing XDP program on existing link")?;
+            prog.attach_to_link(aya::programs::xdp::XdpLink::try_from(fd)?)
+                .context("replacing XDP program on existing link")?;
             info!(iface, "XDP program replaced in place");
             return Ok("replaced".into());
         }
@@ -133,7 +141,10 @@ impl Kernel {
     pub fn attach_tc(&mut self, iface: &str) -> Result<()> {
         let cname = std::ffi::CString::new(iface)?;
         let _ = aya::programs::tc::qdisc_add_clsact(cname.as_c_str()); // needed (and harmless) for netlink
-        for (name, at) in [("kavach_tc_ingress", TcAttachType::Ingress), ("kavach_tc_egress", TcAttachType::Egress)] {
+        for (name, at) in [
+            ("kavach_tc_ingress", TcAttachType::Ingress),
+            ("kavach_tc_egress", TcAttachType::Egress),
+        ] {
             let pin = self.link_pin(&format!("{name}-{iface}"));
             let prog: &mut SchedClassifier = self
                 .bpf
@@ -144,7 +155,9 @@ impl Kernel {
                 prog.load()?;
             }
             let ifname = std::ffi::CString::new(iface)?;
-            let id = prog.attach(ifname.as_c_str(), at).with_context(|| format!("attaching {name} to {iface}"))?;
+            let id = prog
+                .attach(ifname.as_c_str(), at)
+                .with_context(|| format!("attaching {name} to {iface}"))?;
             if let Some(pin) = pin {
                 let link = prog.take_link(id)?;
                 match FdLink::try_from(link) {
@@ -155,7 +168,10 @@ impl Kernel {
                         }
                         fd.pin(&pin)?;
                     }
-                    Err(_) => warn!(iface, name, "TC attached via netlink (kernel < 6.6): not pinnable"),
+                    Err(_) => warn!(
+                        iface,
+                        name, "TC attached via netlink (kernel < 6.6): not pinnable"
+                    ),
                 }
             }
         }
@@ -178,7 +194,8 @@ impl Kernel {
                 .ok_or_else(|| anyhow!("{name} missing"))?
                 .try_into()?;
             if prog.fd().is_err() {
-                prog.load(hook, &btf).with_context(|| format!("loading {name}"))?;
+                prog.load(hook, &btf)
+                    .with_context(|| format!("loading {name}"))?;
             }
             let id = prog.attach().with_context(|| format!("attaching {name}"))?;
             if let Some(pin) = pin {
@@ -213,10 +230,10 @@ impl Kernel {
 
     /// Detach everything and remove every pin (kill-switch, NFR-REL-2).
     pub fn kill_switch(self) -> Result<()> {
-        if let Some(dir) = &self.pin_dir {
-            if dir.exists() {
-                std::fs::remove_dir_all(dir).with_context(|| format!("removing {}", dir.display()))?;
-            }
+        if let Some(dir) = &self.pin_dir
+            && dir.exists()
+        {
+            std::fs::remove_dir_all(dir).with_context(|| format!("removing {}", dir.display()))?;
         }
         drop(self.bpf); // closes program/link fds; unpinned links detach
         Ok(())
@@ -227,11 +244,16 @@ impl Kernel {
     // ---------------------------------------------------------------------------------------
 
     fn map(&mut self, name: &str) -> Result<&mut aya::maps::Map> {
-        self.bpf.map_mut(name).ok_or_else(|| anyhow!("map {name} missing"))
+        self.bpf
+            .map_mut(name)
+            .ok_or_else(|| anyhow!("map {name} missing"))
     }
 
     pub fn take_events(&mut self) -> Result<RingBuf<MapData>> {
-        let m = self.bpf.take_map("events").ok_or_else(|| anyhow!("events map missing"))?;
+        let m = self
+            .bpf
+            .take_map("events")
+            .ok_or_else(|| anyhow!("events map missing"))?;
         Ok(RingBuf::try_from(m)?)
     }
 
@@ -249,14 +271,23 @@ impl Kernel {
     pub fn block_add(&mut self, net: IpNet, expires_ns: u64, reason: u32) -> Result<()> {
         let mut t: LpmTrie<_, [u8; 16], BlockVal> = LpmTrie::try_from(self.map("blocklist")?)?;
         let k = BlockKey::from_cidr(net.network(), net.prefix_len());
-        t.insert(&Key::new(k.prefixlen, k.addr), &BlockVal { expires_ns, reason, _pad: 0 }, 0)?;
+        t.insert(
+            &Key::new(k.prefixlen, k.addr),
+            &BlockVal {
+                expires_ns,
+                reason,
+                _pad: 0,
+            },
+            0,
+        )?;
         Ok(())
     }
 
     pub fn block_del(&mut self, net: IpNet) -> Result<()> {
         let mut t: LpmTrie<_, [u8; 16], BlockVal> = LpmTrie::try_from(self.map("blocklist")?)?;
         let k = BlockKey::from_cidr(net.network(), net.prefix_len());
-        t.remove(&Key::new(k.prefixlen, k.addr)).map_err(|_| anyhow!("{net} is not blocked"))?;
+        t.remove(&Key::new(k.prefixlen, k.addr))
+            .map_err(|_| anyhow!("{net} is not blocked"))?;
         Ok(())
     }
 
@@ -306,7 +337,10 @@ impl Kernel {
     /// Wait for every in-flight non-sleepable BPF program: updating a map-in-map makes the
     /// kernel call synchronize_rcu() before returning (FR-HS-3).
     pub fn synchronize(&mut self) -> Result<()> {
-        let inner = self.sync_inner.take().ok_or_else(|| anyhow!("sync_inner missing"))?;
+        let inner = self
+            .sync_inner
+            .take()
+            .ok_or_else(|| anyhow!("sync_inner missing"))?;
         let res = (|| -> Result<()> {
             let mut outer: ArrayOfMaps<_, MapData> = ArrayOfMaps::try_from(self.map("sync_rcu")?)?;
             outer.set(0, &inner, 0)?;
@@ -317,15 +351,25 @@ impl Kernel {
     }
 
     /// Replace every `addr_sets` entry of `slot`.
-    pub fn write_addr_sets(&mut self, slot: u32, flat: &[kavach_policy::kernel::FlatPrefix]) -> Result<()> {
+    pub fn write_addr_sets(
+        &mut self,
+        slot: u32,
+        flat: &[kavach_policy::kernel::FlatPrefix],
+    ) -> Result<()> {
         let mut t: LpmTrie<_, SlotAddr, u64> = LpmTrie::try_from(self.map("addr_sets")?)?;
-        let stale: Vec<Key<SlotAddr>> =
-            t.keys().filter_map(Result::ok).filter(|k| k.data().slot == slot).collect();
+        let stale: Vec<Key<SlotAddr>> = t
+            .keys()
+            .filter_map(Result::ok)
+            .filter(|k| k.data().slot == slot)
+            .collect();
         for k in stale {
             let _ = t.remove(&k);
         }
         for p in flat {
-            let k = Key::new(AddrKey::HEADER_BITS + p.prefix, SlotAddr { slot, addr: p.addr });
+            let k = Key::new(
+                AddrKey::HEADER_BITS + p.prefix,
+                SlotAddr { slot, addr: p.addr },
+            );
             t.insert(&k, &p.bitmap, 0)?;
         }
         Ok(())
@@ -354,6 +398,24 @@ impl Kernel {
         Ok(())
     }
 
+    /// Tell the LSM which tgid is kavachd, so its read-only opens report inode keys.
+    pub fn set_self_tgid(&mut self, tgid: u32) -> Result<()> {
+        let mut m: Array<_, u32> = Array::try_from(self.map("self_tgid")?)?;
+        m.set(0, &tgid, 0)?;
+        Ok(())
+    }
+
+    pub fn exe_class_keys(&mut self) -> Result<Vec<ExeKey>> {
+        let m: HashMap<_, ExeKey, ExeClass> = HashMap::try_from(self.map("exe_class")?)?;
+        Ok(m.keys().filter_map(Result::ok).collect())
+    }
+
+    pub fn remove_exe_class(&mut self, key: &ExeKey) -> Result<()> {
+        let mut m: HashMap<_, ExeKey, ExeClass> = HashMap::try_from(self.map("exe_class")?)?;
+        let _ = m.remove(key);
+        Ok(())
+    }
+
     pub fn exe_class(&mut self, key: &ExeKey) -> Result<Option<ExeClass>> {
         let m: HashMap<_, ExeKey, ExeClass> = HashMap::try_from(self.map("exe_class")?)?;
         Ok(m.get(key, 0).ok())
@@ -363,7 +425,6 @@ impl Kernel {
     pub fn bpf_mut(&mut self) -> &mut Ebpf {
         &mut self.bpf
     }
-
 }
 
 fn update_class_map<K: aya::Pod + Eq + std::hash::Hash + Copy>(

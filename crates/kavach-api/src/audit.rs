@@ -32,7 +32,13 @@ struct Body<'a> {
 }
 
 fn digest(prev: &[u8; 32], seq: u64, ts: u64, kind: &str, data: &Value) -> [u8; 32] {
-    let body = serde_json::to_vec(&Body { seq, ts, kind, data }).expect("serialisable");
+    let body = serde_json::to_vec(&Body {
+        seq,
+        ts,
+        kind,
+        data,
+    })
+    .expect("serialisable");
     let mut h = Sha256::new();
     h.update(prev);
     h.update(&body);
@@ -43,7 +49,9 @@ fn digest(prev: &[u8; 32], seq: u64, ts: u64, kind: &str, data: &Value) -> [u8; 
 pub enum AuditError {
     #[error("line {line}: malformed record: {msg}")]
     Malformed { line: usize, msg: String },
-    #[error("line {line}: sequence {got} (expected {want}) — record missing, inserted or reordered")]
+    #[error(
+        "line {line}: sequence {got} (expected {want}) — record missing, inserted or reordered"
+    )]
     Sequence { line: usize, got: u64, want: u64 },
     #[error("line {line}: chain broken — record modified or reordered")]
     Chain { line: usize },
@@ -60,7 +68,10 @@ pub struct Chain {
 
 impl Default for Chain {
     fn default() -> Self {
-        Self { last: GENESIS, next_seq: 0 }
+        Self {
+            last: GENESIS,
+            next_seq: 0,
+        }
     }
 }
 
@@ -86,7 +97,13 @@ impl Chain {
         rec
     }
 
-    pub fn write<W: Write>(&mut self, w: &mut W, ts: u64, kind: &str, data: Value) -> std::io::Result<Record> {
+    pub fn write<W: Write>(
+        &mut self,
+        w: &mut W,
+        ts: u64,
+        kind: &str,
+        data: Value,
+    ) -> std::io::Result<Record> {
         let rec = self.append(ts, kind, data);
         let mut line = serde_json::to_vec(&rec).expect("serialisable");
         line.push(b'\n');
@@ -105,10 +122,16 @@ pub fn verify<R: BufRead>(r: R) -> Result<Chain, AuditError> {
         if line.trim().is_empty() {
             continue;
         }
-        let rec: Record = serde_json::from_str(&line)
-            .map_err(|e| AuditError::Malformed { line: line_no, msg: e.to_string() })?;
+        let rec: Record = serde_json::from_str(&line).map_err(|e| AuditError::Malformed {
+            line: line_no,
+            msg: e.to_string(),
+        })?;
         if rec.seq != chain.next_seq {
-            return Err(AuditError::Sequence { line: line_no, got: rec.seq, want: chain.next_seq });
+            return Err(AuditError::Sequence {
+                line: line_no,
+                got: rec.seq,
+                want: chain.next_seq,
+            });
         }
         if rec.prev != hex::encode(chain.last) {
             return Err(AuditError::Chain { line: line_no });
@@ -132,7 +155,8 @@ mod tests {
         let mut c = Chain::default();
         let mut out = Vec::new();
         for i in 0..n {
-            c.write(&mut out, 1000 + i, "apply", json!({"serial": i})).unwrap();
+            c.write(&mut out, 1000 + i, "apply", json!({"serial": i}))
+                .unwrap();
         }
         out
     }
@@ -154,10 +178,16 @@ mod tests {
         let lines: Vec<&str> = l.lines().collect();
 
         let modified = l.replace("\"serial\":2", "\"serial\":9");
-        assert!(matches!(verify(modified.as_bytes()), Err(AuditError::Chain { line: 3 })));
+        assert!(matches!(
+            verify(modified.as_bytes()),
+            Err(AuditError::Chain { line: 3 })
+        ));
 
         let deleted = [lines[0], lines[2], lines[3]].join("\n");
-        assert!(matches!(verify(deleted.as_bytes()), Err(AuditError::Sequence { line: 2, .. })));
+        assert!(matches!(
+            verify(deleted.as_bytes()),
+            Err(AuditError::Sequence { line: 2, .. })
+        ));
 
         let swapped = [lines[0], lines[2], lines[1], lines[3]].join("\n");
         assert!(verify(swapped.as_bytes()).is_err());

@@ -656,6 +656,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "kavachctl"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "hex",
+ "ipnet",
+ "kavach-api",
+ "kavach-common",
+ "kavach-core",
+ "kavach-policy",
+ "postcard",
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
 name = "kavachd"
 version = "0.1.0"
 dependencies = [

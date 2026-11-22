@@ -32,15 +32,22 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
         .init();
     let args = Args::parse();
     let mut cfg = Config::load(&args.config)?;
     cfg.interfaces.extend(args.interface);
 
     let mut k = Kernel::load(&cfg.pin_dir).context("loading Kavach eBPF programs")?;
+    k.set_self_tgid(std::process::id())?;
 
-    let mut xdp = XdpConfig { sample_rate: cfg.sample_rate, flags: KV_XDP_F_BLOCKLIST, ..Default::default() };
+    let mut xdp = XdpConfig {
+        sample_rate: cfg.sample_rate,
+        flags: KV_XDP_F_BLOCKLIST,
+        ..Default::default()
+    };
     if let Some(rl) = cfg.ratelimit {
         let (e, t) = kernel::gcra(rl.pps, rl.burst);
         xdp.emission_ns = e;
@@ -64,7 +71,9 @@ async fn main() -> Result<()> {
     if cfg.lsm {
         match k.attach_lsm() {
             Ok(()) => info!("BPF-LSM identity egress attached"),
-            Err(e) => warn!(error = %format!("{e:#}"), "BPF-LSM unavailable: identity egress disabled"),
+            Err(e) => {
+                warn!(error = %format!("{e:#}"), "BPF-LSM unavailable: identity egress disabled")
+            }
         }
     }
 
@@ -110,10 +119,10 @@ async fn main() -> Result<()> {
                 }
                 let _ = s.purge_blocklist();
                 let every = (s.cfg.dns_min_ttl_secs.max(30) / 30).max(1);
-                if n % every == 0 {
-                    if let Err(e) = s.refresh_dns() {
-                        warn!(error = %format!("{e:#}"), "FQDN refresh failed");
-                    }
+                if n.is_multiple_of(every)
+                    && let Err(e) = s.refresh_dns()
+                {
+                    warn!(error = %format!("{e:#}"), "FQDN refresh failed");
                 }
             }
         }
@@ -138,4 +147,3 @@ async fn sigterm() {
         Err(_) => std::future::pending::<()>().await,
     }
 }
-

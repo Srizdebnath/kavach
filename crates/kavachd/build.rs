@@ -8,8 +8,15 @@ fn main() {
     let bpf = root.join("bpf");
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("kavach.bpf.o");
     println!("cargo:rerun-if-env-changed=KAVACH_BPF_OBJ");
-    for f in ["kavach.bpf.c", "xdp_filter.c", "tc_flow.c", "lsm_egress.c", "include/kavach_bpf.h",
-              "include/kavach_eval.h", "include/kavach_abi.h"] {
+    for f in [
+        "kavach.bpf.c",
+        "xdp_filter.c",
+        "tc_flow.c",
+        "lsm_egress.c",
+        "include/kavach_bpf.h",
+        "include/kavach_eval.h",
+        "include/kavach_abi.h",
+    ] {
         println!("cargo:rerun-if-changed={}", bpf.join(f).display());
     }
     if let Ok(prebuilt) = std::env::var("KAVACH_BPF_OBJ") {
@@ -19,7 +26,14 @@ fn main() {
     let vmlinux = bpf.join("include/vmlinux.h");
     if !vmlinux.exists() {
         let o = Command::new("bpftool")
-            .args(["btf", "dump", "file", "/sys/kernel/btf/vmlinux", "format", "c"])
+            .args([
+                "btf",
+                "dump",
+                "file",
+                "/sys/kernel/btf/vmlinux",
+                "format",
+                "c",
+            ])
             .output()
             .expect("bpftool is required to generate vmlinux.h (or run `cargo xtask vmlinux`)");
         assert!(o.status.success(), "bpftool failed");
@@ -31,12 +45,24 @@ fn main() {
         other => panic!("unsupported target arch {other}"),
     };
     let status = Command::new(std::env::var("CLANG").unwrap_or_else(|_| "clang".into()))
-        .args(["-O2", "-g", "-target", "bpf", "-mcpu=v3", "-Wall", "-Werror",
-               "-Wno-unused-function", "-Wno-missing-declarations"])
+        .args([
+            "-O2",
+            "-g",
+            "-target",
+            "bpf",
+            "-mcpu=v3",
+            "-Wall",
+            "-Werror",
+            "-Wno-unused-function",
+            "-Wno-missing-declarations",
+        ])
         .arg(format!("-D__TARGET_ARCH_{arch}"))
-        .arg("-I").arg(bpf.join("include"))
-        .arg("-c").arg(bpf.join("kavach.bpf.c"))
-        .arg("-o").arg(&out)
+        .arg("-I")
+        .arg(bpf.join("include"))
+        .arg("-c")
+        .arg(bpf.join("kavach.bpf.c"))
+        .arg("-o")
+        .arg(&out)
         .status()
         .expect("clang is required to build the eBPF programs");
     assert!(status.success(), "clang failed to compile bpf/kavach.bpf.c");

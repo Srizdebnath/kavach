@@ -15,10 +15,10 @@ use ipnet::IpNet;
 use kavach_api::audit::Chain;
 use kavach_api::{ApplyReport, BlockEntry, Status};
 use kavach_common::abi::*;
+use kavach_policy::VerifyingKey;
 use kavach_policy::bundle::{self, TrustPolicy};
 use kavach_policy::compile::{CompiledPolicy, User};
 use kavach_policy::kernel::{Clocks, flatten_sets};
-use kavach_policy::VerifyingKey;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tracing::{info, warn};
@@ -47,7 +47,8 @@ impl Audit {
             Ok(f) => match Chain::resume(BufReader::new(f)) {
                 Ok(c) => c,
                 Err(e) => {
-                    let broken = path.with_extension(format!("broken-{}", kernel::unix_ns() / 1_000_000_000));
+                    let broken = path
+                        .with_extension(format!("broken-{}", kernel::unix_ns() / 1_000_000_000));
                     warn!(error = %e, moved_to = %broken.display(), "audit log failed verification; starting a new chain");
                     let _ = std::fs::rename(path, &broken);
                     Chain::default()
@@ -55,7 +56,11 @@ impl Audit {
             },
             Err(_) => Chain::default(),
         };
-        let file = std::fs::OpenOptions::new().create(true).append(true).open(path).ok();
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .ok();
         if file.is_none() {
             warn!(path = %path.display(), "audit log not writable; audit records go to the journal only");
         }
@@ -90,6 +95,8 @@ pub struct Daemon {
     pub fqdns: BTreeMap<String, Vec<IpAddr>>,
     pub audit: Audit,
     pub started: Instant,
+    /// Policy-named executables we opened to learn their kernel key: ino → path.
+    pub pending_reports: HashMap<u64, String>,
 }
 
 impl Daemon {
@@ -106,11 +113,14 @@ impl Daemon {
             fqdns: BTreeMap::new(),
             audit,
             started: Instant::now(),
+            pending_reports: HashMap::new(),
         }
     }
 
     pub fn k(&mut self) -> Result<&mut Kernel> {
-        self.kernel.as_mut().ok_or_else(|| anyhow!("kill-switch engaged: kernel side detached"))
+        self.kernel
+            .as_mut()
+            .ok_or_else(|| anyhow!("kill-switch engaged: kernel side detached"))
     }
 
     pub fn active(&self) -> Option<&Arc<CompiledPolicy>> {
@@ -125,7 +135,9 @@ impl Daemon {
         p.selectors
             .iter()
             .enumerate()
-            .filter(|(_, s)| s.constrains_exe() && s.exe_matches(Some(info.sha256), Some(&info.path)))
+            .filter(|(_, s)| {
+                s.constrains_exe() && s.exe_matches(Some(info.sha256), Some(&info.path))
+            })
             .fold(0, |m, (i, _)| m | (1 << i))
     }
 
@@ -135,11 +147,16 @@ impl Daemon {
             for u in &s.users {
                 let uid = match u {
                     User::Uid(n) => Some(*n),
-                    User::Name(n) => nix::unistd::User::from_name(n).ok().flatten().map(|u| u.uid.as_raw()),
+                    User::Name(n) => nix::unistd::User::from_name(n)
+                        .ok()
+                        .flatten()
+                        .map(|u| u.uid.as_raw()),
                 };
                 match uid {
                     Some(uid) => *t.entry(uid).or_insert(0) |= 1 << i,
-                    None => warn!(user = ?u, "policy names an unknown user; selector cannot match it"),
+                    None => {
+                        warn!(user = ?u, "policy names an unknown user; selector cannot match it")
+                    }
                 }
             }
         }
@@ -154,7 +171,9 @@ impl Daemon {
                 match std::fs::metadata(&path) {
                     // cgroup v2 id == kernfs inode number of the cgroup directory.
                     Ok(md) => *t.entry(md.ino()).or_insert(0) |= 1 << i,
-                    Err(_) => warn!(cgroup = %path.display(), "cgroup does not exist (yet); selector inactive until re-apply"),
+                    Err(_) => {
+                        warn!(cgroup = %path.display(), "cgroup does not exist (yet); selector inactive until re-apply")
+                    }
                 }
             }
         }
@@ -199,13 +218,19 @@ impl Daemon {
         // 1. classification masks for the new slot (the active slot's masks are untouched)
         let uids = Self::uid_table(&p);
         let cgs = Self::cgroup_table(&p);
-        let exes: Vec<(ExeKey, u64)> =
-            self.exe_cache.iter().map(|(k, info)| (*k, Self::exe_dim_mask(&p, info))).collect();
+        let exes: Vec<(ExeKey, u64)> = self
+            .exe_cache
+            .iter()
+            .map(|(k, info)| (*k, Self::exe_dim_mask(&p, info)))
+            .collect();
         let extra = self.resolve_fqdns(&p);
         let mut entries = p.static_set_entries();
         entries.extend(extra);
         let flat = flatten_sets(&entries);
-        let clocks = Clocks { unix_ns: kernel::unix_ns(), boot_ns: kernel::boot_ns() };
+        let clocks = Clocks {
+            unix_ns: kernel::unix_ns(),
+            boot_ns: kernel::boot_ns(),
+        };
         let table = p.to_kernel(new_gen, serial, clocks);
 
         let k = self.k()?;
@@ -226,9 +251,10 @@ impl Daemon {
         k.synchronize()?;
         let micros = t0.elapsed().as_micros() as u64;
 
-        self.slots[s] = Some(p);
+        self.slots[s] = Some(p.clone());
         self.generation = new_gen;
         self.serial = serial;
+        self.prewarm(&p);
         Ok(micros)
     }
 
@@ -240,7 +266,9 @@ impl Daemon {
                 if path.extension().is_some_and(|x| x == "pub") {
                     match read_pubkey(&path) {
                         Ok(k) => trusted.push(k),
-                        Err(err) => warn!(key = %path.display(), error = %err, "ignoring unreadable trusted key"),
+                        Err(err) => {
+                            warn!(key = %path.display(), error = %err, "ignoring unreadable trusted key")
+                        }
                     }
                 }
             }
@@ -268,7 +296,10 @@ impl Daemon {
         }
         let v = bundle::verify(bytes, &trust, true)?;
         let changes = match self.active() {
-            Some(old) => kavach_policy::diff::diff(old, &v.policy).iter().map(ToString::to_string).collect(),
+            Some(old) => kavach_policy::diff::diff(old, &v.policy)
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
             None => vec!["+ initial policy".to_owned()],
         };
         let mut report = ApplyReport {
@@ -298,8 +329,81 @@ impl Daemon {
                 "changes": report.changes,
             }),
         );
-        info!(serial = v.header.serial, generation = self.generation, swap_us = report.swap_micros, "policy applied");
+        info!(
+            serial = v.header.serial,
+            generation = self.generation,
+            swap_us = report.swap_micros,
+            "policy applied"
+        );
         Ok(report)
+    }
+
+    fn exe_cache_path(&self) -> PathBuf {
+        self.cfg.state_dir.join("exe_cache.json")
+    }
+
+    /// Persist the executable cache so a restart can recompute masks for both slots.
+    pub fn save_exe_cache(&self) {
+        let rows: Vec<serde_json::Value> = self
+            .exe_cache
+            .iter()
+            .map(|(k, v)| json!({ "dev": k.dev, "gen": k.generation, "ino": k.ino, "sha256": hex::encode(v.sha256), "path": v.path }))
+            .collect();
+        let _ = std::fs::create_dir_all(&self.cfg.state_dir);
+        let tmp = self.exe_cache_path().with_extension("tmp");
+        if std::fs::write(&tmp, serde_json::to_vec(&rows).unwrap_or_default()).is_ok() {
+            let _ = std::fs::rename(&tmp, self.exe_cache_path());
+        }
+    }
+
+    /// Reload the cache, then drop every kernel classification we cannot account for: those
+    /// executables are re-reported on their next exec (or by the task scan) and re-hashed,
+    /// instead of keeping a mask that is stale for the slot we are about to stage.
+    pub fn reconcile_exe_cache(&mut self) -> Result<()> {
+        if let Ok(bytes) = std::fs::read(self.exe_cache_path()) {
+            let rows: Vec<serde_json::Value> = serde_json::from_slice(&bytes).unwrap_or_default();
+            for r in rows {
+                let (Some(dev), Some(gen_), Some(ino), Some(sha), Some(path)) = (
+                    r["dev"].as_u64(),
+                    r["gen"].as_u64(),
+                    r["ino"].as_u64(),
+                    r["sha256"]
+                        .as_str()
+                        .and_then(|h| hex::decode(h).ok()?.try_into().ok()),
+                    r["path"].as_str(),
+                ) else {
+                    continue;
+                };
+                let key = ExeKey {
+                    dev: dev as u32,
+                    generation: gen_ as u32,
+                    ino,
+                };
+                self.exe_cache.insert(
+                    key,
+                    ExeInfo {
+                        sha256: sha,
+                        path: path.to_owned(),
+                    },
+                );
+            }
+        }
+        let k = self
+            .kernel
+            .as_mut()
+            .ok_or_else(|| anyhow!("kernel detached"))?;
+        let mut pruned = 0;
+        for key in k.exe_class_keys()? {
+            if !self.exe_cache.contains_key(&key) {
+                k.remove_exe_class(&key)?;
+                pruned += 1;
+            }
+        }
+        info!(
+            cached = self.exe_cache.len(),
+            pruned, "executable classifications reconciled"
+        );
+        Ok(())
     }
 
     /// Re-stage the persisted bundle at startup (expired bundles keep enforcing + alert).
@@ -307,6 +411,7 @@ impl Daemon {
         if let Ok(g) = self.k()?.generation() {
             self.generation = g; // continue the pinned generation counter
         }
+        self.reconcile_exe_cache()?;
         let path = self.cfg.state_dir.join("active.kvb");
         let Ok(bytes) = std::fs::read(&path) else {
             info!("no persisted policy; enforcing nothing until `kavachctl apply`");
@@ -314,19 +419,29 @@ impl Daemon {
         };
         let mut trust = self.trust()?;
         trust.active_serial = 0;
-        let v = bundle::verify(&bytes, &trust, false).context("persisted bundle no longer verifies")?;
+        let v =
+            bundle::verify(&bytes, &trust, false).context("persisted bundle no longer verifies")?;
         if v.expired {
-            warn!(serial = v.header.serial, "active bundle has passed not_after: still enforcing, replace it");
+            warn!(
+                serial = v.header.serial,
+                "active bundle has passed not_after: still enforcing, replace it"
+            );
         }
         self.expired = v.expired;
         self.stage(Arc::new(v.policy), v.header.serial)?;
-        info!(serial = self.serial, generation = self.generation, "restored persisted policy");
+        info!(
+            serial = self.serial,
+            generation = self.generation,
+            "restored persisted policy"
+        );
         Ok(())
     }
 
     /// Re-resolve FQDNs; re-stage the active policy if any answer changed.
     pub fn refresh_dns(&mut self) -> Result<()> {
-        let Some(p) = self.active().cloned() else { return Ok(()) };
+        let Some(p) = self.active().cloned() else {
+            return Ok(());
+        };
         if p.sets.iter().all(|s| s.fqdns.is_empty()) {
             return Ok(());
         }
@@ -335,7 +450,10 @@ impl Daemon {
         if before != self.fqdns {
             let serial = self.serial;
             self.stage(p, serial)?;
-            info!(generation = self.generation, "FQDN answers changed; policy re-staged");
+            info!(
+                generation = self.generation,
+                "FQDN answers changed; policy re-staged"
+            );
         }
         Ok(())
     }
@@ -343,6 +461,23 @@ impl Daemon {
     // -----------------------------------------------------------------------------------------
     // Executable classification (FR-ID-2/3)
     // -----------------------------------------------------------------------------------------
+
+    /// Open every executable the policy names by path, read-only. The LSM recognises kavachd
+    /// and reports the kernel's key for each inode, so those binaries are classified before
+    /// they first run instead of on their first exec (closes the unclassified window).
+    pub fn prewarm(&mut self, p: &CompiledPolicy) {
+        for path in p.selectors.iter().flat_map(|s| s.exes.iter()) {
+            if path.contains('*') {
+                continue;
+            }
+            if let Ok(f) = File::open(path)
+                && let Ok(md) = f.metadata()
+                && md.is_file()
+            {
+                self.pending_reports.insert(md.ino(), path.clone());
+            }
+        }
+    }
 
     pub fn exe_masks(&self, info: &ExeInfo) -> [u64; 2] {
         let mut m = [0u64; 2];
@@ -354,10 +489,23 @@ impl Daemon {
         m
     }
 
-    pub fn write_classification(&mut self, key: ExeKey, info: ExeInfo, seq_at_hash: u64) -> Result<()> {
+    pub fn write_classification(
+        &mut self,
+        key: ExeKey,
+        info: ExeInfo,
+        seq_at_hash: u64,
+    ) -> Result<()> {
         let mask = self.exe_masks(&info);
-        self.k()?.set_exe_class(&key, ExeClass { mask, seq_at_hash, _reserved: 0 })?;
+        self.k()?.set_exe_class(
+            &key,
+            ExeClass {
+                mask,
+                seq_at_hash,
+                _reserved: 0,
+            },
+        )?;
         self.exe_cache.insert(key, info);
+        self.save_exe_cache();
         Ok(())
     }
 
@@ -369,7 +517,9 @@ impl Daemon {
         };
         Status {
             version: env!("CARGO_PKG_VERSION").into(),
-            kernel: nix::sys::utsname::uname().map(|u| u.release().to_string_lossy().into_owned()).unwrap_or_default(),
+            kernel: nix::sys::utsname::uname()
+                .map(|u| u.release().to_string_lossy().into_owned())
+                .unwrap_or_default(),
             generation: self.generation,
             serial: self.serial,
             policy_expired: self.expired,
@@ -391,7 +541,8 @@ impl Daemon {
             .map(|(net, v)| BlockEntry {
                 cidr: net.to_string(),
                 reason: v.reason,
-                expires_in: (v.expires_ns != 0).then(|| v.expires_ns.saturating_sub(now) / 1_000_000_000),
+                expires_in: (v.expires_ns != 0)
+                    .then(|| v.expires_ns.saturating_sub(now) / 1_000_000_000),
             })
             .collect())
     }
@@ -400,8 +551,12 @@ impl Daemon {
     pub fn purge_blocklist(&mut self) -> Result<usize> {
         let now = kernel::boot_ns();
         let k = self.k()?;
-        let expired: Vec<IpNet> =
-            k.block_list()?.into_iter().filter(|(_, v)| v.expires_ns != 0 && v.expires_ns <= now).map(|(n, _)| n).collect();
+        let expired: Vec<IpNet> = k
+            .block_list()?
+            .into_iter()
+            .filter(|(_, v)| v.expires_ns != 0 && v.expires_ns <= now)
+            .map(|(n, _)| n)
+            .collect();
         for n in &expired {
             let _ = k.block_del(*n);
         }
@@ -411,11 +566,15 @@ impl Daemon {
 
 /// Hash `/proc/<pid>/exe` after checking it is still the inode the kernel reported.
 pub fn hash_exe(pid: u32, ino: u64) -> Result<ExeInfo> {
-    let link = format!("/proc/{pid}/exe");
-    let mut f = File::open(&link).with_context(|| format!("opening {link}"))?;
+    hash_path(&format!("/proc/{pid}/exe"), ino)
+}
+
+/// Hash `path` after checking it is still inode `ino`; `/proc/<pid>/exe` links are resolved.
+pub fn hash_path(link: &str, ino: u64) -> Result<ExeInfo> {
+    let mut f = File::open(link).with_context(|| format!("opening {link}"))?;
     let md = f.metadata()?;
     if md.ino() != ino {
-        bail!("pid {pid} now runs a different executable");
+        bail!("{link} is no longer the inode the kernel reported");
     }
     let mut h = Sha256::new();
     let mut buf = vec![0u8; 1 << 16];
@@ -426,8 +585,18 @@ pub fn hash_exe(pid: u32, ino: u64) -> Result<ExeInfo> {
         }
         h.update(&buf[..n]);
     }
-    let path = std::fs::read_link(&link)?.to_string_lossy().trim_end_matches(" (deleted)").to_owned();
-    Ok(ExeInfo { sha256: h.finalize().into(), path })
+    let path = if link.starts_with("/proc/") {
+        std::fs::read_link(link)?
+            .to_string_lossy()
+            .trim_end_matches(" (deleted)")
+            .to_owned()
+    } else {
+        link.to_owned()
+    };
+    Ok(ExeInfo {
+        sha256: h.finalize().into(),
+        path,
+    })
 }
 
 /// Public keys are 32 raw bytes or 64 hex characters.

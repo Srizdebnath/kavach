@@ -13,7 +13,7 @@ use kavach_common::abi::*;
 use serde_json::json;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{broadcast, Notify};
+use tokio::sync::{Notify, broadcast};
 use tracing::{info, warn};
 
 use crate::daemon::Daemon;
@@ -38,9 +38,16 @@ pub async fn serve(
         std::fs::create_dir_all(dir)?;
     }
     let _ = std::fs::remove_file(&path);
-    let listener = UnixListener::bind(&path).with_context(|| format!("binding {}", path.display()))?;
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(if group.is_some() { 0o660 } else { 0o600 }))?;
-    let gid = group.as_deref().and_then(|g| nix::unistd::Group::from_name(g).ok().flatten()).map(|g| g.gid.as_raw());
+    let listener =
+        UnixListener::bind(&path).with_context(|| format!("binding {}", path.display()))?;
+    std::fs::set_permissions(
+        &path,
+        std::fs::Permissions::from_mode(if group.is_some() { 0o660 } else { 0o600 }),
+    )?;
+    let gid = group
+        .as_deref()
+        .and_then(|g| nix::unistd::Group::from_name(g).ok().flatten())
+        .map(|g| g.gid.as_raw());
     if let Some(gid) = gid {
         let _ = nix::unistd::chown(&path, None, Some(nix::unistd::Gid::from_raw(gid)));
     }
@@ -82,13 +89,19 @@ async fn client(
     let mut lines = BufReader::new(rd).lines();
     while let Some(line) = lines.next_line().await? {
         if line.len() > MAX_LINE {
-            wr.write_all(&encode(&Response::Error { message: "request too large".into() })).await?;
+            wr.write_all(&encode(&Response::Error {
+                message: "request too large".into(),
+            }))
+            .await?;
             return Ok(());
         }
         let req: Request = match serde_json::from_str(&line) {
             Ok(r) => r,
             Err(e) => {
-                wr.write_all(&encode(&Response::Error { message: format!("bad request: {e}") })).await?;
+                wr.write_all(&encode(&Response::Error {
+                    message: format!("bad request: {e}"),
+                }))
+                .await?;
                 continue;
             }
         };
@@ -103,7 +116,9 @@ async fn client(
                             }
                         }
                         Err(broadcast::error::RecvError::Lagged(n)) => {
-                            let msg = Response::Error { message: format!("{n} events dropped (slow reader)") };
+                            let msg = Response::Error {
+                                message: format!("{n} events dropped (slow reader)"),
+                            };
                             if wr.write_all(&encode(&msg)).await.is_err() {
                                 return Ok(());
                             }
@@ -114,7 +129,9 @@ async fn client(
             }
             Request::KillSwitch => {
                 let resp = if role != Role::Root {
-                    Response::Error { message: "kill-switch requires root".into() }
+                    Response::Error {
+                        message: "kill-switch requires root".into(),
+                    }
                 } else {
                     let r = (|| -> Result<()> {
                         let mut st = state.lock().map_err(|_| anyhow!("state poisoned"))?;
@@ -128,16 +145,35 @@ async fn client(
                             shutdown.notify_one();
                             Response::Ok
                         }
-                        Err(e) => Response::Error { message: e.to_string() },
+                        Err(e) => Response::Error {
+                            message: e.to_string(),
+                        },
                     }
                 };
                 wr.write_all(&encode(&resp)).await?;
             }
             other => {
+                let is_apply = matches!(other, Request::Apply { dry_run: false, .. });
                 let st = state.clone();
                 let resp = tokio::task::spawn_blocking(move || handle(&st, other))
                     .await
-                    .unwrap_or_else(|e| Response::Error { message: e.to_string() });
+                    .unwrap_or_else(|e| Response::Error {
+                        message: e.to_string(),
+                    });
+                if is_apply && matches!(resp, Response::Applied(_)) {
+                    // Return only once policy-named executables are classified (bounded wait),
+                    // so enforcement is in force when `kavachctl apply` exits.
+                    for _ in 0..100 {
+                        if state
+                            .lock()
+                            .map(|s| s.pending_reports.is_empty())
+                            .unwrap_or(true)
+                        {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                }
                 wr.write_all(&encode(&resp)).await?;
             }
         }
@@ -166,11 +202,17 @@ const STAT_NAMES: &[&str] = &[
 fn handle(state: &Arc<Mutex<Daemon>>, req: Request) -> Response {
     let mut st = match state.lock() {
         Ok(s) => s,
-        Err(_) => return Response::Error { message: "state poisoned".into() },
+        Err(_) => {
+            return Response::Error {
+                message: "state poisoned".into(),
+            };
+        }
     };
     match handle_inner(&mut st, req) {
         Ok(r) => r,
-        Err(e) => Response::Error { message: format!("{e:#}") },
+        Err(e) => Response::Error {
+            message: format!("{e:#}"),
+        },
     }
 }
 
@@ -180,12 +222,18 @@ fn handle_inner(st: &mut Daemon, req: Request) -> Result<Response> {
         Request::Stats => {
             let v = st.k()?.stats()?;
             Response::Stats {
-                counters: STAT_NAMES.iter().zip(v).map(|(n, c)| ((*n).to_owned(), c)).collect(),
+                counters: STAT_NAMES
+                    .iter()
+                    .zip(v)
+                    .map(|(n, c)| ((*n).to_owned(), c))
+                    .collect(),
             }
         }
         Request::Metrics => {
             let v = st.k()?.stats()?;
-            let mut text = String::from("# HELP kavach_packets_total Kavach verdict counters\n# TYPE kavach_packets_total counter\n");
+            let mut text = String::from(
+                "# HELP kavach_packets_total Kavach verdict counters\n# TYPE kavach_packets_total counter\n",
+            );
             for (n, c) in STAT_NAMES.iter().zip(v) {
                 text.push_str(&format!("kavach_packets_total{{reason=\"{n}\"}} {c}\n"));
             }
@@ -195,20 +243,30 @@ fn handle_inner(st: &mut Daemon, req: Request) -> Result<Response> {
             ));
             Response::Metrics { text }
         }
-        Request::BlockAdd { cidr, ttl_secs, reason } => {
+        Request::BlockAdd {
+            cidr,
+            ttl_secs,
+            reason,
+        } => {
             let net = parse_net(&cidr)?;
             let expires = ttl_secs.map_or(0, |t| kernel::boot_ns() + t * 1_000_000_000);
             st.k()?.block_add(net, expires, reason.unwrap_or(0))?;
-            st.audit.record("block_add", json!({ "cidr": net.to_string(), "ttl_secs": ttl_secs, "reason": reason }));
+            st.audit.record(
+                "block_add",
+                json!({ "cidr": net.to_string(), "ttl_secs": ttl_secs, "reason": reason }),
+            );
             Response::Ok
         }
         Request::BlockDel { cidr } => {
             let net = parse_net(&cidr)?;
             st.k()?.block_del(net)?;
-            st.audit.record("block_del", json!({ "cidr": net.to_string() }));
+            st.audit
+                .record("block_del", json!({ "cidr": net.to_string() }));
             Response::Ok
         }
-        Request::BlockList => Response::BlockList { entries: st.block_list()? },
+        Request::BlockList => Response::BlockList {
+            entries: st.block_list()?,
+        },
         Request::RateLimit { pps, burst } => {
             anyhow::ensure!(pps > 0 && burst > 0, "pps and burst must be > 0");
             let k = st.k()?;
@@ -218,7 +276,8 @@ fn handle_inner(st: &mut Daemon, req: Request) -> Result<Response> {
             cfg.tau_ns = tau_ns;
             cfg.flags |= KV_XDP_F_RATELIMIT;
             k.set_xdp_config(cfg)?;
-            st.audit.record("ratelimit", json!({ "pps": pps, "burst": burst }));
+            st.audit
+                .record("ratelimit", json!({ "pps": pps, "burst": burst }));
             Response::Ok
         }
         Request::RateLimitOff => {
@@ -231,7 +290,10 @@ fn handle_inner(st: &mut Daemon, req: Request) -> Result<Response> {
         }
         Request::Apply { bundle, dry_run } => Response::Applied(st.apply(&bundle, dry_run)?),
         Request::ActivePolicy => Response::ActivePolicy {
-            policy: st.active().map(|p| postcard::to_allocvec(p.as_ref())).transpose()?,
+            policy: st
+                .active()
+                .map(|p| postcard::to_allocvec(p.as_ref()))
+                .transpose()?,
             serial: st.serial,
             generation: st.generation,
         },

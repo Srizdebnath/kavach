@@ -19,13 +19,25 @@ pub enum Request {
     Status,
     Stats,
     Metrics,
-    BlockAdd { cidr: String, ttl_secs: Option<u64>, reason: Option<u32> },
-    BlockDel { cidr: String },
+    BlockAdd {
+        cidr: String,
+        ttl_secs: Option<u64>,
+        reason: Option<u32>,
+    },
+    BlockDel {
+        cidr: String,
+    },
     BlockList,
-    RateLimit { pps: u64, burst: u64 },
+    RateLimit {
+        pps: u64,
+        burst: u64,
+    },
     RateLimitOff,
     /// Apply a signed bundle (raw `.kvb` bytes).
-    Apply { bundle: Vec<u8>, dry_run: bool },
+    Apply {
+        bundle: Vec<u8>,
+        dry_run: bool,
+    },
     /// Return the active compiled policy (postcard bytes) for local explain/diff.
     ActivePolicy,
     /// Stream events until the client disconnects.
@@ -35,16 +47,28 @@ pub enum Request {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum Response {
     Ok,
-    Error { message: String },
+    Error {
+        message: String,
+    },
     Status(Status),
-    Stats { counters: Vec<(String, u64)> },
-    Metrics { text: String },
-    BlockList { entries: Vec<BlockEntry> },
+    Stats {
+        counters: Vec<(String, u64)>,
+    },
+    Metrics {
+        text: String,
+    },
+    BlockList {
+        entries: Vec<BlockEntry>,
+    },
     Applied(ApplyReport),
-    ActivePolicy { policy: Option<Vec<u8>>, serial: u64, generation: u32 },
+    ActivePolicy {
+        policy: Option<Vec<u8>>,
+        serial: u64,
+        generation: u32,
+    },
     Event(EventRecord),
 }
 
@@ -118,10 +142,40 @@ mod tests {
 
     #[test]
     fn request_wire_format_is_stable() {
-        let r = Request::BlockAdd { cidr: "10.0.0.0/8".into(), ttl_secs: Some(60), reason: None };
+        let r = Request::BlockAdd {
+            cidr: "10.0.0.0/8".into(),
+            ttl_secs: Some(60),
+            reason: None,
+        };
         let s = String::from_utf8(encode(&r)).unwrap();
-        assert_eq!(s, "{\"op\":\"block_add\",\"cidr\":\"10.0.0.0/8\",\"ttl_secs\":60,\"reason\":null}\n");
+        assert_eq!(
+            s,
+            "{\"op\":\"block_add\",\"cidr\":\"10.0.0.0/8\",\"ttl_secs\":60,\"reason\":null}\n"
+        );
         let back: Request = serde_json::from_str(s.trim()).unwrap();
         assert_eq!(back, r);
+    }
+
+    /// Regression: the response tag must not collide with payload fields (EventRecord.kind).
+    #[test]
+    fn every_response_roundtrips() {
+        let ev = Response::Event(EventRecord {
+            kind: "egress".into(),
+            verdict: "drop".into(),
+            ..Default::default()
+        });
+        let st = Response::Status(Status::default());
+        for r in [
+            ev,
+            st,
+            Response::Ok,
+            Response::Error {
+                message: "x".into(),
+            },
+        ] {
+            let line = encode(&r);
+            let back: Response = serde_json::from_slice(&line).unwrap();
+            assert_eq!(back, r);
+        }
     }
 }
