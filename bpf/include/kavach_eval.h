@@ -35,15 +35,14 @@ static __always_inline int kv_snapshot_get(struct kv_snapshot *s)
 	return 0;
 }
 
-/* Selector mask contributed by an executable, honouring the dirty-sequence protocol. */
+/* Selector mask contributed by an executable: present in exe_class = trusted (the LSM deletes
+ * entries on taint). A zero key (kernel thread, or a binary with open writers) has no class. */
 static __always_inline __u64 kv_exe_mask(const struct kv_exe_key *k, __u32 slot)
 {
-	struct kv_exe_class *c = bpf_map_lookup_elem(&exe_class, k);
-	if (!c)
+	if (!k->ino)
 		return 0;
-	__u64 *dirty = bpf_map_lookup_elem(&exe_dirty, k);
-	__u64 seq = dirty ? READ_ONCE(*dirty) : 0;
-	if (seq != c->seq_at_hash) {
+	struct kv_exe_class *c = bpf_map_lookup_elem(&exe_class, k);
+	if (!c) {
 		kv_count(KV_STAT_EXE_UNCLASSIFIED);
 		return 0;
 	}

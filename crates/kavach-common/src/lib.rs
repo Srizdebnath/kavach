@@ -33,6 +33,7 @@ mod aya_pod {
         XdpConfig,
         ClassVal,
         ExeKey,
+        KeyReq,
         ExeClass,
         Identity,
         PolicyHeader,

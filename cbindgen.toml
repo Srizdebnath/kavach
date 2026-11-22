@@ -9,7 +9,7 @@ cpp_compat = false
 usize_is_size_t = false
 
 [export]
-include = ["FlowKey","FlowVal","BlockKey","BlockVal","SrcKey","RateState","XdpConfig","ClassVal","ExeKey","ExeClass","Identity","PolicyHeader","Rule","Policy","AddrKey","Event","Verdict","StatReason","EventKind"]
+include = ["FlowKey","FlowVal","BlockKey","BlockVal","SrcKey","RateState","XdpConfig","ClassVal","ExeKey","ExeClass","KeyReq","Identity","PolicyHeader","Rule","Policy","AddrKey","Event","Verdict","StatReason","EventKind"]
 exclude = ["LAYOUT"]
 
 [export.rename]
@@ -23,6 +23,7 @@ exclude = ["LAYOUT"]
 "ClassVal" = "kv_class_val"
 "ExeKey" = "kv_exe_key"
 "ExeClass" = "kv_exe_class"
+"KeyReq" = "kv_key_req"
 "Policy" = "kv_policy"
 "Identity" = "kv_identity"
 "PolicyHeader" = "kv_policy_header"

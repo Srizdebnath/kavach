@@ -17,6 +17,9 @@
 #ifndef READ_ONCE
 #define READ_ONCE(x) (*(volatile typeof(x) *)&(x))
 #endif
+#ifndef WRITE_ONCE
+#define WRITE_ONCE(x, v) (*(volatile typeof(x) *)&(x) = (v))
+#endif
 
 #define ETH_P_IP 0x0800
 #define ETH_P_IPV6 0x86DD
@@ -99,7 +102,7 @@ struct {
 	__type(value, struct kv_identity);
 } sk_ident SEC(".maps");
 
-/* Executable classification (kavachd-owned). */
+/* Executable classification: kavachd commits, the LSM inserts placeholders and deletes on taint. */
 struct {
 	__uint(pinning, LIBBPF_PIN_BY_NAME);
 	__uint(type, BPF_MAP_TYPE_HASH);
@@ -107,15 +110,6 @@ struct {
 	__type(key, struct kv_exe_key);
 	__type(value, struct kv_exe_class);
 } exe_class SEC(".maps");
-
-/* Modification sequence (BPF-owned): bumped on write-open / truncate of executable files. */
-struct {
-	__uint(pinning, LIBBPF_PIN_BY_NAME);
-	__uint(type, BPF_MAP_TYPE_LRU_HASH);
-	__uint(max_entries, KV_CLASS_MAX);
-	__type(key, struct kv_exe_key);
-	__type(value, __u64);
-} exe_dirty SEC(".maps");
 
 struct {
 	__uint(pinning, LIBBPF_PIN_BY_NAME);
@@ -160,14 +154,14 @@ struct {
 	__type(value, __u32);
 } policy_gen SEC(".maps");
 
-/* tgid of kavachd (for KeyReport events). */
+/* One-shot key request from kavachd (see struct kv_exe_class for the protocol). */
 struct {
 	__uint(pinning, LIBBPF_PIN_BY_NAME);
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__uint(max_entries, 1);
 	__type(key, __u32);
-	__type(value, __u32);
-} self_tgid SEC(".maps");
+	__type(value, struct kv_key_req);
+} key_req SEC(".maps");
 
 struct {
 	__uint(pinning, LIBBPF_PIN_BY_NAME);

@@ -32,6 +32,29 @@ pub struct ExeInfo {
     pub path: String,
 }
 
+/// The LSM's answer to an armed [`KeyReq`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyReport {
+    pub key: ExeKey,
+    pub nonce: u64,
+    /// The inode had open writers: its content may change under the hash.
+    pub writers: bool,
+}
+
+impl KeyReport {
+    pub fn from_event(e: &Event) -> Option<Self> {
+        (e.kind == EventKind::KeyReport as u8).then_some(Self {
+            key: ExeKey {
+                dev: e.rule_id,
+                generation: e.generation,
+                ino: e.identity,
+            },
+            nonce: e.cgroup_id,
+            writers: e.verdict != 0,
+        })
+    }
+}
+
 #[derive(Debug)]
 pub struct Audit {
     chain: Chain,
@@ -95,8 +118,14 @@ pub struct Daemon {
     pub fqdns: BTreeMap<String, Vec<IpAddr>>,
     pub audit: Audit,
     pub started: Instant,
-    /// Policy-named executables we opened to learn their kernel key: ino → path.
-    pub pending_reports: HashMap<u64, String>,
+    /// Classifications waiting for their `KeyReport`: nonce → broker.
+    pub key_waiters: HashMap<u64, tokio::sync::oneshot::Sender<KeyReport>>,
+    next_nonce: u64,
+    /// The broker's priority queue for pre-classification (absent in tests that drive the
+    /// protocol by hand).
+    pub prewarm_tx: Option<tokio::sync::mpsc::Sender<crate::events::IdentityJob>>,
+    /// Pre-classification jobs queued by the last apply and not finished yet.
+    pub prewarm_pending: usize,
 }
 
 impl Daemon {
@@ -113,7 +142,11 @@ impl Daemon {
             fqdns: BTreeMap::new(),
             audit,
             started: Instant::now(),
-            pending_reports: HashMap::new(),
+            key_waiters: HashMap::new(),
+            // never reuse a nonce across restarts (placeholders outlive a crashed daemon)
+            next_nonce: kernel::unix_ns(),
+            prewarm_tx: None,
+            prewarm_pending: 0,
         }
     }
 
@@ -233,13 +266,21 @@ impl Daemon {
         };
         let table = p.to_kernel(new_gen, serial, clocks);
 
+        let cached: std::collections::HashSet<ExeKey> = self.exe_cache.keys().copied().collect();
         let k = self.k()?;
         k.set_uid_masks(slot, &uids)?;
         k.set_cgroup_masks(slot, &cgs)?;
         for (key, mask) in exes {
             if let Some(mut c) = k.exe_class(&key)? {
                 c.mask[s] = mask;
-                k.set_exe_class(&key, c)?;
+                k.update_exe_class(&key, c)?; // false = tainted meanwhile: stays deleted
+            }
+        }
+        // A committed class we have no hash for would keep a stale mask in the new slot.
+        // (Placeholders, mask 0, belong to an in-flight classification.)
+        for key in k.exe_class_keys()? {
+            if !cached.contains(&key) && k.exe_class(&key)?.is_some_and(|c| c.mask != [0, 0]) {
+                k.remove_exe_class(&key)?;
             }
         }
         // 2. address sets + rule table into the inactive slot
@@ -254,7 +295,6 @@ impl Daemon {
         self.slots[s] = Some(p.clone());
         self.generation = new_gen;
         self.serial = serial;
-        self.prewarm(&p);
         Ok(micros)
     }
 
@@ -316,6 +356,7 @@ impl Daemon {
         let policy = Arc::new(v.policy);
         report.swap_micros = self.stage(policy.clone(), v.header.serial)?;
         report.generation = self.generation;
+        report.warnings.extend(self.prewarm(&policy));
         self.expired = false;
         persist(&self.cfg.state_dir, bytes)?;
         self.audit.record(
@@ -393,12 +434,18 @@ impl Daemon {
             .as_mut()
             .ok_or_else(|| anyhow!("kernel detached"))?;
         let mut pruned = 0;
-        for key in k.exe_class_keys()? {
-            if !self.exe_cache.contains_key(&key) {
-                k.remove_exe_class(&key)?;
+        let live: std::collections::HashSet<ExeKey> = k.exe_class_keys()?.into_iter().collect();
+        for key in &live {
+            if !self.exe_cache.contains_key(key) {
+                k.remove_exe_class(key)?; // includes placeholders of a crashed daemon
                 pruned += 1;
             }
         }
+        // A cached hash whose class is gone was tainted while we were down (or the maps are
+        // new): it must be re-hashed, never reused.
+        let before = self.exe_cache.len();
+        self.exe_cache.retain(|key, _| live.contains(key));
+        pruned += before - self.exe_cache.len();
         info!(
             cached = self.exe_cache.len(),
             pruned, "executable classifications reconciled"
@@ -428,7 +475,11 @@ impl Daemon {
             );
         }
         self.expired = v.expired;
-        self.stage(Arc::new(v.policy), v.header.serial)?;
+        let policy = Arc::new(v.policy);
+        self.stage(policy.clone(), v.header.serial)?;
+        for w in self.prewarm(&policy) {
+            warn!("{w}");
+        }
         info!(
             serial = self.serial,
             generation = self.generation,
@@ -462,20 +513,80 @@ impl Daemon {
     // Executable classification (FR-ID-2/3)
     // -----------------------------------------------------------------------------------------
 
-    /// Open every executable the policy names by path, read-only. The LSM recognises kavachd
-    /// and reports the kernel's key for each inode, so those binaries are classified before
-    /// they first run instead of on their first exec (closes the unclassified window).
-    pub fn prewarm(&mut self, p: &CompiledPolicy) {
+    /// Queue every executable the policy names by path for classification, so those binaries
+    /// are classified before they first run instead of on their first exec. Returns warnings
+    /// for paths that cannot be classified.
+    pub fn prewarm(&mut self, p: &CompiledPolicy) -> Vec<String> {
+        let mut warnings = Vec::new();
+        let Some(jobs) = self.prewarm_tx.clone() else {
+            return warnings;
+        };
         for path in p.selectors.iter().flat_map(|s| s.exes.iter()) {
             if path.contains('*') {
                 continue;
             }
-            if let Ok(f) = File::open(path)
-                && let Ok(md) = f.metadata()
-                && md.is_file()
-            {
-                self.pending_reports.insert(md.ino(), path.clone());
+            if !std::fs::metadata(path).is_ok_and(|m| m.is_file()) {
+                warnings.push(format!("{path}: not a regular file; it stays unclassified"));
+                continue;
             }
+            match jobs.try_send(crate::events::IdentityJob::Path { path: path.clone() }) {
+                Ok(()) => self.prewarm_pending += 1,
+                Err(_) => warnings.push(format!(
+                    "{path}: identity queue full; it will be classified on its first exec"
+                )),
+            }
+        }
+        warnings
+    }
+
+    /// Step 1 of the classification protocol (see `ExeClass`): arm the one-shot key request
+    /// for this thread, read-open `path`, disarm. The LSM answers with a `KeyReport` carrying
+    /// the returned nonce. Hash the returned file, never the path again.
+    pub fn open_for_report(&mut self, path: &str) -> Result<(u64, File)> {
+        self.next_nonce = self.next_nonce.wrapping_add(1).max(1);
+        let nonce = self.next_nonce;
+        let tid = nix::unistd::gettid().as_raw() as u32;
+        let k = self.k()?;
+        k.set_key_req(nonce, tid)?;
+        let f = File::open(path);
+        k.set_key_req(0, 0)?;
+        Ok((nonce, f.with_context(|| format!("opening {path}"))?))
+    }
+
+    /// Step 3: publish the hash. `Ok(false)` when the file was modified since the key report
+    /// (the LSM deleted the placeholder); nothing is classified then.
+    pub fn commit_classification(
+        &mut self,
+        key: ExeKey,
+        info: ExeInfo,
+        nonce: u64,
+    ) -> Result<bool> {
+        let mask = self.exe_masks(&info);
+        let ok = self.k()?.update_exe_class(
+            &key,
+            ExeClass {
+                mask,
+                nonce,
+                _reserved: 0,
+            },
+        )?;
+        if ok {
+            self.exe_cache.insert(key, info);
+        } else {
+            self.exe_cache.remove(&key);
+        }
+        self.save_exe_cache();
+        Ok(ok)
+    }
+
+    /// Give up on a classification: remove our placeholder so the next exec reports again.
+    pub fn abandon_classification(&mut self, key: ExeKey, nonce: u64) {
+        if let Ok(k) = self.k()
+            && let Ok(Some(c)) = k.exe_class(&key)
+            && c.nonce == nonce
+            && c.mask == [0, 0]
+        {
+            let _ = k.remove_exe_class(&key);
         }
     }
 
@@ -487,26 +598,6 @@ impl Daemon {
             }
         }
         m
-    }
-
-    pub fn write_classification(
-        &mut self,
-        key: ExeKey,
-        info: ExeInfo,
-        seq_at_hash: u64,
-    ) -> Result<()> {
-        let mask = self.exe_masks(&info);
-        self.k()?.set_exe_class(
-            &key,
-            ExeClass {
-                mask,
-                seq_at_hash,
-                _reserved: 0,
-            },
-        )?;
-        self.exe_cache.insert(key, info);
-        self.save_exe_cache();
-        Ok(())
     }
 
     pub fn status(&mut self) -> Status {
@@ -564,18 +655,13 @@ impl Daemon {
     }
 }
 
-/// Hash `/proc/<pid>/exe` after checking it is still the inode the kernel reported.
-pub fn hash_exe(pid: u32, ino: u64) -> Result<ExeInfo> {
-    hash_path(&format!("/proc/{pid}/exe"), ino)
-}
-
-/// Hash `path` after checking it is still inode `ino`; `/proc/<pid>/exe` links are resolved.
-pub fn hash_path(link: &str, ino: u64) -> Result<ExeInfo> {
-    let mut f = File::open(link).with_context(|| format!("opening {link}"))?;
-    let md = f.metadata()?;
-    if md.ino() != ino {
-        bail!("{link} is no longer the inode the kernel reported");
-    }
+/// Hash an open file (the one the LSM reported); its path comes from the fd itself.
+pub fn hash_file(mut f: File) -> Result<ExeInfo> {
+    use std::os::fd::AsRawFd;
+    let path = std::fs::read_link(format!("/proc/self/fd/{}", f.as_raw_fd()))?
+        .to_string_lossy()
+        .trim_end_matches(" (deleted)")
+        .to_owned();
     let mut h = Sha256::new();
     let mut buf = vec![0u8; 1 << 16];
     loop {
@@ -585,14 +671,6 @@ pub fn hash_path(link: &str, ino: u64) -> Result<ExeInfo> {
         }
         h.update(&buf[..n]);
     }
-    let path = if link.starts_with("/proc/") {
-        std::fs::read_link(link)?
-            .to_string_lossy()
-            .trim_end_matches(" (deleted)")
-            .to_owned()
-    } else {
-        link.to_owned()
-    };
     Ok(ExeInfo {
         sha256: h.finalize().into(),
         path,

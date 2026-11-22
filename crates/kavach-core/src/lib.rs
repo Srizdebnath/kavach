@@ -15,9 +15,8 @@ use kavach_common::abi::*;
 
 /// Where per-host classification state lives (BPF maps in the kernel, hash maps in tests).
 pub trait Tables {
+    /// Present = trusted: the kernel deletes the entry when the file is modified.
     fn exe_class(&self, key: &ExeKey) -> Option<ExeClass>;
-    /// Modification sequence for an executable; absent = 0.
-    fn exe_dirty(&self, key: &ExeKey) -> u64;
     fn uid_class(&self, uid: u32) -> Option<ClassVal>;
     fn cgroup_class(&self, cgroup_id: u64) -> Option<ClassVal>;
     /// Longest-prefix match in `addr_sets` for `slot`; 0 when nothing matches.
@@ -58,12 +57,13 @@ pub struct Who<'a> {
     pub cgroups: &'a [u64],
 }
 
-/// Mask contributed by an executable, honouring the dirty-sequence protocol.
+/// Mask contributed by an executable. A zero key (kernel thread, or a binary with open writers)
+/// is never classified.
 pub fn exe_mask<T: Tables + ?Sized>(t: &T, key: &ExeKey, slot: u32) -> u64 {
-    match t.exe_class(key) {
-        Some(c) if t.exe_dirty(key) == c.seq_at_hash => c.mask[(slot & 1) as usize],
-        _ => 0,
+    if key.ino == 0 {
+        return 0;
     }
+    t.exe_class(key).map_or(0, |c| c.mask[(slot & 1) as usize])
 }
 
 /// `m = (exe | wild_exe) & (uid | wild_uid) & (cgroup | wild_cgroup)`.

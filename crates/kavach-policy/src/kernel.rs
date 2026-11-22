@@ -246,12 +246,9 @@ impl kavach_core::Tables for OfflineTables {
         // The facts were matched host-side: expose them as one pre-classified "executable".
         (*key == PROBE_KEY).then_some(ExeClass {
             mask: [self.mask; 2],
-            seq_at_hash: 0,
+            nonce: 0,
             _reserved: 0,
         })
-    }
-    fn exe_dirty(&self, _key: &ExeKey) -> u64 {
-        0
     }
     fn uid_class(&self, uid: u32) -> Option<ClassVal> {
         (uid == u32::MAX).then_some(ClassVal {

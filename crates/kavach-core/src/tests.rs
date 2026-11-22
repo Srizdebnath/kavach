@@ -12,7 +12,6 @@ use super::*;
 #[derive(Default)]
 struct Mem {
     exe: HashMap<ExeKey, ExeClass>,
-    dirty: HashMap<ExeKey, u64>,
     uid: HashMap<u32, ClassVal>,
     cg: HashMap<u64, ClassVal>,
     /// (slot, prefix bits in 128-space, masked addr, bitmap)
@@ -22,9 +21,6 @@ struct Mem {
 impl Tables for Mem {
     fn exe_class(&self, k: &ExeKey) -> Option<ExeClass> {
         self.exe.get(k).copied()
-    }
-    fn exe_dirty(&self, k: &ExeKey) -> u64 {
-        self.dirty.get(k).copied().unwrap_or(0)
     }
     fn uid_class(&self, uid: u32) -> Option<ClassVal> {
         self.uid.get(&uid).copied()
@@ -203,7 +199,7 @@ fn identity_mask_and_selectors() {
         exe,
         ExeClass {
             mask: [0, 0b01],
-            seq_at_hash: 0,
+            nonce: 0,
             _reserved: 0,
         },
     );
@@ -243,7 +239,7 @@ fn identity_mask_and_selectors() {
 }
 
 #[test]
-fn dirty_executable_loses_identity() {
+fn tainted_executable_loses_identity() {
     let mut p = policy(&[], Verdict::Drop);
     p.hdr.wild_exe = !1;
     p.hdr.sel_used = 1;
@@ -258,18 +254,17 @@ fn dirty_executable_loses_identity() {
         exe,
         ExeClass {
             mask: [1, 0],
-            seq_at_hash: 3,
+            nonce: 0,
             _reserved: 0,
         },
     );
-    t.dirty.insert(exe, 3);
     let who = Who {
         exe,
         uid: 0,
         cgroups: &[],
     };
     assert_eq!(identity_mask(&t, &s, &who), 1);
-    t.dirty.insert(exe, 4); // written after hashing
+    t.exe.remove(&exe); // the LSM deletes the class on write-open / truncate
     assert_eq!(identity_mask(&t, &s, &who), 0);
 }
 

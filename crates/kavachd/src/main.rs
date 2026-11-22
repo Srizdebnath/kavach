@@ -41,7 +41,6 @@ async fn main() -> Result<()> {
     cfg.interfaces.extend(args.interface);
 
     let mut k = Kernel::load(&cfg.pin_dir).context("loading Kavach eBPF programs")?;
-    k.set_self_tgid(std::process::id())?;
 
     let mut xdp = XdpConfig {
         sample_rate: cfg.sample_rate,
@@ -81,6 +80,8 @@ async fn main() -> Result<()> {
     let state = Arc::new(Mutex::new(Daemon::new(cfg, k)));
     let (tx, _) = broadcast::channel(4096);
     let (jobs_tx, jobs_rx) = mpsc::channel(8192);
+    let (prewarm_tx, prewarm_rx) = mpsc::channel(4096);
+    let prewarm_rx = Arc::new(tokio::sync::Mutex::new(prewarm_rx));
     let shutdown = Arc::new(Notify::new());
 
     let events_fd = events::event_fd(rb)?;
@@ -95,11 +96,11 @@ async fn main() -> Result<()> {
         move || events::reader(fd.clone(), st.clone(), tx.clone(), jobs.clone())
     });
     supervise("identity broker", state.clone(), {
-        let (st, rx) = (state.clone(), jobs_rx.clone());
+        let (st, rx, pw) = (state.clone(), jobs_rx.clone(), prewarm_rx.clone());
         move || {
-            let (st, rx) = (st.clone(), rx.clone());
+            let (st, rx, pw) = (st.clone(), rx.clone(), pw.clone());
             async move {
-                events::identity_broker(st, rx).await;
+                events::identity_broker(st, rx, pw).await;
                 Ok(())
             }
         }
@@ -107,6 +108,7 @@ async fn main() -> Result<()> {
 
     {
         let mut st = state.lock().expect("fresh state");
+        st.prewarm_tx = Some(prewarm_tx.clone());
         if let Err(e) = st.restore() {
             error!(error = %format!("{e:#}"), "could not restore persisted policy");
         }

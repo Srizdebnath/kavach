@@ -182,12 +182,14 @@ enum kv_event_kind
    */
   KV_EVENT_KIND_EXEC = 4,
   /**
-   * A classified executable was opened for write; its classification was revoked.
+   * A classified executable was opened for write or truncated; the LSM deleted its
+   * `exe_class` entry.
    */
   KV_EVENT_KIND_EXE_TAINTED = 5,
   /**
-   * kavachd itself opened a file read-only: here is the kernel's key for that inode
-   * (exact pre-classification of policy-named executables, even on btrfs/overlayfs).
+   * Answer to a one-shot [`KeyReq`]: kavachd's read-open of a file, with the kernel's key for
+   * that inode (exact even on btrfs/overlayfs). `cgroup_id` echoes the request nonce and
+   * `verdict` is 1 when the inode had open writers (it must not be classified then).
    */
   KV_EVENT_KIND_KEY_REPORT = 6,
 };
@@ -311,7 +313,7 @@ struct kv_class_val {
 };
 
 /**
- * Key for `exe_class` / `exe_dirty`: the executable's inode **as the kernel sees it**
+ * Key for `exe_class`: the executable's inode **as the kernel sees it**
  * (`i_sb->s_dev`, `i_generation`, `i_ino`). kavachd never derives it from `stat(2)` (the
  * encodings differ, e.g. on btrfs); it copies it from `Exec` events. `i_generation` changes when
  * an inode number is reused, so a new file never inherits an old classification.
@@ -323,14 +325,34 @@ struct kv_exe_key {
 };
 
 /**
- * `exe_class` value, owned by kavachd. Valid only while `exe_dirty[key] == seq_at_hash`
- * (absent = 0). The BPF side bumps `exe_dirty` on every write-open or truncate of an
- * executable regular file, which closes the hash-then-modify race.
+ * `exe_class` value. Present = trusted: the LSM **deletes** the entry on every write-open or
+ * truncate of the inode, whatever its mode, so a modified binary can never keep (or, through
+ * map pressure, regain) its classification.
+ *
+ * Classification protocol (closes the hash-then-modify race):
+ * 1. kavachd arms [`KeyReq`] and read-opens the file;
+ * 2. the LSM inserts a placeholder (`mask = 0`, `nonce`) under the bucket lock, **then** reads
+ *    `i_writecount` and answers with a `KeyReport`;
+ * 3. kavachd hashes that same fd and commits with `BPF_EXIST`. A taint after step 2 deleted the
+ *    placeholder, so the commit fails; a writer from before step 2 was reported and refused.
  */
 struct kv_exe_class {
   __u64 mask[2];
-  __u64 seq_at_hash;
+  /**
+   * Nonce of the [`KeyReq`] that produced this entry (placeholder or committed).
+   */
+  __u64 nonce;
   __u64 _reserved;
+};
+
+/**
+ * `key_req[0]` (kavachd-owned): the next file_open by thread `tid` answers with a
+ * `KeyReport` carrying `nonce`, then the LSM clears `nonce` (one-shot).
+ */
+struct kv_key_req {
+  __u64 nonce;
+  __u32 tid;
+  __u32 _pad;
 };
 
 /**
@@ -484,15 +506,15 @@ struct kv_event {
   __u32 uid;
   __u64 cgroup_id;
   /**
-   * Identity selector mask. For `Exec` / `ExeTainted`: the inode number.
+   * Identity selector mask. For `Exec` / `ExeTainted` / `KeyReport`: the inode number.
    */
   __u64 identity;
   /**
-   * Matching rule id. For `Exec` / `ExeTainted`: the kernel `s_dev`.
+   * Matching rule id. For `Exec` / `ExeTainted` / `KeyReport`: the kernel `s_dev`.
    */
   __u32 rule_id;
   /**
-   * Policy generation. For `Exec` / `ExeTainted`: the inode's `i_generation`.
+   * Policy generation. For `Exec` / `ExeTainted` / `KeyReport`: the inode's `i_generation`.
    */
   __u32 generation;
   __u8 comm[16];
@@ -510,6 +532,7 @@ _Static_assert(sizeof(struct kv_xdp_config) == 24, "ABI drift: kv_xdp_config");
 _Static_assert(sizeof(struct kv_class_val) == 16, "ABI drift: kv_class_val");
 _Static_assert(sizeof(struct kv_exe_key) == 16, "ABI drift: kv_exe_key");
 _Static_assert(sizeof(struct kv_exe_class) == 32, "ABI drift: kv_exe_class");
+_Static_assert(sizeof(struct kv_key_req) == 16, "ABI drift: kv_key_req");
 _Static_assert(sizeof(struct kv_identity) == 64, "ABI drift: kv_identity");
 _Static_assert(sizeof(struct kv_policy_header) == 64, "ABI drift: kv_policy_header");
 _Static_assert(sizeof(struct kv_rule) == 48, "ABI drift: kv_rule");

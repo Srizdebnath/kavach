@@ -9,6 +9,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, UdpSocket};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use aya::maps::{MapData, RingBuf};
 use aya::programs::{ProgramError, SchedClassifier, TestRun, TestRunOptions, Xdp};
 use ipnet::IpNet;
 use kavach_common::abi::*;
@@ -16,7 +17,7 @@ use kavach_common::addr::to_mapped;
 use kavach_core::{FlowQuery, Snapshot};
 use kavach_policy::kernel::{Facts, OfflineTables};
 use kavachd::config::Config;
-use kavachd::daemon::Daemon;
+use kavachd::daemon::{self, Daemon, KeyReport};
 use kavachd::kernel::{self, Kernel};
 
 const XDP_DROP: u32 = 1;
@@ -526,6 +527,39 @@ fn differential_tc_ingress_vs_core() {
 // LSM identity egress (v0.2) — live connect()/sendto() through the real hooks
 // ---------------------------------------------------------------------------------------------
 
+fn drain(rb: &mut RingBuf<MapData>) -> Vec<Event> {
+    let mut out = Vec::new();
+    while let Some(item) = rb.next() {
+        out.push(kavachd::events::decode(&item).unwrap());
+    }
+    out
+}
+
+/// Step 1 of the classification protocol, by hand (the test owns the ring buffer).
+fn key_report(
+    f: &mut Fixture,
+    rb: &mut RingBuf<MapData>,
+    path: &str,
+) -> (KeyReport, std::fs::File) {
+    let (nonce, file) = f.d().open_for_report(path).unwrap();
+    let rep = drain(rb)
+        .iter()
+        .find_map(KeyReport::from_event)
+        .expect("LSM answered the armed key request");
+    assert_eq!(rep.nonce, nonce);
+    (rep, file)
+}
+
+/// The whole protocol; true if the classification was committed.
+fn classify(f: &mut Fixture, rb: &mut RingBuf<MapData>, path: &str) -> bool {
+    let (rep, file) = key_report(f, rb, path);
+    assert!(!rep.writers, "{path} has no open writers");
+    let info = daemon::hash_file(file).unwrap();
+    f.d()
+        .commit_classification(rep.key, info, rep.nonce)
+        .unwrap()
+}
+
 #[test]
 #[ignore = "needs root + BPF LSM: scripts/priv-test.sh"]
 fn lsm_identity_egress_end_to_end() {
@@ -554,8 +588,20 @@ fn lsm_identity_egress_end_to_end() {
     }
     let key = key.expect("task scan reported this process");
     let exe = std::fs::read_link("/proc/self/exe").unwrap();
-    let info = kavachd::daemon::hash_exe(me, key.ino).unwrap();
+    let (rep, file) = key_report(&mut f, &mut rb, &format!("/proc/{me}/exe"));
+    assert_eq!(rep.key, key, "key report matches the task scan's key");
+    assert!(!rep.writers);
+    let info = daemon::hash_file(file).unwrap();
+    assert_eq!(std::path::Path::new(&info.path), exe);
     let sha = hex::encode(info.sha256);
+    // one-shot: a second read-open by this thread reports nothing
+    drop(std::fs::File::open("/proc/self/exe").unwrap());
+    assert!(
+        !drain(&mut rb)
+            .iter()
+            .any(|e| e.kind == EventKind::KeyReport as u8),
+        "key request is one-shot"
+    );
 
     let policy = format!(
         r#"
@@ -578,8 +624,12 @@ log = {{ to = "192.0.2.0/24" }}
         uid = nix::unistd::getuid().as_raw()
     );
     f.apply_toml(&policy);
-    let seq = f.k().exe_dirty(&key).unwrap();
-    f.d().write_classification(key, info, seq).unwrap();
+    // the placeholder (mask 0) survived the policy stage; commit the hash over it
+    assert_eq!(
+        f.k().exe_class(&key).unwrap().map(|c| c.nonce),
+        Some(rep.nonce)
+    );
+    assert!(f.d().commit_classification(key, info, rep.nonce).unwrap());
 
     // TCP connect to the denied destination fails with EPERM straight from the LSM hook.
     let denied: SocketAddr = "192.0.2.1:9".parse().unwrap();
@@ -640,38 +690,72 @@ log = {{ to = "192.0.2.0/24" }}
         }
     }
     let copy_key = copy_key.expect("exec of the copy was reported");
-    // (creating the 0755 copy already counted as a write-open of an executable)
-    let s0 = f.k().exe_dirty(&copy_key).unwrap();
-    f.k()
-        .set_exe_class(
-            &copy_key,
-            ExeClass {
-                mask: [1, 1],
-                seq_at_hash: s0,
-                _reserved: 0,
-            },
+    let path = copy.to_str().unwrap();
+    let classified = |f: &mut Fixture| f.k().exe_class(&copy_key).unwrap().is_some();
+    let write_open = || {
+        drop(
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&copy)
+                .unwrap(),
         )
+    };
+    let chmod = |mode| {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&copy, std::fs::Permissions::from_mode(mode)).unwrap()
+    };
+
+    // FR-ID-3: write-open deletes the classification and says so.
+    assert!(classify(&mut f, &mut rb, path));
+    assert!(classified(&mut f));
+    write_open();
+    assert!(!classified(&mut f), "write-open revoked the class");
+    assert!(
+        drain(&mut rb)
+            .iter()
+            .any(|e| e.kind == EventKind::ExeTainted as u8 && e.identity == copy_key.ino),
+        "ExeTainted event emitted"
+    );
+
+    // chmod -x / write / chmod +x is a write too.
+    assert!(classify(&mut f, &mut rb, path));
+    chmod(0o644);
+    write_open();
+    chmod(0o755);
+    assert!(
+        !classified(&mut f),
+        "non-executable mode does not skip the taint"
+    );
+
+    // A writer that already holds the file open is reported; nothing is classified.
+    let writer = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&copy)
         .unwrap();
-    drop(
-        std::fs::OpenOptions::new()
-            .append(true)
-            .open(&copy)
+    let (rep, _file) = key_report(&mut f, &mut rb, path);
+    assert!(rep.writers, "open writer reported");
+    f.d().abandon_classification(rep.key, rep.nonce);
+    assert!(!classified(&mut f), "placeholder removed");
+    drop(writer);
+
+    // Modified between the key report and the commit: the commit fails.
+    let (rep, file) = key_report(&mut f, &mut rb, path);
+    assert!(!rep.writers);
+    write_open();
+    let info = daemon::hash_file(file).unwrap();
+    assert!(
+        !f.d()
+            .commit_classification(rep.key, info, rep.nonce)
             .unwrap(),
+        "stale hash refused"
     );
-    assert_eq!(
-        f.k().exe_dirty(&copy_key).unwrap(),
-        s0 + 1,
-        "write-open bumped the dirty sequence"
-    );
-    let mut tainted = false;
-    while let Some(item) = rb.next() {
-        let e = kavachd::events::decode(&item).unwrap();
-        tainted |= e.kind == EventKind::ExeTainted as u8 && e.identity == copy_key.ino;
-    }
-    assert!(tainted, "ExeTainted event emitted");
-    // truncate(2) by path bumps it too
+    assert!(!classified(&mut f));
+    assert!(!f.d().exe_cache.contains_key(&copy_key));
+
+    // truncate(2) by path revokes it too.
+    assert!(classify(&mut f, &mut rb, path));
     nix::unistd::truncate(&copy, 0).unwrap();
-    assert_eq!(f.k().exe_dirty(&copy_key).unwrap(), s0 + 2);
+    assert!(!classified(&mut f), "truncate revoked the class");
     let _ = IpNet::from(IpAddr::V4(Ipv4Addr::LOCALHOST));
 }
 

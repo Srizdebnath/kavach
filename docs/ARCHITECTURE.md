@@ -61,7 +61,8 @@ serves both families.
 | `FlowKey` | 40 | family, proto, ports (network order), src, dst |
 | `FlowVal` | 48 | identity mask, rule_id, **u32 generation** Δ, verdict, flags (REPLY/INGRESS), counters |
 | `ExeKey` | 16 | `{s_dev, i_generation, ino}` read from the kernel inode Δ |
-| `ExeClass` | 32 | `mask[2]` (one per policy slot) + `seq_at_hash` |
+| `ExeClass` | 32 | `mask[2]` (one per policy slot) + `nonce` of the key request |
+| `KeyReq` | 16 | one-shot `{nonce, tid}` armed by kavachd |
 | `ClassVal` | 16 | `mask[2]` for uid / cgroup classes |
 | `PolicyHeader` | 64 | n_rules, defaults, fail mode, flags, wildcard masks, `sel_used` |
 | `Rule` | 48 | sel, id, set bitmap index, ports, proto, dir, verdict, fail, not_after |
@@ -84,13 +85,12 @@ All maps except `sync_*` are pinned `LIBBPF_PIN_BY_NAME` under `/sys/fs/bpf/kava
 | `stats` | PERCPU_ARRAY[16] | `StatReason` → u64 | all | kavachd |
 | `flow_cache` | LRU_HASH 256k | `FlowKey` → `FlowVal` | TC | TC |
 | `sk_ident` | SK_STORAGE Δ | socket → `Identity` | LSM | TC |
-| `exe_class` | HASH | `ExeKey` → `ExeClass` | kavachd | LSM |
-| `exe_dirty` | LRU_HASH | `ExeKey` → u64 modification seq | LSM | LSM, kavachd |
+| `exe_class` | HASH | `ExeKey` → `ExeClass` (present = trusted) | kavachd commits; LSM inserts placeholders, deletes on taint | LSM |
 | `uid_class` / `cgroup_class` | HASH | uid / cgroup id → `ClassVal` | kavachd | LSM, TC |
 | `policy_slots` | ARRAY[2] | slot → `Policy` | kavachd | LSM, TC |
 | `addr_sets` | LPM_TRIE | `{prefixlen, slot, addr}` → u64 set bitmap Δ | kavachd | LSM, TC |
 | `policy_gen` | ARRAY[1] | u32 generation | kavachd | LSM, TC |
-| `self_tgid` | ARRAY[1] | tgid of kavachd (for key reports) | kavachd | LSM |
+| `key_req` | ARRAY[1] | `KeyReq` (one-shot key report) | kavachd, LSM clears | LSM |
 | `events` | RINGBUF 1 MiB | `Event` | all | kavachd |
 | `sync_inner` / `sync_rcu` | ARRAY / ARRAY_OF_MAPS | used only to force `synchronize_rcu()` | kavachd | — |
 
@@ -127,15 +127,19 @@ m = (exe_mask | wild_exe) & (uid_mask | wild_uid) & (cgroup_mask | wild_cgroup) 
   1. `bprm_committed_creds` exec events.
   2. A startup task iterator (`iter/task`) over all running processes.
   3. **Key reports**: after each apply, kavachd opens every policy-named executable read-only. The
-     LSM recognises kavachd's tgid and reports that inode's kernel key. Those binaries are
+     LSM answers the armed one-shot `key_req` (thread id + nonce) with that inode's kernel key. Those binaries are
      classified before they ever run, and `apply` returns only once this is done (bounded 1 s).
-* Each executable is hashed with SHA-256 once per key, and the result is cached. The cache is
-  persisted in the state dir and reconciled against `exe_class` on restart.
+* Each executable is hashed with SHA-256 from the fd the LSM reported. The cache only recomputes
+  masks for classes that still exist; it is never used to re-trust a binary, and on restart rows
+  without a live `exe_class` entry are dropped.
 
-**Tamper revocation (seq-pair protocol, FR-ID-3).** `file_open` for write and `path_truncate`
-bump `exe_dirty[key]`. kavachd reads the sequence *before* hashing and stores it as `seq_at_hash`.
-The LSM trusts a class only while `exe_dirty == seq_at_hash`. Modifying a binary during or after
-hashing therefore always invalidates it, and the next exec re-hashes.
+**Tamper revocation (placeholder protocol, FR-ID-3).** `file_open` for write and `path_truncate`
+of *any* regular file (whatever its mode) delete `exe_class[key]`. To classify, kavachd arms
+`key_req` and read-opens the file; the LSM inserts a placeholder (mask 0) under the bucket lock,
+*then* reads `i_writecount` and reports key + writers. kavachd refuses files with open writers,
+hashes the reported fd and commits with `BPF_EXIST`: a write-open after the report deleted the
+placeholder, so the commit fails. There is no side table to evict or overflow. At connect time a
+binary with open writers gets no exe identity at all.
 
 **Unclassified window.** A process whose binary is not yet classified gets exe mask 0. It still
 matches uid/cgroup-only selectors and is counted in `exe_unclassified`. Key reports close this

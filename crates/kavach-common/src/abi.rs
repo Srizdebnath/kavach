@@ -127,10 +127,12 @@ pub enum EventKind {
     IngressVerdict = 3,
     /// A new executable started; user space should hash and classify it.
     Exec = 4,
-    /// A classified executable was opened for write; its classification was revoked.
+    /// A classified executable was opened for write or truncated; the LSM deleted its
+    /// `exe_class` entry.
     ExeTainted = 5,
-    /// kavachd itself opened a file read-only: here is the kernel's key for that inode
-    /// (exact pre-classification of policy-named executables, even on btrfs/overlayfs).
+    /// Answer to a one-shot [`KeyReq`]: kavachd's read-open of a file, with the kernel's key for
+    /// that inode (exact even on btrfs/overlayfs). `cgroup_id` echoes the request nonce and
+    /// `verdict` is 1 when the inode had open writers (it must not be classified then).
     KeyReport = 6,
 }
 
@@ -237,7 +239,7 @@ pub struct ClassVal {
     pub mask: [u64; 2],
 }
 
-/// Key for `exe_class` / `exe_dirty`: the executable's inode **as the kernel sees it**
+/// Key for `exe_class`: the executable's inode **as the kernel sees it**
 /// (`i_sb->s_dev`, `i_generation`, `i_ino`). kavachd never derives it from `stat(2)` (the
 /// encodings differ, e.g. on btrfs); it copies it from `Exec` events. `i_generation` changes when
 /// an inode number is reused, so a new file never inherits an old classification.
@@ -249,15 +251,33 @@ pub struct ExeKey {
     pub ino: u64,
 }
 
-/// `exe_class` value, owned by kavachd. Valid only while `exe_dirty[key] == seq_at_hash`
-/// (absent = 0). The BPF side bumps `exe_dirty` on every write-open or truncate of an
-/// executable regular file, which closes the hash-then-modify race.
+/// `exe_class` value. Present = trusted: the LSM **deletes** the entry on every write-open or
+/// truncate of the inode, whatever its mode, so a modified binary can never keep (or, through
+/// map pressure, regain) its classification.
+///
+/// Classification protocol (closes the hash-then-modify race):
+/// 1. kavachd arms [`KeyReq`] and read-opens the file;
+/// 2. the LSM inserts a placeholder (`mask = 0`, `nonce`) under the bucket lock, **then** reads
+///    `i_writecount` and answers with a `KeyReport`;
+/// 3. kavachd hashes that same fd and commits with `BPF_EXIST`. A taint after step 2 deleted the
+///    placeholder, so the commit fails; a writer from before step 2 was reported and refused.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
 pub struct ExeClass {
     pub mask: [u64; 2],
-    pub seq_at_hash: u64,
+    /// Nonce of the [`KeyReq`] that produced this entry (placeholder or committed).
+    pub nonce: u64,
     pub _reserved: u64,
+}
+
+/// `key_req[0]` (kavachd-owned): the next file_open by thread `tid` answers with a
+/// `KeyReport` carrying `nonce`, then the LSM clears `nonce` (one-shot).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
+pub struct KeyReq {
+    pub nonce: u64,
+    pub tid: u32,
+    pub _pad: u32,
 }
 
 /// Socket owner, kept in `sk_ident` (SK_STORAGE, freed with the socket). 64 bytes.
@@ -380,11 +400,11 @@ pub struct Event {
     pub pid: u32,
     pub uid: u32,
     pub cgroup_id: u64,
-    /// Identity selector mask. For `Exec` / `ExeTainted`: the inode number.
+    /// Identity selector mask. For `Exec` / `ExeTainted` / `KeyReport`: the inode number.
     pub identity: u64,
-    /// Matching rule id. For `Exec` / `ExeTainted`: the kernel `s_dev`.
+    /// Matching rule id. For `Exec` / `ExeTainted` / `KeyReport`: the kernel `s_dev`.
     pub rule_id: u32,
-    /// Policy generation. For `Exec` / `ExeTainted`: the inode's `i_generation`.
+    /// Policy generation. For `Exec` / `ExeTainted` / `KeyReport`: the inode's `i_generation`.
     pub generation: u32,
     pub comm: [u8; 16],
 }
@@ -408,6 +428,7 @@ assert_size!(XdpConfig, 24);
 assert_size!(ClassVal, 16);
 assert_size!(ExeClass, 32);
 assert_size!(ExeKey, 16);
+assert_size!(KeyReq, 16);
 assert_size!(Identity, 64);
 assert_size!(PolicyHeader, 64);
 assert_size!(Rule, 48);
@@ -431,6 +452,7 @@ pub const LAYOUT: &[(&str, usize)] = &[
     ("kv_class_val", core::mem::size_of::<ClassVal>()),
     ("kv_exe_key", core::mem::size_of::<ExeKey>()),
     ("kv_exe_class", core::mem::size_of::<ExeClass>()),
+    ("kv_key_req", core::mem::size_of::<KeyReq>()),
     ("kv_identity", core::mem::size_of::<Identity>()),
     ("kv_policy_header", core::mem::size_of::<PolicyHeader>()),
     ("kv_rule", core::mem::size_of::<Rule>()),

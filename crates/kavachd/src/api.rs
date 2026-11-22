@@ -161,14 +161,10 @@ async fn client(
                         message: e.to_string(),
                     });
                 if is_apply && matches!(resp, Response::Applied(_)) {
-                    // Return only once policy-named executables are classified (bounded wait),
+                    // Return only once policy-named executables are classified (bounded wait, 3 s),
                     // so enforcement is in force when `kavachctl apply` exits.
-                    for _ in 0..100 {
-                        if state
-                            .lock()
-                            .map(|s| s.pending_reports.is_empty())
-                            .unwrap_or(true)
-                        {
+                    for _ in 0..300 {
+                        if state.lock().map(|s| s.prewarm_pending == 0).unwrap_or(true) {
                             break;
                         }
                         tokio::time::sleep(std::time::Duration::from_millis(10)).await;

@@ -2,7 +2,7 @@
 //! `kavachctl events` subscribers and samples verdicts into the audit log.
 
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use aya::maps::{MapData, RingBuf};
@@ -16,20 +16,18 @@ use tracing::{debug, warn};
 use crate::daemon::{self, Daemon};
 
 /// Work for the identity broker.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum IdentityJob {
-    Exec {
-        pid: u32,
-        key: ExeKey,
-    },
-    Tainted {
-        key: ExeKey,
-    },
-    /// kavachd opened a policy-named executable; this is its kernel key.
-    Report {
-        key: ExeKey,
-    },
+    /// An unclassified executable started running.
+    Exec { pid: u32, key: ExeKey },
+    /// The LSM revoked a classification.
+    Tainted { key: ExeKey },
+    /// Pre-classify an executable the policy names by path.
+    Path { path: String },
 }
+
+/// How long the broker waits for the LSM's `KeyReport` after its read-open.
+const REPORT_TIMEOUT: Duration = Duration::from_secs(1);
 
 pub fn decode(bytes: &[u8]) -> Option<Event> {
     (bytes.len() >= std::mem::size_of::<Event>())
@@ -125,13 +123,18 @@ pub async fn reader(
         while let Some(item) = rb.next() {
             let Some(e) = decode(&item) else { continue };
             drop(item);
-            if e.kind == EventKind::KeyReport as u8 {
-                let key = ExeKey {
-                    dev: e.rule_id,
-                    generation: e.generation,
-                    ino: e.identity,
-                };
-                let _ = jobs.try_send(IdentityJob::Report { key });
+            if let Some(rep) = daemon::KeyReport::from_event(&e) {
+                if let Ok(mut st) = state.lock() {
+                    match st.key_waiters.remove(&rep.nonce) {
+                        Some(w) => {
+                            if let Err(rep) = w.send(rep) {
+                                st.abandon_classification(rep.key, rep.nonce);
+                            }
+                        }
+                        // The broker timed out: nobody will commit this placeholder.
+                        None => st.abandon_classification(rep.key, rep.nonce),
+                    }
+                }
                 continue; // internal bookkeeping, not an operator-facing event
             }
             if e.kind == EventKind::Exec as u8 || e.kind == EventKind::ExeTainted as u8 {
@@ -183,75 +186,100 @@ pub async fn reader(
 /// Shared job queue so a restarted broker keeps draining the same channel.
 pub type JobRx = Arc<tokio::sync::Mutex<mpsc::Receiver<IdentityJob>>>;
 
-pub async fn identity_broker(state: Arc<Mutex<Daemon>>, jobs: JobRx) {
+/// `prewarm` carries `Path` jobs from `apply` and is always drained first: they must not wait
+/// behind a backlog of exec events (e.g. the startup task scan), or `apply` would return before
+/// the binaries it names are classified.
+pub async fn identity_broker(state: Arc<Mutex<Daemon>>, jobs: JobRx, prewarm: JobRx) {
     let mut jobs = jobs.lock().await;
-    while let Some(job) = jobs.recv().await {
+    let mut prewarm = prewarm.lock().await;
+    loop {
+        let job = tokio::select! {
+            biased;
+            Some(j) = prewarm.recv() => j,
+            Some(j) = jobs.recv() => j,
+            else => break,
+        };
         match job {
             IdentityJob::Tainted { key } => {
                 if let Ok(mut st) = state.lock() {
                     st.exe_cache.remove(&key);
+                    st.save_exe_cache();
                     st.audit.record(
                         "exe_tainted",
                         serde_json::json!({ "ino": key.ino, "dev": key.dev }),
                     );
                 }
             }
-            IdentityJob::Report { key } => {
-                let pending = {
-                    let Ok(mut st) = state.lock() else { continue };
-                    let Some(path) = st.pending_reports.remove(&key.ino) else {
-                        continue;
-                    };
-                    match st.k().and_then(|k| k.exe_dirty(&key)) {
-                        Ok(seq) => Some((seq, path)),
-                        Err(_) => None,
-                    }
-                };
-                let Some((seq, path)) = pending else { continue };
-                let p2 = path.clone();
-                let r = tokio::task::spawn_blocking(move || daemon::hash_path(&p2, key.ino)).await;
-                match r.unwrap_or_else(|e| Err(anyhow::anyhow!(e))) {
-                    Ok(info) => {
-                        if let Ok(mut st) = state.lock()
-                            && let Err(e) = st.write_classification(key, info, seq)
-                        {
-                            warn!(path, error = %e, "pre-classification failed");
-                        }
-                    }
-                    Err(e) => debug!(path, error = %e, "could not pre-classify"),
+            IdentityJob::Path { path } => {
+                if let Err(e) = classify(&state, &path, None).await {
+                    debug!(path, error = %e, "could not pre-classify");
+                }
+                if let Ok(mut st) = state.lock() {
+                    st.prewarm_pending = st.prewarm_pending.saturating_sub(1);
                 }
             }
             IdentityJob::Exec { pid, key } => {
-                // Read the modification sequence BEFORE hashing (seq-pair protocol).
-                let cached = {
-                    let Ok(mut st) = state.lock() else { continue };
-                    let seq = match st.k().and_then(|k| k.exe_dirty(&key)) {
-                        Ok(s) => s,
-                        Err(_) => continue,
-                    };
-                    (seq, st.exe_cache.get(&key).cloned())
-                };
-                let (seq, info) = match cached {
-                    (seq, Some(info)) => (seq, Ok(info)),
-                    (seq, None) => {
-                        let r = tokio::task::spawn_blocking(move || daemon::hash_exe(pid, key.ino))
-                            .await;
-                        (seq, r.unwrap_or_else(|e| Err(anyhow::anyhow!(e))))
-                    }
-                };
-                match info {
-                    Ok(info) => {
-                        if let Ok(mut st) = state.lock()
-                            && let Err(e) = st.write_classification(key, info, seq)
-                        {
-                            warn!(pid, error = %e, "writing exe classification failed");
-                        }
-                    }
-                    Err(e) => {
-                        debug!(pid, error = %e, "could not hash executable (process exited?)")
-                    }
+                // Always re-hash: a cached hash is only as good as the class it produced, and
+                // an Exec event means that class is gone.
+                if let Err(e) = classify(&state, &format!("/proc/{pid}/exe"), Some(key)).await {
+                    debug!(pid, error = %e, "could not classify executable");
                 }
             }
         }
     }
+}
+
+/// The classification protocol (see `ExeClass`): report, refuse open writers, hash the kept
+/// fd outside the state lock, commit with `BPF_EXIST`.
+async fn classify(state: &Arc<Mutex<Daemon>>, path: &str, expect: Option<ExeKey>) -> Result<()> {
+    let (nonce, file, rx) = {
+        let mut st = state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("state poisoned"))?;
+        let (nonce, file) = st.open_for_report(path)?;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        st.key_waiters.insert(nonce, tx);
+        (nonce, file, rx)
+    };
+    let rep = match tokio::time::timeout(REPORT_TIMEOUT, rx).await {
+        Ok(Ok(rep)) => rep,
+        _ => {
+            if let Ok(mut st) = state.lock() {
+                st.key_waiters.remove(&nonce);
+            }
+            anyhow::bail!("no key report for {path} (LSM not attached?)");
+        }
+    };
+    let abandon = |why: &str| {
+        if let Ok(mut st) = state.lock() {
+            st.abandon_classification(rep.key, rep.nonce);
+        }
+        anyhow::anyhow!("{path}: {why}")
+    };
+    if expect.is_some_and(|k| k != rep.key) {
+        return Err(abandon("now a different inode than the one that ran"));
+    }
+    if rep.writers {
+        return Err(abandon(
+            "open for write by another process; left unclassified",
+        ));
+    }
+    let info = tokio::task::spawn_blocking(move || daemon::hash_file(file))
+        .await
+        .map_err(anyhow::Error::from)
+        .and_then(|r| r);
+    let info = match info {
+        Ok(i) => i,
+        Err(e) => return Err(abandon(&e.to_string())),
+    };
+    let exe = info.path.clone();
+    let mut st = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("state poisoned"))?;
+    if st.commit_classification(rep.key, info, rep.nonce)? {
+        debug!(exe, ino = rep.key.ino, "classified");
+    } else {
+        warn!(exe, "modified while being hashed; left unclassified");
+    }
+    Ok(())
 }

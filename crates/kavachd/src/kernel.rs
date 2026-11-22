@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 use aya::maps::lpm_trie::{Key, LpmTrie};
-use aya::maps::{Array, ArrayOfMaps, HashMap, MapData, PerCpuArray, RingBuf};
+use aya::maps::{Array, ArrayOfMaps, HashMap, MapData, MapError, PerCpuArray, RingBuf};
 use aya::programs::links::{FdLink, PinnedLink};
 use aya::programs::{Iter, Lsm, SchedClassifier, TcAttachType, Xdp, XdpMode};
 use aya::{Btf, Ebpf, EbpfLoader};
@@ -397,21 +397,41 @@ impl Kernel {
         update_class_map(&mut m, slot, want)
     }
 
-    pub fn exe_dirty(&mut self, key: &ExeKey) -> Result<u64> {
-        let m: HashMap<_, ExeKey, u64> = HashMap::try_from(self.map("exe_dirty")?)?;
-        Ok(m.get(key, 0).unwrap_or(0))
+    /// Update an **existing** classification (`BPF_EXIST`). `Ok(false)` when the entry is gone:
+    /// the LSM deleted it because the file was modified, so the caller's hash is stale.
+    pub fn update_exe_class(&mut self, key: &ExeKey, class: ExeClass) -> Result<bool> {
+        const BPF_EXIST: u64 = 2;
+        let mut m: HashMap<_, ExeKey, ExeClass> = HashMap::try_from(self.map("exe_class")?)?;
+        match m.insert(key, &class, BPF_EXIST) {
+            Ok(()) => Ok(true),
+            Err(MapError::SyscallError(e))
+                if e.io_error.raw_os_error() == Some(nix::libc::ENOENT) =>
+            {
+                Ok(false)
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 
+    /// Unconditional write, for tests that fabricate classifications.
     pub fn set_exe_class(&mut self, key: &ExeKey, class: ExeClass) -> Result<()> {
         let mut m: HashMap<_, ExeKey, ExeClass> = HashMap::try_from(self.map("exe_class")?)?;
         m.insert(key, &class, 0)?;
         Ok(())
     }
 
-    /// Tell the LSM which tgid is kavachd, so its read-only opens report inode keys.
-    pub fn set_self_tgid(&mut self, tgid: u32) -> Result<()> {
-        let mut m: Array<_, u32> = Array::try_from(self.map("self_tgid")?)?;
-        m.set(0, &tgid, 0)?;
+    /// Arm (or, with `nonce == 0`, disarm) the one-shot key request for thread `tid`.
+    pub fn set_key_req(&mut self, nonce: u64, tid: u32) -> Result<()> {
+        let mut m: Array<_, KeyReq> = Array::try_from(self.map("key_req")?)?;
+        m.set(
+            0,
+            &KeyReq {
+                nonce,
+                tid,
+                _pad: 0,
+            },
+            0,
+        )?;
         Ok(())
     }
 
