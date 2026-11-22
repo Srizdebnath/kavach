@@ -24,6 +24,10 @@ pub const KV_MAX_RULES: u32 = 1024;
 pub const KV_SLOTS: u32 = 2;
 /// Maximum distinct selectors per policy (one bit each in a `u64` mask).
 pub const KV_MAX_SELECTORS: u32 = 64;
+/// Maximum distinct address sets per policy (one bit each in a `u64` set bitmap).
+pub const KV_MAX_SETS: u32 = 64;
+/// Maximum cgroup ancestor levels walked when matching cgroup selectors (subtree semantics).
+pub const KV_CGROUP_LEVELS: u32 = 8;
 /// Entries in the per-CPU `stats` array.
 pub const KV_STAT_MAX: u32 = 16;
 /// Address family tags used in [`FlowKey::family`].
@@ -62,8 +66,8 @@ pub const KV_FLOW_F_REPLY: u8 = 1 << 0;
 /// Entry was produced by the ingress rule scan.
 pub const KV_FLOW_F_INGRESS: u8 = 1 << 1;
 
-/// Fixed-point scale for token buckets: one packet costs this many "nano-tokens".
-pub const KV_TOKEN_SCALE: u64 = 1_000_000_000;
+/// IPv6 sources are rate-limited per /64 (an attacker controls a whole /64).
+pub const KV_RATE_V6_PREFIX: u32 = 64;
 
 // ---------------------------------------------------------------------------------------------
 // Enums (encoded as u8 on the wire; Rust enums give type safety in user space)
@@ -110,6 +114,8 @@ pub enum StatReason {
     FlowCacheMiss = 10,
     EventsLost = 11,
     PolicyNoSlot = 12,
+    ExeUnclassified = 13,
+    FlowCacheStale = 14,
 }
 
 /// Event type tag in [`Event::kind`].
@@ -185,30 +191,30 @@ pub struct BlockVal {
     pub _pad: u32,
 }
 
-/// Key for `rate_buckets`.
+/// Key for `rate_buckets`: IPv4 /32 or IPv6 /64 (low 64 bits zeroed), mapped form.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Pod, Zeroable)]
 pub struct SrcKey {
     pub addr: [u8; 16],
 }
 
-/// Per-source, per-CPU token bucket.
+/// GCRA state, shared across CPUs and updated with compare-and-swap.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
-pub struct TokenBucket {
-    /// Available tokens × [`KV_TOKEN_SCALE`].
-    pub tokens: u64,
-    pub last_ns: u64,
+pub struct RateState {
+    /// Theoretical arrival time of the next conforming packet (`CLOCK_BOOTTIME` ns).
+    pub tat_ns: u64,
+    /// Packets dropped for this source (approximate, for observability).
+    pub drops: u64,
 }
 
-/// Singleton XDP configuration (`xdp_cfg[0]`).
+/// Singleton XDP configuration (`xdp_cfg[0]`). Rate limiting uses GCRA:
+/// `emission_ns = 1e9 / pps`, `tau_ns = emission_ns * (burst - 1)`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
 pub struct XdpConfig {
-    /// Packets per second allowed per source **per CPU** (kavachd divides by nr_cpus).
-    pub pps_per_cpu: u64,
-    /// Bucket depth in packets.
-    pub burst: u64,
+    pub emission_ns: u64,
+    pub tau_ns: u64,
     /// Emit 1 of every N drop events (0 = no events).
     pub sample_rate: u32,
     /// `KV_XDP_F_*`.
@@ -219,27 +225,51 @@ pub struct XdpConfig {
 // Identity
 // ---------------------------------------------------------------------------------------------
 
-/// Key for `exe_class`: the executable's inode. `dev` is the **kernel** `s_dev` encoding
-/// (`major << 20 | minor`), not the userspace `st_dev` encoding.
+/// Value of `uid_class` (key `u32` uid) and `cgroup_class` (key `u64` cgroup id):
+/// selector masks **per policy slot**, so selector renumbering in a new bundle never mixes
+/// with the active slot's rules.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
+pub struct ClassVal {
+    pub mask: [u64; 2],
+}
+
+/// Key for `exe_class` / `exe_dirty`: the executable's inode **as the kernel sees it**
+/// (`i_sb->s_dev`, `i_generation`, `i_ino`). kavachd never derives it from `stat(2)` (the
+/// encodings differ, e.g. on btrfs); it copies it from `Exec` events. `i_generation` changes when
+/// an inode number is reused, so a new file never inherits an old classification.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Pod, Zeroable)]
 pub struct ExeKey {
     pub dev: u32,
-    pub _pad: u32,
+    pub generation: u32,
     pub ino: u64,
 }
 
-/// Who owns a socket. Written to `identity_by_cookie` by the LSM program. 48 bytes.
+/// `exe_class` value, owned by kavachd. Valid only while `exe_dirty[key] == seq_at_hash`
+/// (absent = 0). The BPF side bumps `exe_dirty` on every write-open or truncate of an
+/// executable regular file, which closes the hash-then-modify race.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
+pub struct ExeClass {
+    pub mask: [u64; 2],
+    pub seq_at_hash: u64,
+    pub _reserved: u64,
+}
+
+/// Socket owner, kept in `sk_ident` (SK_STORAGE, freed with the socket). 64 bytes.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
 pub struct Identity {
     pub cgroup_id: u64,
-    /// Selector mask the process matched at connect time.
-    pub mask: u64,
+    pub exe: ExeKey,
     pub pid: u32,
     pub uid: u32,
     pub gid: u32,
-    pub _pad: u32,
+    /// Generation `mask` was computed for.
+    pub generation: u32,
+    /// Selector mask computed at connect time.
+    pub mask: u64,
     pub comm: [u8; 16],
 }
 
@@ -247,7 +277,7 @@ pub struct Identity {
 // Policy tables
 // ---------------------------------------------------------------------------------------------
 
-/// Per-slot header (`policy_slots[slot]`). 64 bytes.
+/// Header of one policy slot. 64 bytes.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
 pub struct PolicyHeader {
@@ -273,14 +303,15 @@ pub struct PolicyHeader {
     pub _reserved: u64,
 }
 
-/// One compiled rule (`policy_rules[slot * KV_MAX_RULES + i]`). 48 bytes.
+/// One compiled rule. 48 bytes.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
 pub struct Rule {
     /// Selector mask; 0 = any identity.
     pub sel: u64,
     pub id: u32,
-    /// Remote address set (egress: destination, ingress: source); 0 = any address.
+    /// Remote address set id 1..=64 (egress: destination, ingress: source); 0 = any address.
+    /// Matches when bit `remote_set - 1` is set in the destination's `addr_sets` bitmap.
     pub remote_set: u32,
     /// Service port range, host order (egress: remote port, ingress: local port).
     pub port_lo: u16,
@@ -298,14 +329,28 @@ pub struct Rule {
     pub _reserved: [u64; 2],
 }
 
-/// `LPM_TRIE` key for `addr_sets`. `slot` and `set_id` are always fully matched, so
-/// `prefixlen = 64 + address prefix bits`.
+/// One whole policy slot (`policy_slots[slot]`): looked up once per evaluation, then indexed.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Pod, Zeroable)]
+pub struct Policy {
+    pub hdr: PolicyHeader,
+    pub rules: [Rule; 1024],
+}
+
+impl Default for Policy {
+    fn default() -> Self {
+        Zeroable::zeroed()
+    }
+}
+
+/// `LPM_TRIE` key for `addr_sets` → `u64` set bitmap. `slot` is always fully matched, so
+/// `prefixlen = 32 + address prefix bits`. The compiler flattens overlapping prefixes so the
+/// longest match carries the union of every set containing it — one lookup per evaluation.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
-pub struct AddrSetKey {
+pub struct AddrKey {
     pub prefixlen: u32,
     pub slot: u32,
-    pub set_id: u32,
     pub addr: [u8; 16],
 }
 
@@ -330,9 +375,11 @@ pub struct Event {
     pub pid: u32,
     pub uid: u32,
     pub cgroup_id: u64,
-    /// Identity selector mask (or, for `Exec`/`ExeTainted`, the inode number).
+    /// Identity selector mask. For `Exec` / `ExeTainted`: the inode number.
     pub identity: u64,
+    /// Matching rule id. For `Exec` / `ExeTainted`: the kernel `s_dev`.
     pub rule_id: u32,
+    /// Policy generation. For `Exec` / `ExeTainted`: the inode's `i_generation`.
     pub generation: u32,
     pub comm: [u8; 16],
 }
@@ -351,17 +398,21 @@ assert_size!(FlowVal, 48);
 assert_size!(BlockKey, 20);
 assert_size!(BlockVal, 16);
 assert_size!(SrcKey, 16);
-assert_size!(TokenBucket, 16);
+assert_size!(RateState, 16);
 assert_size!(XdpConfig, 24);
+assert_size!(ClassVal, 16);
+assert_size!(ExeClass, 32);
 assert_size!(ExeKey, 16);
-assert_size!(Identity, 48);
+assert_size!(Identity, 64);
 assert_size!(PolicyHeader, 64);
 assert_size!(Rule, 48);
-assert_size!(AddrSetKey, 28);
+assert_size!(Policy, 64 + 48 * KV_MAX_RULES as usize);
+assert_size!(AddrKey, 24);
 assert_size!(Event, 104);
 const _: () = assert!(core::mem::offset_of!(FlowKey, src) == 8);
 const _: () = assert!(core::mem::offset_of!(Event, key) == 16);
 const _: () = assert!(core::mem::offset_of!(Event, comm) == 88);
+const _: () = assert!(core::mem::offset_of!(Policy, rules) == 64);
 
 /// `(name, size)` of every ABI struct, used by `xtask codegen` to emit C `_Static_assert`s.
 pub const LAYOUT: &[(&str, usize)] = &[
@@ -370,12 +421,15 @@ pub const LAYOUT: &[(&str, usize)] = &[
     ("kv_block_key", core::mem::size_of::<BlockKey>()),
     ("kv_block_val", core::mem::size_of::<BlockVal>()),
     ("kv_src_key", core::mem::size_of::<SrcKey>()),
-    ("kv_token_bucket", core::mem::size_of::<TokenBucket>()),
+    ("kv_rate_state", core::mem::size_of::<RateState>()),
     ("kv_xdp_config", core::mem::size_of::<XdpConfig>()),
+    ("kv_class_val", core::mem::size_of::<ClassVal>()),
     ("kv_exe_key", core::mem::size_of::<ExeKey>()),
+    ("kv_exe_class", core::mem::size_of::<ExeClass>()),
     ("kv_identity", core::mem::size_of::<Identity>()),
     ("kv_policy_header", core::mem::size_of::<PolicyHeader>()),
     ("kv_rule", core::mem::size_of::<Rule>()),
-    ("kv_addr_set_key", core::mem::size_of::<AddrSetKey>()),
+    ("kv_policy", core::mem::size_of::<Policy>()),
+    ("kv_addr_key", core::mem::size_of::<AddrKey>()),
     ("kv_event", core::mem::size_of::<Event>()),
 ];

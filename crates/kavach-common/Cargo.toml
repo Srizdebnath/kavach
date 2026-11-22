@@ -14,7 +14,7 @@ std = []
 
 [dependencies]
 bytemuck = { workspace = true }
-aya = { workspace = true, optional = true }
+aya = { optional = true, version = "0.16" }
 
 [lints]
 workspace = true

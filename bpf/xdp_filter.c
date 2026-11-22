@@ -30,44 +30,39 @@ static __always_inline void xdp_emit_drop(struct xdp_md *ctx, const struct kv_pk
 }
 
 /*
- * Token bucket in fixed point: tokens are scaled by KV_TOKEN_SCALE, one packet costs
- * KV_TOKEN_SCALE, refill is elapsed_ns * pps (elapsed capped at 10 s so the product stays far
- * below 2^64 for pps <= 10^8). Per-CPU value, so no atomics are needed.
- * Returns 1 if the packet conforms.
+ * GCRA (generic cell rate algorithm) — equivalent to a token bucket but with ONE u64 of state,
+ * so it can be shared by all CPUs and updated with compare-and-swap (no per-CPU skew, no
+ * RSS-dependent limits). emission_ns = 1e9/pps, tau_ns = emission_ns * (burst - 1).
+ * IPv6 sources are keyed per /64. Returns 1 if the packet conforms.
  */
 static __always_inline int xdp_rate_ok(const struct kv_pkt *p, const struct kv_xdp_config *cfg,
 				       __u64 now)
 {
 	struct kv_src_key sk;
-	__u64 cap = cfg->burst * KV_TOKEN_SCALE;
 
 	__builtin_memcpy(sk.addr, p->key.src, sizeof(sk.addr));
-	struct kv_token_bucket *tb = bpf_map_lookup_elem(&rate_buckets, &sk);
-	if (!tb) {
-		struct kv_token_bucket fresh = {
-			.tokens = cap > KV_TOKEN_SCALE ? cap - KV_TOKEN_SCALE : 0,
-			.last_ns = now,
-		};
-		bpf_map_update_elem(&rate_buckets, &sk, &fresh, BPF_ANY);
-		return cap >= KV_TOKEN_SCALE;
+	if (p->key.family == KV_AF_INET6)
+		__builtin_memset(sk.addr + 8, 0, 8);
+
+	struct kv_rate_state *st = bpf_map_lookup_elem(&rate_buckets, &sk);
+	if (!st) {
+		struct kv_rate_state fresh = { .tat_ns = now + cfg->emission_ns };
+		bpf_map_update_elem(&rate_buckets, &sk, &fresh, BPF_NOEXIST);
+		return 1;
 	}
 
-	__u64 elapsed = now - tb->last_ns;
-	if (elapsed > 10ULL * 1000000000ULL)
-		elapsed = 10ULL * 1000000000ULL;
-	__u64 pps = cfg->pps_per_cpu;
-	if (pps > 100000000ULL)
-		pps = 100000000ULL;
-	__u64 tokens = tb->tokens + elapsed * pps;
-	if (tokens > cap)
-		tokens = cap;
-	tb->last_ns = now;
-	if (tokens < KV_TOKEN_SCALE) {
-		tb->tokens = tokens;
-		return 0;
+#pragma unroll
+	for (int i = 0; i < 3; i++) {
+		__u64 old = READ_ONCE(st->tat_ns);
+		__u64 tat = old > now ? old : now;
+		if (tat - now > cfg->tau_ns) {
+			__sync_fetch_and_add(&st->drops, 1);
+			return 0;
+		}
+		if (__sync_val_compare_and_swap(&st->tat_ns, old, tat + cfg->emission_ns) == old)
+			return 1;
 	}
-	tb->tokens = tokens - KV_TOKEN_SCALE;
-	return 1;
+	return 1; /* heavy contention on one key: conform rather than spin */
 }
 
 SEC("xdp")

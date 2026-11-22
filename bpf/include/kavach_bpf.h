@@ -14,6 +14,10 @@
 #include <bpf/bpf_tracing.h>
 #include "kavach_abi.h"
 
+#ifndef READ_ONCE
+#define READ_ONCE(x) (*(volatile typeof(x) *)&(x))
+#endif
+
 #define ETH_P_IP 0x0800
 #define ETH_P_IPV6 0x86DD
 #define ETH_P_8021Q 0x8100
@@ -38,15 +42,15 @@
 #define KV_BLOCKLIST_MAX 262144
 #define KV_RATE_MAX 65536
 #define KV_FLOW_MAX 262144
-#define KV_IDENT_MAX 65536
 #define KV_CLASS_MAX 65536
-#define KV_ADDRSET_MAX 16384
+#define KV_ADDRSET_MAX (2 * 8192)
 
 /* --------------------------------------------------------------------------------------------
  * Maps
  * ------------------------------------------------------------------------------------------ */
 
 struct {
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
 	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 	__uint(max_entries, KV_BLOCKLIST_MAX);
@@ -55,13 +59,15 @@ struct {
 } blocklist SEC(".maps");
 
 struct {
-	__uint(type, BPF_MAP_TYPE_LRU_PERCPU_HASH);
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
 	__uint(max_entries, KV_RATE_MAX);
 	__type(key, struct kv_src_key);
-	__type(value, struct kv_token_bucket);
+	__type(value, struct kv_rate_state);
 } rate_buckets SEC(".maps");
 
 struct {
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__uint(max_entries, 1);
 	__type(key, __u32);
@@ -69,6 +75,7 @@ struct {
 } xdp_cfg SEC(".maps");
 
 struct {
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
 	__uint(max_entries, KV_STAT_MAX);
 	__type(key, __u32);
@@ -76,63 +83,77 @@ struct {
 } stats SEC(".maps");
 
 struct {
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
 	__uint(type, BPF_MAP_TYPE_LRU_HASH);
 	__uint(max_entries, KV_FLOW_MAX);
 	__type(key, struct kv_flow_key);
 	__type(value, struct kv_flow_val);
 } flow_cache SEC(".maps");
 
+/* Socket owner; freed automatically with the socket. */
 struct {
-	__uint(type, BPF_MAP_TYPE_LRU_HASH);
-	__uint(max_entries, KV_IDENT_MAX);
-	__type(key, __u64);
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+	__uint(type, BPF_MAP_TYPE_SK_STORAGE);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+	__type(key, int);
 	__type(value, struct kv_identity);
-} identity_by_cookie SEC(".maps");
+} sk_ident SEC(".maps");
 
+/* Executable classification (kavachd-owned). */
 struct {
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__uint(max_entries, KV_CLASS_MAX);
 	__type(key, struct kv_exe_key);
-	__type(value, __u64);
+	__type(value, struct kv_exe_class);
 } exe_class SEC(".maps");
 
+/* Modification sequence (BPF-owned): bumped on write-open / truncate of executable files. */
 struct {
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
+	__uint(max_entries, KV_CLASS_MAX);
+	__type(key, struct kv_exe_key);
+	__type(value, __u64);
+} exe_dirty SEC(".maps");
+
+struct {
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__uint(max_entries, KV_CLASS_MAX);
 	__type(key, __u32);
-	__type(value, __u64);
+	__type(value, struct kv_class_val);
 } uid_class SEC(".maps");
 
 struct {
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__uint(max_entries, KV_CLASS_MAX);
 	__type(key, __u64);
-	__type(value, __u64);
+	__type(value, struct kv_class_val);
 } cgroup_class SEC(".maps");
 
+/* Two whole policies (A/B). One lookup per evaluation, then direct indexing. */
 struct {
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__uint(max_entries, KV_SLOTS);
 	__type(key, __u32);
-	__type(value, struct kv_policy_header);
+	__type(value, struct kv_policy);
 } policy_slots SEC(".maps");
 
+/* {prefixlen, slot, addr} -> bitmap of address sets containing addr (flattened by compiler). */
 struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__uint(max_entries, KV_SLOTS * KV_MAX_RULES);
-	__type(key, __u32);
-	__type(value, struct kv_rule);
-} policy_rules SEC(".maps");
-
-struct {
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
 	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 	__uint(max_entries, KV_ADDRSET_MAX);
-	__type(key, struct kv_addr_set_key);
-	__type(value, __u8);
+	__type(key, struct kv_addr_key);
+	__type(value, __u64);
 } addr_sets SEC(".maps");
 
 struct {
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__uint(max_entries, 1);
 	__type(key, __u32);
@@ -140,9 +161,31 @@ struct {
 } policy_gen SEC(".maps");
 
 struct {
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
 	__uint(type, BPF_MAP_TYPE_RINGBUF);
 	__uint(max_entries, 1 << 20);
 } events SEC(".maps");
+
+/*
+ * RCU barrier: updating any element of a map-in-map from user space makes the kernel call
+ * synchronize_rcu() (maybe_wait_bpf_programs), i.e. wait for every in-flight non-sleepable BPF
+ * program. kavachd does this after flipping policy_gen and before reusing the old slot.
+ * No program reads these maps; sleepable programs must never read policy maps.
+ */
+struct kv_sync_inner_t {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, __u32);
+};
+struct kv_sync_inner_t sync_inner SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY_OF_MAPS);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__array(values, struct kv_sync_inner_t);
+} sync_rcu SEC(".maps");
 
 /* --------------------------------------------------------------------------------------------
  * Helpers

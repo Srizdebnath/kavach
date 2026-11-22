@@ -24,7 +24,7 @@ mod aya_pod {
         )*};
     }
     pod!(
-        FlowKey, FlowVal, BlockKey, BlockVal, SrcKey, TokenBucket, XdpConfig, ExeKey, Identity,
-        PolicyHeader, Rule, AddrSetKey, Event,
+        FlowKey, FlowVal, BlockKey, BlockVal, SrcKey, RateState, XdpConfig, ClassVal, ExeKey, ExeClass,
+        Identity, PolicyHeader, Rule, Policy, AddrKey, Event,
     );
 }

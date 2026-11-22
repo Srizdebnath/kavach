@@ -9,7 +9,7 @@ cpp_compat = false
 usize_is_size_t = false
 
 [export]
-include = ["FlowKey","FlowVal","BlockKey","BlockVal","SrcKey","TokenBucket","XdpConfig","ExeKey","Identity","PolicyHeader","Rule","AddrSetKey","Event","Verdict","StatReason","EventKind"]
+include = ["FlowKey","FlowVal","BlockKey","BlockVal","SrcKey","RateState","XdpConfig","ClassVal","ExeKey","ExeClass","Identity","PolicyHeader","Rule","Policy","AddrKey","Event","Verdict","StatReason","EventKind"]
 exclude = ["LAYOUT"]
 
 [export.rename]
@@ -18,13 +18,16 @@ exclude = ["LAYOUT"]
 "BlockKey" = "kv_block_key"
 "BlockVal" = "kv_block_val"
 "SrcKey" = "kv_src_key"
-"TokenBucket" = "kv_token_bucket"
+"RateState" = "kv_rate_state"
 "XdpConfig" = "kv_xdp_config"
+"ClassVal" = "kv_class_val"
 "ExeKey" = "kv_exe_key"
+"ExeClass" = "kv_exe_class"
+"Policy" = "kv_policy"
 "Identity" = "kv_identity"
 "PolicyHeader" = "kv_policy_header"
 "Rule" = "kv_rule"
-"AddrSetKey" = "kv_addr_set_key"
+"AddrKey" = "kv_addr_key"
 "Event" = "kv_event"
 "Verdict" = "kv_verdict"
 "StatReason" = "kv_stat"

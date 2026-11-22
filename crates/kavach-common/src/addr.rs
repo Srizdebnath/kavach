@@ -3,7 +3,7 @@
 
 use core::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-use crate::abi::{AddrSetKey, BlockKey};
+use crate::abi::{AddrKey, BlockKey, KV_RATE_V6_PREFIX, SrcKey};
 
 /// Bits of prefix contributed by the `::ffff:` mapping.
 pub const V4_MAPPED_PREFIX_BITS: u32 = 96;
@@ -58,16 +58,27 @@ impl BlockKey {
     }
 }
 
-impl AddrSetKey {
-    /// Bits used by the always-exact `slot` + `set_id` prefix.
-    pub const HEADER_BITS: u32 = 64;
+impl AddrKey {
+    /// Bits used by the always-exact `slot` prefix.
+    pub const HEADER_BITS: u32 = 32;
 
-    pub fn from_cidr(slot: u32, set_id: u32, ip: IpAddr, len: u8) -> Self {
+    pub fn from_cidr(slot: u32, ip: IpAddr, len: u8) -> Self {
         let p = mapped_prefix(ip, len);
-        Self { prefixlen: Self::HEADER_BITS + p, slot, set_id, addr: mask_addr(to_mapped(ip), p) }
+        Self { prefixlen: Self::HEADER_BITS + p, slot, addr: mask_addr(to_mapped(ip), p) }
     }
-    pub fn host(slot: u32, set_id: u32, addr: [u8; 16]) -> Self {
-        Self { prefixlen: Self::HEADER_BITS + 128, slot, set_id, addr }
+    pub fn host(slot: u32, addr: [u8; 16]) -> Self {
+        Self { prefixlen: Self::HEADER_BITS + 128, slot, addr }
+    }
+}
+
+impl SrcKey {
+    /// Rate-limit key: IPv4 /32, IPv6 /64.
+    pub fn for_source(ip: IpAddr) -> Self {
+        let m = to_mapped(ip);
+        match ip {
+            IpAddr::V4(_) => Self { addr: m },
+            IpAddr::V6(_) => Self { addr: mask_addr(m, KV_RATE_V6_PREFIX) },
+        }
     }
 }
 
@@ -133,6 +144,20 @@ mod tests {
     fn words_roundtrip() {
         let a = to_mapped(v4(1, 2, 3, 4));
         assert_eq!(from_words(to_words(a)), a);
+    }
+
+    #[test]
+    fn rate_key_v6_is_slash64() {
+        let a = SrcKey::for_source("2001:db8:1:2:aaaa:bbbb:cccc:dddd".parse().unwrap());
+        let b = SrcKey::for_source("2001:db8:1:2::1".parse().unwrap());
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn addr_key_prefix() {
+        let k = AddrKey::from_cidr(1, v4(10, 0, 0, 0), 8);
+        assert_eq!(k.prefixlen, 32 + 96 + 8);
+        assert_eq!(k.slot, 1);
     }
 
     #[test]

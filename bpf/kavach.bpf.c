@@ -4,5 +4,6 @@
  * share one instance of each map. Each program keeps its own source file (see the diagrams).
  */
 #include "xdp_filter.c"
+#include "lsm_egress.c"
 
 char LICENSE[] SEC("license") = "GPL";

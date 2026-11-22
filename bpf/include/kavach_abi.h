@@ -24,6 +24,16 @@
 #define KV_MAX_SELECTORS 64
 
 /**
+ * Maximum distinct address sets per policy (one bit each in a `u64` set bitmap).
+ */
+#define KV_MAX_SETS 64
+
+/**
+ * Maximum cgroup ancestor levels walked when matching cgroup selectors (subtree semantics).
+ */
+#define KV_CGROUP_LEVELS 8
+
+/**
  * Entries in the per-CPU `stats` array.
  */
 #define KV_STAT_MAX 16
@@ -97,9 +107,9 @@
 #define KV_FLOW_F_INGRESS (1 << 1)
 
 /**
- * Fixed-point scale for token buckets: one packet costs this many "nano-tokens".
+ * IPv6 sources are rate-limited per /64 (an attacker controls a whole /64).
  */
-#define KV_TOKEN_SCALE 1000000000
+#define KV_RATE_V6_PREFIX 64
 
 /**
  * Final decision for a packet, connection or flow.
@@ -147,6 +157,8 @@ enum kv_stat
   KV_STAT_FLOW_CACHE_MISS = 10,
   KV_STAT_EVENTS_LOST = 11,
   KV_STAT_POLICY_NO_SLOT = 12,
+  KV_STAT_EXE_UNCLASSIFIED = 13,
+  KV_STAT_FLOW_CACHE_STALE = 14,
 };
 #if __STDC_VERSION__ >= 202311L
 typedef enum kv_stat kv_stat;
@@ -247,35 +259,33 @@ struct kv_block_val {
 };
 
 /**
- * Key for `rate_buckets`.
+ * Key for `rate_buckets`: IPv4 /32 or IPv6 /64 (low 64 bits zeroed), mapped form.
  */
 struct kv_src_key {
   __u8 addr[16];
 };
 
 /**
- * Per-source, per-CPU token bucket.
+ * GCRA state, shared across CPUs and updated with compare-and-swap.
  */
-struct kv_token_bucket {
+struct kv_rate_state {
   /**
-   * Available tokens × [`KV_TOKEN_SCALE`].
+   * Theoretical arrival time of the next conforming packet (`CLOCK_BOOTTIME` ns).
    */
-  __u64 tokens;
-  __u64 last_ns;
+  __u64 tat_ns;
+  /**
+   * Packets dropped for this source (approximate, for observability).
+   */
+  __u64 drops;
 };
 
 /**
- * Singleton XDP configuration (`xdp_cfg[0]`).
+ * Singleton XDP configuration (`xdp_cfg[0]`). Rate limiting uses GCRA:
+ * `emission_ns = 1e9 / pps`, `tau_ns = emission_ns * (burst - 1)`.
  */
 struct kv_xdp_config {
-  /**
-   * Packets per second allowed per source **per CPU** (kavachd divides by nr_cpus).
-   */
-  __u64 pps_per_cpu;
-  /**
-   * Bucket depth in packets.
-   */
-  __u64 burst;
+  __u64 emission_ns;
+  __u64 tau_ns;
   /**
    * Emit 1 of every N drop events (0 = no events).
    */
@@ -287,33 +297,59 @@ struct kv_xdp_config {
 };
 
 /**
- * Key for `exe_class`: the executable's inode. `dev` is the **kernel** `s_dev` encoding
- * (`major << 20 | minor`), not the userspace `st_dev` encoding.
+ * Value of `uid_class` (key `u32` uid) and `cgroup_class` (key `u64` cgroup id):
+ * selector masks **per policy slot**, so selector renumbering in a new bundle never mixes
+ * with the active slot's rules.
+ */
+struct kv_class_val {
+  __u64 mask[2];
+};
+
+/**
+ * Key for `exe_class` / `exe_dirty`: the executable's inode **as the kernel sees it**
+ * (`i_sb->s_dev`, `i_generation`, `i_ino`). kavachd never derives it from `stat(2)` (the
+ * encodings differ, e.g. on btrfs); it copies it from `Exec` events. `i_generation` changes when
+ * an inode number is reused, so a new file never inherits an old classification.
  */
 struct kv_exe_key {
   __u32 dev;
-  __u32 _pad;
+  __u32 generation;
   __u64 ino;
 };
 
 /**
- * Who owns a socket. Written to `identity_by_cookie` by the LSM program. 48 bytes.
+ * `exe_class` value, owned by kavachd. Valid only while `exe_dirty[key] == seq_at_hash`
+ * (absent = 0). The BPF side bumps `exe_dirty` on every write-open or truncate of an
+ * executable regular file, which closes the hash-then-modify race.
+ */
+struct kv_exe_class {
+  __u64 mask[2];
+  __u64 seq_at_hash;
+  __u64 _reserved;
+};
+
+/**
+ * Socket owner, kept in `sk_ident` (SK_STORAGE, freed with the socket). 64 bytes.
  */
 struct kv_identity {
   __u64 cgroup_id;
-  /**
-   * Selector mask the process matched at connect time.
-   */
-  __u64 mask;
+  struct kv_exe_key exe;
   __u32 pid;
   __u32 uid;
   __u32 gid;
-  __u32 _pad;
+  /**
+   * Generation `mask` was computed for.
+   */
+  __u32 generation;
+  /**
+   * Selector mask computed at connect time.
+   */
+  __u64 mask;
   __u8 comm[16];
 };
 
 /**
- * Per-slot header (`policy_slots[slot]`). 64 bytes.
+ * Header of one policy slot. 64 bytes.
  */
 struct kv_policy_header {
   __u32 n_rules;
@@ -355,7 +391,7 @@ struct kv_policy_header {
 };
 
 /**
- * One compiled rule (`policy_rules[slot * KV_MAX_RULES + i]`). 48 bytes.
+ * One compiled rule. 48 bytes.
  */
 struct kv_rule {
   /**
@@ -364,7 +400,8 @@ struct kv_rule {
   __u64 sel;
   __u32 id;
   /**
-   * Remote address set (egress: destination, ingress: source); 0 = any address.
+   * Remote address set id 1..=64 (egress: destination, ingress: source); 0 = any address.
+   * Matches when bit `remote_set - 1` is set in the destination's `addr_sets` bitmap.
    */
   __u32 remote_set;
   /**
@@ -396,13 +433,21 @@ struct kv_rule {
 };
 
 /**
- * `LPM_TRIE` key for `addr_sets`. `slot` and `set_id` are always fully matched, so
- * `prefixlen = 64 + address prefix bits`.
+ * One whole policy slot (`policy_slots[slot]`): looked up once per evaluation, then indexed.
  */
-struct kv_addr_set_key {
+struct kv_policy {
+  struct kv_policy_header hdr;
+  struct kv_rule rules[1024];
+};
+
+/**
+ * `LPM_TRIE` key for `addr_sets` → `u64` set bitmap. `slot` is always fully matched, so
+ * `prefixlen = 32 + address prefix bits`. The compiler flattens overlapping prefixes so the
+ * longest match carries the union of every set containing it — one lookup per evaluation.
+ */
+struct kv_addr_key {
   __u32 prefixlen;
   __u32 slot;
-  __u32 set_id;
   __u8 addr[16];
 };
 
@@ -430,10 +475,16 @@ struct kv_event {
   __u32 uid;
   __u64 cgroup_id;
   /**
-   * Identity selector mask (or, for `Exec`/`ExeTainted`, the inode number).
+   * Identity selector mask. For `Exec` / `ExeTainted`: the inode number.
    */
   __u64 identity;
+  /**
+   * Matching rule id. For `Exec` / `ExeTainted`: the kernel `s_dev`.
+   */
   __u32 rule_id;
+  /**
+   * Policy generation. For `Exec` / `ExeTainted`: the inode's `i_generation`.
+   */
   __u32 generation;
   __u8 comm[16];
 };
@@ -445,13 +496,16 @@ _Static_assert(sizeof(struct kv_flow_val) == 48, "ABI drift: kv_flow_val");
 _Static_assert(sizeof(struct kv_block_key) == 20, "ABI drift: kv_block_key");
 _Static_assert(sizeof(struct kv_block_val) == 16, "ABI drift: kv_block_val");
 _Static_assert(sizeof(struct kv_src_key) == 16, "ABI drift: kv_src_key");
-_Static_assert(sizeof(struct kv_token_bucket) == 16, "ABI drift: kv_token_bucket");
+_Static_assert(sizeof(struct kv_rate_state) == 16, "ABI drift: kv_rate_state");
 _Static_assert(sizeof(struct kv_xdp_config) == 24, "ABI drift: kv_xdp_config");
+_Static_assert(sizeof(struct kv_class_val) == 16, "ABI drift: kv_class_val");
 _Static_assert(sizeof(struct kv_exe_key) == 16, "ABI drift: kv_exe_key");
-_Static_assert(sizeof(struct kv_identity) == 48, "ABI drift: kv_identity");
+_Static_assert(sizeof(struct kv_exe_class) == 32, "ABI drift: kv_exe_class");
+_Static_assert(sizeof(struct kv_identity) == 64, "ABI drift: kv_identity");
 _Static_assert(sizeof(struct kv_policy_header) == 64, "ABI drift: kv_policy_header");
 _Static_assert(sizeof(struct kv_rule) == 48, "ABI drift: kv_rule");
-_Static_assert(sizeof(struct kv_addr_set_key) == 28, "ABI drift: kv_addr_set_key");
+_Static_assert(sizeof(struct kv_policy) == 49216, "ABI drift: kv_policy");
+_Static_assert(sizeof(struct kv_addr_key) == 24, "ABI drift: kv_addr_key");
 _Static_assert(sizeof(struct kv_event) == 104, "ABI drift: kv_event");
 _Static_assert(__builtin_offsetof(struct kv_flow_key, src) == 8, "ABI drift");
 _Static_assert(__builtin_offsetof(struct kv_event, key) == 16, "ABI drift");

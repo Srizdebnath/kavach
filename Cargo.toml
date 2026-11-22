@@ -40,7 +40,7 @@ ed25519-dalek = { version = "2", features = ["rand_core"] }
 sha2 = "0.10"
 postcard = { version = "1", features = ["alloc"] }
 ipnet = { version = "2", features = ["serde"] }
-bytemuck = { version = "1", features = ["derive"] }
+bytemuck = { version = "1", features = ["derive", "min_const_generics"] }
 proptest = "1"
 aya = "0.16"
 aya-log = "0.4"
