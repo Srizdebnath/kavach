@@ -4,6 +4,7 @@ members = [
     "crates/kavach-common",
     "crates/kavach-core",
     "crates/kavach-parsers",
+    "crates/kavach-gateway",
     "crates/kavach-policy",
     "crates/kavach-api",
     "crates/kavachd",

@@ -1,0 +1,16 @@
+[package]
+name = "kavach-gateway"
+description = "Kavach L7 agent gateway (v0.4 preview): MCP / A2A policy decisions for punted flows"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true
