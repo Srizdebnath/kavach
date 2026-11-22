@@ -124,7 +124,7 @@
 
 /**
  * The file lives on a filesystem whose content kavachd cannot vouch for (memfd / internal
- * mount, FUSE, network, overlay, ...): it is never classified.
+ * mount, FUSE, network, overlay, a loop/nbd/ublk device, ...): it is never classified.
  */
 #define KV_REPORT_UNTRUSTED_FS 2
 
@@ -333,12 +333,15 @@ struct kv_class_val {
  * `i_ino`. Distinct live inodes never share a key, whatever the filesystem reports (btrfs
  * subvolumes share `s_dev` and reuse inode numbers; FUSE picks its own). The LSM deletes the
  * class when the inode is freed (`inode_free_security`), so a recycled pointer never inherits
- * one. kavachd only copies keys from events; `inode` is a kernel address and never leaves the
- * daemon (event rendering zeroes it).
+ * one; `dev` (`s_dev`) and `generation` (`i_generation`) must match too, as a second line should
+ * that delete ever fail. kavachd only copies keys from events; `inode` is a kernel address and
+ * never leaves the daemon (event rendering zeroes it).
  */
 struct kv_exe_key {
   __u64 inode;
   __u64 ino;
+  __u32 dev;
+  __u32 generation;
 };
 
 /**
@@ -376,7 +379,7 @@ struct kv_key_req {
 };
 
 /**
- * Socket owner, kept in `sk_ident` (SK_STORAGE, freed with the socket). 64 bytes.
+ * Socket owner, kept in `sk_ident` (SK_STORAGE, freed with the socket). 72 bytes.
  */
 struct kv_identity {
   __u64 cgroup_id;
@@ -535,7 +538,7 @@ struct kv_event {
   __u32 rule_id;
   /**
    * Policy generation. For `Exec` / `ExeTainted` / `KeyReport`: high half of
-   * [`ExeKey::inode`].
+   * [`ExeKey::inode`] (and `key.dst[0..2]` carry [`ExeKey::dev`] / [`ExeKey::generation`]).
    */
   __u32 generation;
   __u8 comm[16];
@@ -551,10 +554,10 @@ _Static_assert(sizeof(struct kv_src_key) == 16, "ABI drift: kv_src_key");
 _Static_assert(sizeof(struct kv_rate_state) == 16, "ABI drift: kv_rate_state");
 _Static_assert(sizeof(struct kv_xdp_config) == 24, "ABI drift: kv_xdp_config");
 _Static_assert(sizeof(struct kv_class_val) == 16, "ABI drift: kv_class_val");
-_Static_assert(sizeof(struct kv_exe_key) == 16, "ABI drift: kv_exe_key");
+_Static_assert(sizeof(struct kv_exe_key) == 24, "ABI drift: kv_exe_key");
 _Static_assert(sizeof(struct kv_exe_class) == 32, "ABI drift: kv_exe_class");
 _Static_assert(sizeof(struct kv_key_req) == 16, "ABI drift: kv_key_req");
-_Static_assert(sizeof(struct kv_identity) == 64, "ABI drift: kv_identity");
+_Static_assert(sizeof(struct kv_identity) == 72, "ABI drift: kv_identity");
 _Static_assert(sizeof(struct kv_policy_header) == 64, "ABI drift: kv_policy_header");
 _Static_assert(sizeof(struct kv_rule) == 48, "ABI drift: kv_rule");
 _Static_assert(sizeof(struct kv_policy) == 49216, "ABI drift: kv_policy");

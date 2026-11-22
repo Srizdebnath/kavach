@@ -788,6 +788,32 @@ log = {{ to = "192.0.2.0/24" }}
         f.k().exe_class(&rep.key).unwrap().is_none(),
         "no placeholder for an untrusted filesystem"
     );
+
+    // ext4 on a loop device: the backing image can be rewritten underneath the mount.
+    let img = dir.path().join("fs.img");
+    let mnt = dir.path().join("mnt");
+    std::fs::create_dir(&mnt).unwrap();
+    let sh = |c: &str| {
+        std::process::Command::new("sh")
+            .args(["-c", c])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    };
+    if sh(&format!(
+        "truncate -s 8M {i} && mkfs.ext4 -q -F {i} && mount -o loop {i} {m} && cp /usr/bin/true {m}/t",
+        i = img.display(),
+        m = mnt.display()
+    )) {
+        let (rep, file) = key_report(&mut f, &mut rb, mnt.join("t").to_str().unwrap());
+        drop(file);
+        let _ = sh(&format!("umount {}", mnt.display()));
+        assert!(rep.untrusted_fs, "loop-backed filesystem is untrusted");
+    } else {
+        let _ = sh(&format!("umount {}", mnt.display()));
+        eprintln!("skipping loop-device check (mkfs.ext4 / loop mount unavailable)");
+    }
     let _ = IpNet::from(IpAddr::V4(Ipv4Addr::LOCALHOST));
 }
 

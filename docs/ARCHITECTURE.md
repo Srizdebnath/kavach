@@ -60,7 +60,7 @@ serves both families.
 |---|---|---|
 | `FlowKey` | 40 | family, proto, ports (network order), src, dst |
 | `FlowVal` | 48 | identity mask, rule_id, **u32 generation** Δ, verdict, flags (REPLY/INGRESS), counters |
-| `ExeKey` | 16 | `{inode pointer, i_ino}` of the live kernel inode Δ |
+| `ExeKey` | 24 | `{inode pointer, i_ino, s_dev, i_generation}` of the live kernel inode Δ |
 | `ExeClass` | 32 | `mask[2]` (one per policy slot) + `nonce` of the key request |
 | `KeyReq` | 16 | one-shot `{nonce, tid}` armed by kavachd |
 | `ClassVal` | 16 | `mask[2]` for uid / cgroup classes |
@@ -129,8 +129,12 @@ m = (exe_mask | wild_exe) & (uid_mask | wild_uid) & (cgroup_mask | wild_cgroup) 
   squashfs and erofs, and never for kernel-internal mounts. memfd/shm files change without a
   write-open; FUSE servers can show kavachd different bytes than the loader; network filesystems
   have remote writers; overlayfs lower/upper files can be rewritten behind the overlay inode
-  (rootless containers). Processes from those get exe mask 0 and fall back to uid/cgroup
-  selectors (use cgroup selectors for containers).
+  (rootless containers). Filesystems on loop, nbd or ublk devices are refused too: a desktop
+  user can loop-mount an image file (udisks) and rewrite it underneath the mount. Processes from
+  those get exe mask 0 and fall back to uid/cgroup selectors (use cgroup selectors for
+  containers). Known residual: device-mapper stacked on a loop device (e.g. a LUKS image unlocked
+  via udisks) and filesystems without `s_bdev` (multi-device btrfs) are not traced to their
+  backing device.
 * kavachd learns keys from three sources:
   1. `bprm_committed_creds` exec events.
   2. A startup task iterator (`iter/task`) over all running processes.

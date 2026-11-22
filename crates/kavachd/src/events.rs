@@ -1,6 +1,7 @@
 //! Ring-buffer reader: decodes kernel events, feeds the identity broker, fans out to
 //! `kavachctl events` subscribers and samples verdicts into the audit log.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -32,6 +33,9 @@ const REPORT_TIMEOUT: Duration = Duration::from_secs(1);
 const OPEN_TIMEOUT: Duration = Duration::from_secs(2);
 /// Concurrent classifications (hashing) in the broker.
 const HASHERS: usize = 4;
+/// Blocking threads currently inside a key-request open (stuck ones included).
+static STUCK_OPENERS: AtomicUsize = AtomicUsize::new(0);
+const MAX_STUCK_OPENERS: usize = 8;
 
 pub fn decode(bytes: &[u8]) -> Option<Event> {
     (bytes.len() >= std::mem::size_of::<Event>())
@@ -269,7 +273,7 @@ async fn classify(
         if let Ok(mut st) = state.lock() {
             st.key_waiters.remove(&nonce);
             if let Ok(k) = st.k() {
-                let _ = k.set_key_req(0, 0);
+                let _ = k.disarm_key_req(nonce);
             }
             if let Some(key) = expect {
                 st.abandon_classification(key, nonce);
@@ -280,9 +284,23 @@ async fn classify(
     let opened = {
         // Spawned under the gate: spawn_blocking starts running immediately.
         let _one_request_at_a_time = gate.lock().await;
+        // A timed-out opener stays stuck in its blocking thread; cap them so a hung filesystem
+        // cannot exhaust the blocking pool.
+        if STUCK_OPENERS.load(Ordering::Relaxed) >= MAX_STUCK_OPENERS {
+            drop(_one_request_at_a_time);
+            return Err(give_up("too many hung opens; not classifying".into()));
+        }
         let opener = {
             let (st, path) = (state.clone(), path.to_owned());
+            STUCK_OPENERS.fetch_add(1, Ordering::Relaxed);
             tokio::task::spawn_blocking(move || -> Result<std::fs::File> {
+                struct Done;
+                impl Drop for Done {
+                    fn drop(&mut self) {
+                        STUCK_OPENERS.fetch_sub(1, Ordering::Relaxed);
+                    }
+                }
+                let _done = Done;
                 let tid = nix::unistd::gettid().as_raw() as u32;
                 st.lock()
                     .map_err(|_| anyhow::anyhow!("state poisoned"))?
@@ -292,7 +310,7 @@ async fn classify(
                 if let Ok(mut s) = st.lock()
                     && let Ok(k) = s.k()
                 {
-                    let _ = k.set_key_req(0, 0);
+                    let _ = k.disarm_key_req(nonce);
                 }
                 Ok(f?)
             })

@@ -402,7 +402,7 @@ impl Daemon {
         let rows: Vec<serde_json::Value> = self
             .exe_cache
             .iter()
-            .map(|(k, v)| json!({ "inode": k.inode, "ino": k.ino, "nonce": v.nonce, "sha256": hex::encode(v.sha256), "path": v.path }))
+            .map(|(k, v)| json!({ "inode": k.inode, "ino": k.ino, "dev": k.dev, "gen": k.generation, "nonce": v.nonce, "sha256": hex::encode(v.sha256), "path": v.path }))
             .collect();
         let _ = std::fs::create_dir_all(&self.cfg.state_dir);
         let tmp = self.exe_cache_path().with_extension("tmp");
@@ -418,19 +418,35 @@ impl Daemon {
         if let Ok(bytes) = std::fs::read(self.exe_cache_path()) {
             let rows: Vec<serde_json::Value> = serde_json::from_slice(&bytes).unwrap_or_default();
             for r in rows {
-                let (Some(inode), Some(ino), Some(nonce), Some(sha), Some(path)) = (
+                let (
+                    Some(inode),
+                    Some(ino),
+                    Some(dev),
+                    Some(gen_),
+                    Some(nonce),
+                    Some(sha),
+                    Some(path),
+                ) = (
                     r["inode"].as_u64(),
                     r["ino"].as_u64(),
+                    r["dev"].as_u64(),
+                    r["gen"].as_u64(),
                     r["nonce"].as_u64(),
                     r["sha256"]
                         .as_str()
                         .and_then(|h| hex::decode(h).ok()?.try_into().ok()),
                     r["path"].as_str(),
-                ) else {
+                )
+                else {
                     continue; // includes rows in the old (dev, generation, ino) format
                 };
                 self.exe_cache.insert(
-                    ExeKey { inode, ino },
+                    ExeKey {
+                        inode,
+                        ino,
+                        dev: dev as u32,
+                        generation: gen_ as u32,
+                    },
                     ExeInfo {
                         sha256: sha,
                         path: path.to_owned(),
@@ -574,7 +590,7 @@ impl Daemon {
         let k = self.k()?;
         k.set_key_req(nonce, tid)?;
         let f = File::open(path);
-        k.set_key_req(0, 0)?;
+        k.disarm_key_req(nonce)?;
         Ok((nonce, f.with_context(|| format!("opening {path}"))?))
     }
 

@@ -422,6 +422,20 @@ impl Kernel {
         Ok(())
     }
 
+    /// Disarm the key request only if it is still ours: a late (timed-out) opener must not wipe
+    /// a newer request. All user-space writes to `key_req` happen under the state lock, so this
+    /// check-then-clear is atomic with respect to them.
+    pub fn disarm_key_req(&mut self, nonce: u64) -> Result<()> {
+        let cur = {
+            let m: Array<_, KeyReq> = Array::try_from(self.map("key_req")?)?;
+            m.get(&0, 0)?
+        };
+        if cur.nonce == nonce {
+            self.set_key_req(0, 0)?;
+        }
+        Ok(())
+    }
+
     /// Arm (or, with `nonce == 0`, disarm) the one-shot key request for thread `tid`.
     pub fn set_key_req(&mut self, nonce: u64, tid: u32) -> Result<()> {
         let mut m: Array<_, KeyReq> = Array::try_from(self.map("key_req")?)?;

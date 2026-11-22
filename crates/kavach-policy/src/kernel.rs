@@ -238,6 +238,8 @@ impl OfflineTables {
 const PROBE_KEY: ExeKey = ExeKey {
     inode: u64::MAX,
     ino: u64::MAX,
+    dev: 0,
+    generation: 0,
 };
 
 impl kavach_core::Tables for OfflineTables {

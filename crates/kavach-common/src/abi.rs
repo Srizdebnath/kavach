@@ -242,13 +242,16 @@ pub struct ClassVal {
 /// `i_ino`. Distinct live inodes never share a key, whatever the filesystem reports (btrfs
 /// subvolumes share `s_dev` and reuse inode numbers; FUSE picks its own). The LSM deletes the
 /// class when the inode is freed (`inode_free_security`), so a recycled pointer never inherits
-/// one. kavachd only copies keys from events; `inode` is a kernel address and never leaves the
-/// daemon (event rendering zeroes it).
+/// one; `dev` (`s_dev`) and `generation` (`i_generation`) must match too, as a second line should
+/// that delete ever fail. kavachd only copies keys from events; `inode` is a kernel address and
+/// never leaves the daemon (event rendering zeroes it).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Pod, Zeroable)]
 pub struct ExeKey {
     pub inode: u64,
     pub ino: u64,
+    pub dev: u32,
+    pub generation: u32,
 }
 
 /// `exe_class` value. Present = trusted: the LSM **deletes** the entry on every write-open or
@@ -278,7 +281,7 @@ pub const KV_EXE_F_COMMITTED: u64 = 1;
 /// `KeyReport` [`Event::verdict`] bits.
 pub const KV_REPORT_WRITERS: u8 = 1;
 /// The file lives on a filesystem whose content kavachd cannot vouch for (memfd / internal
-/// mount, FUSE, network, overlay, ...): it is never classified.
+/// mount, FUSE, network, overlay, a loop/nbd/ublk device, ...): it is never classified.
 pub const KV_REPORT_UNTRUSTED_FS: u8 = 2;
 
 /// `key_req[0]` (kavachd-owned): the next file_open by thread `tid` answers with a
@@ -291,7 +294,7 @@ pub struct KeyReq {
     pub _pad: u32,
 }
 
-/// Socket owner, kept in `sk_ident` (SK_STORAGE, freed with the socket). 64 bytes.
+/// Socket owner, kept in `sk_ident` (SK_STORAGE, freed with the socket). 72 bytes.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
 pub struct Identity {
@@ -416,7 +419,7 @@ pub struct Event {
     /// Matching rule id. For `Exec` / `ExeTainted` / `KeyReport`: low half of [`ExeKey::inode`].
     pub rule_id: u32,
     /// Policy generation. For `Exec` / `ExeTainted` / `KeyReport`: high half of
-    /// [`ExeKey::inode`].
+    /// [`ExeKey::inode`] (and `key.dst[0..2]` carry [`ExeKey::dev`] / [`ExeKey::generation`]).
     pub generation: u32,
     pub comm: [u8; 16],
 }
@@ -427,6 +430,8 @@ impl Event {
         ExeKey {
             inode: (self.generation as u64) << 32 | self.rule_id as u64,
             ino: self.identity,
+            dev: self.key.dst[0],
+            generation: self.key.dst[1],
         }
     }
 }
@@ -449,9 +454,9 @@ assert_size!(RateState, 16);
 assert_size!(XdpConfig, 24);
 assert_size!(ClassVal, 16);
 assert_size!(ExeClass, 32);
-assert_size!(ExeKey, 16);
+assert_size!(ExeKey, 24);
 assert_size!(KeyReq, 16);
-assert_size!(Identity, 64);
+assert_size!(Identity, 72);
 assert_size!(PolicyHeader, 64);
 assert_size!(Rule, 48);
 assert_size!(Policy, 64 + 48 * KV_MAX_RULES as usize);

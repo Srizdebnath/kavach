@@ -23,6 +23,39 @@ static __always_inline void kv_inode_key(struct inode *ino, struct kv_exe_key *k
 {
 	k->inode = (__u64)(unsigned long)ino;
 	k->ino = BPF_CORE_READ(ino, i_ino);
+	k->dev = BPF_CORE_READ(ino, i_sb, s_dev);
+	k->generation = BPF_CORE_READ(ino, i_generation);
+}
+
+/* Exe-kind events carry the key in identity / rule_id / generation / key.dst[0..2]. */
+static __always_inline void kv_event_exe_key(struct kv_event *e, const struct kv_exe_key *k)
+{
+	e->identity = k->ino;
+	e->rule_id = (__u32)k->inode;
+	e->generation = (__u32)(k->inode >> 32);
+	e->key.dst[0] = k->dev;
+	e->key.dst[1] = k->generation;
+}
+
+/* Block devices whose bytes an unprivileged user can control (udisks loop-setup of an image
+ * file, nbd, ublk): the image can be rewritten underneath a mounted, "trusted" filesystem. */
+static __always_inline bool kv_user_backed_bdev(struct super_block *sb)
+{
+	struct block_device *bdev = BPF_CORE_READ(sb, s_bdev);
+	if (!bdev)
+		return false;
+	struct gendisk *disk = BPF_CORE_READ(bdev, bd_disk);
+	if (!disk)
+		return false;
+	char n[6] = {};
+	bpf_core_read_str(n, sizeof(n), &disk->disk_name);
+	if (n[0] == 'l' && n[1] == 'o' && n[2] == 'o' && n[3] == 'p')
+		return true;
+	if (n[0] == 'n' && n[1] == 'b' && n[2] == 'd')
+		return true;
+	if (n[0] == 'u' && n[1] == 'b' && n[2] == 'l' && n[3] == 'k')
+		return true;
+	return false;
 }
 
 #define KV_SB_KERNMOUNT (1 << 22)
@@ -47,6 +80,8 @@ static __always_inline bool kv_trusted_file(struct file *f)
 		return false;
 	struct super_block *sb = BPF_CORE_READ(f, f_inode, i_sb);
 	if (BPF_CORE_READ(sb, s_flags) & KV_SB_KERNMOUNT)
+		return false;
+	if (kv_user_backed_bdev(sb))
 		return false;
 	switch (BPF_CORE_READ(sb, s_magic)) {
 	case KV_EXT4_MAGIC:
@@ -260,9 +295,7 @@ static __always_inline void kv_emit_exe(__u8 kind, const struct kv_exe_key *k)
 	e->pid = bpf_get_current_pid_tgid() >> 32;
 	e->uid = (__u32)bpf_get_current_uid_gid();
 	e->cgroup_id = bpf_get_current_cgroup_id();
-	e->identity = k->ino;
-	e->rule_id = (__u32)k->inode;
-	e->generation = (__u32)(k->inode >> 32);
+	kv_event_exe_key(e, k);
 	bpf_get_current_comm(e->comm, sizeof(e->comm));
 	bpf_ringbuf_submit(e, 0);
 }
@@ -343,9 +376,7 @@ static __always_inline void kv_key_report(struct file *file, struct inode *ino)
 	e->pid = bpf_get_current_pid_tgid() >> 32;
 	e->uid = (__u32)bpf_get_current_uid_gid();
 	e->cgroup_id = nonce;
-	e->identity = k.ino;
-	e->rule_id = (__u32)k.inode;
-	e->generation = (__u32)(k.inode >> 32);
+	kv_event_exe_key(e, &k);
 	bpf_get_current_comm(e->comm, sizeof(e->comm));
 	bpf_ringbuf_submit(e, 0);
 }
@@ -426,9 +457,7 @@ int kavach_task_scan(struct bpf_iter__task *ctx)
 		return 0;
 	e->kind = KV_EVENT_KIND_EXEC;
 	e->pid = BPF_CORE_READ(task, tgid);
-	e->identity = k.ino;
-	e->rule_id = (__u32)k.inode;
-	e->generation = (__u32)(k.inode >> 32);
+	kv_event_exe_key(e, &k);
 	BPF_CORE_READ_STR_INTO(&e->comm, task, comm);
 	bpf_ringbuf_submit(e, 0);
 	return 0;
