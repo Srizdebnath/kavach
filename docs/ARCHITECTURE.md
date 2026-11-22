@@ -1,222 +1,268 @@
 # KAVACH — Architecture (solution design)
 
-This document turns the two published diagrams into a buildable design. Where it deviates from
-the diagrams, the deviation is called out with **Δ** and a reason.
+This document turns the two published diagrams into the design that is actually built. Where it
+deviates from the diagrams, the deviation is marked **Δ** with a reason. Requirement IDs refer to
+[`SRS.md`](SRS.md).
 
 ## 1. Repository layout
 
 ```
 kavach/
-├── Cargo.toml                 # workspace root
-├── bpf/                       # C eBPF (clang -target bpf), GPL-2.0
-│   ├── include/kavach_abi.h   # GENERATED from kavach-common by `cargo xtask codegen` — do not edit
-│   ├── include/kavach_bpf.h   # shared helpers: parsing, bounded loops, maps
-│   ├── xdp_filter.c           # blocklist + rate limit
-│   ├── tc_flow.c              # flow cache, ingress rules, reply tracking
-│   └── lsm_egress.c           # socket_connect/sendmsg identity + egress verdict
-├── kernel/kavach-ko/          # (v0.4) Rust-for-Linux module exporting kavach_evaluate kfunc
+├── bpf/                       # C eBPF (clang -target bpf, CO-RE), GPL-2.0-only
+│   ├── kavach.bpf.c           # unity build: one object, one set of maps
+│   ├── include/kavach_abi.h   # GENERATED from kavach-common (`cargo xtask codegen`) — do not edit
+│   ├── include/kavach_bpf.h   # maps, packet parser, counters, ring-buffer helpers
+│   ├── include/kavach_eval.h  # snapshot, identity masks, rule scan (mirror of kavach-core)
+│   ├── xdp_filter.c           # blocklist + GCRA rate limit
+│   ├── tc_flow.c              # flow cache, reply tracking, ingress rules, re-evaluation
+│   └── lsm_egress.c           # connect/sendmsg verdicts, exec/taint tracking, task iterator
 ├── crates/
-│   ├── kavach-common/         # no_std, #[repr(C)] ABI — single source of truth
-│   ├── kavach-parsers/        # no_std, no alloc: TLS ClientHello / JA4 / DNS / QUIC
-│   ├── kavach-core/           # no_std: evaluate(), Platform trait, reference semantics
-│   ├── kavach-policy/         # kavach.toml → IR → tables → signed bundle
-│   ├── kavachd/               # tokio daemon, aya loader
-│   ├── kavachctl/             # clap CLI + ratatui TUI
-│   └── kavach-gateway/        # (v0.4) L7 proxy: MCP / A2A / WebSocket
-├── shims/{freebsd,macos}/     # (v0.5)
-├── fuzz/                      # cargo-fuzz targets
-├── tests/                     # netns / virtme-ng integration tests
-└── xtask/                     # codegen, build-bpf, vmlinux, release
+│   ├── kavach-common/         # no_std #[repr(C)] ABI + address helpers — single source of truth
+│   ├── kavach-core/           # no_std, forbid(unsafe): reference evaluator
+│   ├── kavach-policy/         # kavach.toml → CompiledPolicy → kernel tables; .kvb bundles; diff
+│   ├── kavach-api/            # control protocol (NDJSON over UDS) + hash-chained audit log
+│   ├── kavachd/               # tokio daemon, aya loader; tests/bpf.rs = privileged kernel suite
+│   └── kavachctl/             # operator CLI
+├── examples/                  # kavach.toml (policy), kavachd.toml (host config)
+├── packaging/systemd/         # hardened unit
+├── scripts/                   # priv-test.sh, ci-deps.sh
+└── xtask/                     # codegen [--check], vmlinux, build-bpf
 ```
+
+Planned (v0.4/v0.5): `kernel/kavach-ko` (Rust-for-Linux kfunc), `crates/kavach-parsers`
+(TLS/JA4/DNS), `crates/kavach-gateway` (L7), `shims/{freebsd,macos}`.
 
 ## 2. Crate dependency graph
 
 ```
-kavachctl ──┐                 kavach-gateway ──┐
-            ├──> kavach-policy ──> ed25519-dalek, serde, toml
-kavachd ────┘        │                          │
-   │  (aya loads)    v                          v
-   │            kavach-core ───────────> kavach-parsers
-   v                 │                          │
- bpf/*.c             └──────> kavach-common <───┘
-   ^                                │
-   └──── kavach_abi.h (cbindgen) ───┘
+kavachctl ──┬──> kavach-api ─────────────┐
+            ├──> kavach-policy ──┐       │
+kavachd ────┘        │           │       │
+   │ (aya)           v           v       v
+   │            kavach-core ──> kavach-common
+   v                                 │
+ bpf/*.c <── kavach_abi.h (cbindgen) ┘
 ```
 
-Rule: `kavach-common`, `kavach-parsers`, `kavach-core` are `#![no_std]` with zero `alloc`, so the
-same code can later be linked into `kavach.ko` (Rust-for-Linux) and the BSD kernel.
+`kavach-common` and `kavach-core` are `#![no_std]` without `alloc` (CI builds them for a
+bare-metal target), so the same code can later be linked into `kavach.ko` and the BSD kernel.
 
 ## 3. The ABI contract
 
-`crates/kavach-common/src/abi.rs` is the only place layouts are defined. `cargo xtask codegen`
-runs cbindgen to emit `bpf/include/kavach_abi.h`. Both sides carry compile-time size/offset
-assertions (`const _: () = assert!(...)` in Rust, `_Static_assert` in C); CI regenerates the
-header and fails if `git diff` is non-empty.
+`crates/kavach-common/src/abi.rs` is the only place layouts are defined (bytemuck `Pod`).
+`cargo xtask codegen` emits `bpf/include/kavach_abi.h` and appends a `_Static_assert` for the size
+of every type; CI runs `codegen --check`.
 
-All addresses are stored as 16-byte IPv6; IPv4 is IPv4-mapped (`::ffff:a.b.c.d`). **Δ** The
-diagram keys use `[u32;4]` plus a family byte — we keep that, but always fill the mapped form so
-one LPM trie serves both families.
+All addresses are 16 bytes; IPv4 is stored IPv4-mapped (`::ffff:a.b.c.d`), so one LPM trie
+serves both families.
 
-```rust
-#[repr(C)] pub struct FlowKey {          // 40 bytes
-    pub family: u8, pub proto: u8, pub _pad: [u8; 2],
-    pub sport: u16, pub dport: u16,      // network byte order
-    pub src: [u32; 4], pub dst: [u32; 4],
-}
-#[repr(C)] pub struct FlowVal {          // 40 bytes
-    pub identity: u64,                   // selector mask that matched
-    pub rule_id: u32, pub verdict: u8, pub gen: u8, pub flags: u8, pub _pad: u8,
-    pub last_seen_ns: u64, pub pkts: u64, pub bytes: u64,
-}
-#[repr(u8)] pub enum Verdict { Allow = 0, Drop = 1, Log = 2, Punt = 3 }
-```
+| Type | Size | Notes |
+|---|---|---|
+| `FlowKey` | 40 | family, proto, ports (network order), src, dst |
+| `FlowVal` | 48 | identity mask, rule_id, **u32 generation** Δ, verdict, flags (REPLY/INGRESS), counters |
+| `ExeKey` | 16 | `{s_dev, i_generation, ino}` read from the kernel inode Δ |
+| `ExeClass` | 32 | `mask[2]` (one per policy slot) + `seq_at_hash` |
+| `ClassVal` | 16 | `mask[2]` for uid / cgroup classes |
+| `PolicyHeader` | 64 | n_rules, defaults, fail mode, flags, wildcard masks, `sel_used` |
+| `Rule` | 48 | sel, id, set bitmap index, ports, proto, dir, verdict, fail, not_after |
+| `Policy` | header + 1024 rules | one map value per slot |
+| `Event` | 104 | ring-buffer record for every kind |
+
+**Δ u32 generation** in `FlowVal`: an 8-bit generation wraps after 256 applies and can make a stale
+entry look current.
 
 ## 4. BPF maps
 
+All maps except `sync_*` are pinned `LIBBPF_PIN_BY_NAME` under `/sys/fs/bpf/kavach/v1`
+(versioned so an incompatible layout never re-adopts old pins).
+
 | Map | Type | Key → Value | Writer | Reader |
 |-----|------|-------------|--------|--------|
-| `blocklist` | LPM_TRIE | `{prefixlen, addr[16]}` → `BlockVal{reason,expires}` | kavachd | XDP |
-| `rate_buckets` | **LRU_PERCPU_HASH** Δ | `addr[16]` → `TokenBucket{tokens,last_ns}` | XDP | XDP |
-| `xdp_cfg` | ARRAY[1] | 0 → `XdpConfig{pps,burst,sample_rate,flags}` | kavachd | XDP |
-| `stats` | PERCPU_ARRAY | reason → `u64` | all progs | kavachd |
-| `flow_cache` | LRU_HASH | `FlowKey` → `FlowVal` | TC, LSM, gateway | TC |
-| `identity_by_cookie` | LRU_HASH Δ | socket cookie → `Identity` | LSM | TC, kavachd |
-| `exe_class` | HASH | `{dev, ino}` → `u64 selector mask` | kavachd (LSM deletes) | LSM |
-| `uid_class` | HASH | `uid` → `u64 mask` | kavachd | LSM |
-| `cgroup_class` | HASH | `cgroup_id` → `u64 mask` | kavachd | LSM |
-| `policy_slots` | ARRAY[2] | slot → `PolicyHeader{n_rules, defaults, wildcard masks}` | kavachd | LSM, TC |
-| `policy_rules` | ARRAY[2·1024] | slot·1024+i → `Rule` | kavachd | LSM, TC |
-| `addr_sets` | LPM_TRIE | `{prefixlen, slot, set_id, addr[16]}` → `u8` | kavachd | LSM, TC |
-| `policy_gen` | ARRAY[1] | 0 → `u32` generation | kavachd | LSM, TC |
-| `events` | RINGBUF (1 MiB) | `Event` records | XDP, TC, LSM | kavachd |
-| `punt_queue` | RINGBUF | flows needing L7 decision | LSM, TC | gateway (v0.4) |
+| `blocklist` | LPM_TRIE | `BlockKey` → `BlockVal{reason, expires}` | kavachd | XDP |
+| `rate_buckets` | LRU_HASH Δ | `SrcKey` (v4 host / v6 /64) → `RateState{tat_ns}` | XDP | XDP |
+| `xdp_cfg` | ARRAY[1] | GCRA emission/tau, sample rate, feature flags | kavachd | XDP, TC, LSM |
+| `stats` | PERCPU_ARRAY[16] | `StatReason` → u64 | all | kavachd |
+| `flow_cache` | LRU_HASH 256k | `FlowKey` → `FlowVal` | TC | TC |
+| `sk_ident` | SK_STORAGE Δ | socket → `Identity` | LSM | TC |
+| `exe_class` | HASH | `ExeKey` → `ExeClass` | kavachd | LSM |
+| `exe_dirty` | LRU_HASH | `ExeKey` → u64 modification seq | LSM | LSM, kavachd |
+| `uid_class` / `cgroup_class` | HASH | uid / cgroup id → `ClassVal` | kavachd | LSM, TC |
+| `policy_slots` | ARRAY[2] | slot → `Policy` | kavachd | LSM, TC |
+| `addr_sets` | LPM_TRIE | `{prefixlen, slot, addr}` → u64 set bitmap Δ | kavachd | LSM, TC |
+| `policy_gen` | ARRAY[1] | u32 generation | kavachd | LSM, TC |
+| `self_tgid` | ARRAY[1] | tgid of kavachd (for key reports) | kavachd | LSM |
+| `events` | RINGBUF 1 MiB | `Event` | all | kavachd |
+| `sync_inner` / `sync_rcu` | ARRAY / ARRAY_OF_MAPS | used only to force `synchronize_rcu()` | kavachd | — |
 
-**Δ `rate_buckets` is LRU_PERCPU_HASH**, not PERCPU_HASH: a spoofed-source flood would otherwise
-fill the map and make new legitimate sources un-trackable. Per-CPU means the configured rate is
-divided by `nr_cpus` (exact under RSS, since one source hashes to one queue).
-**Δ `identity_by_cookie` is LRU** so closed sockets age out without a close hook.
+* **Δ GCRA in a shared LRU_HASH** (not per-CPU token buckets): one 16-byte state per source,
+  updated with `cmpxchg`; the rate is exact regardless of RSS, and LRU eviction means spoofed floods
+  cannot pin the map. IPv6 sources are keyed per /64 so one host cannot rotate addresses to evade it.
+* **Δ SK_STORAGE instead of a cookie-keyed LRU**: lifetime is tied to the socket, with no aging
+  and no collisions.
+* **Δ one LPM lookup per destination**: the compiler flattens all sets of a slot so that the
+  longest matching prefix carries the union bitmap of every set containing that address; a rule
+  tests `bitmap & (1 << rule.set)`. That costs O(1) lookups instead of one per rule.
 
-## 5. Identity model — selector masks (O(1) in the kernel)
+## 5. Identity model — selector masks
 
-A policy has ≤ 64 **selectors** (each distinct `who = {...}`). Selector *i* owns bit *i*.
-For each dimension *d* ∈ {exe, uid, cgroup} kavachd publishes:
-
-* `d_class[value]` = bitmask of selectors whose *d*-constraint is satisfied by `value`
-* `wild_d` (in `PolicyHeader`) = bitmask of selectors that do **not** constrain *d*
-
-In `lsm/socket_connect`:
+A policy has ≤ 64 **selectors** (distinct `who = {...}`); selector *i* owns bit *i*. For each
+dimension *d* ∈ {exe, uid, cgroup}, kavachd publishes `d_class[value].mask[slot]` (selectors
+satisfied by that value) and `wild_d` in the header (selectors that do not constrain *d*):
 
 ```
-m = (exe_class[dev,ino] | wild_exe) & (uid_class[uid] | wild_uid) & (cgroup_class[cg] | wild_cg)
+m = (exe_mask | wild_exe) & (uid_mask | wild_uid) & (cgroup_mask | wild_cgroup) & sel_used
 ```
 
-`m` is exactly the set of selectors the process satisfies (AND across dimensions, OR within a
-list) — three hash lookups, no loops. The rule scan then only needs `rule.sel & m`.
+* When `wild_d == ~0`, no selector constrains *d*, and the lookup is skipped.
+* `sel_used` clears bits of unused selector numbers.
+* cgroup selectors match a subtree. The program ORs the class of the task's cgroup and up to
+  8 ancestors.
 
-**Binary hashes.** kavachd learns new executables from an `lsm/bprm_committed_creds` event, hashes
-`/proc/<pid>/exe` (SHA-256, streaming, cached by `(dev, ino, ctime)`), and writes `exe_class`.
-`lsm/file_open` deletes the `exe_class` entry when a classified inode is opened for write, so a
-modified binary is never trusted under its old hash. **Known gap (v0.2):** a connection made in the
-microseconds between exec and classification sees `exe` mask 0 — it matches only selectors that do
-not constrain `binary`. v0.4 closes this with sleepable `bprm_check_security` + `bpf_ima_file_hash`
-where IMA is available.
+**Executable identity.**
+* The LSM reads `task->mm->exe_file->f_inode` via CO-RE and builds `ExeKey{s_dev, i_generation, ino}`.
+  The key uses the kernel's own view of the inode rather than userspace `st_dev`, which differs
+  on btrfs and overlayfs. **Δ** This chain yields an untrusted pointer, so INODE_STORAGE is not
+  usable here; a hash map keyed by `ExeKey` is used instead.
+* kavachd learns keys from three sources:
+  1. `bprm_committed_creds` exec events.
+  2. A startup task iterator (`iter/task`) over all running processes.
+  3. **Key reports**: after each apply, kavachd opens every policy-named executable read-only. The
+     LSM recognises kavachd's tgid and reports that inode's kernel key. Those binaries are
+     classified before they ever run, and `apply` returns only once this is done (bounded 1 s).
+* Each executable is hashed with SHA-256 once per key, and the result is cached. The cache is
+  persisted in the state dir and reconciled against `exe_class` on restart.
+
+**Tamper revocation (seq-pair protocol, FR-ID-3).** `file_open` for write and `path_truncate`
+bump `exe_dirty[key]`. kavachd reads the sequence *before* hashing and stores it as `seq_at_hash`.
+The LSM trusts a class only while `exe_dirty == seq_at_hash`. Modifying a binary during or after
+hashing therefore always invalidates it, and the next exec re-hashes.
+
+**Unclassified window.** A process whose binary is not yet classified gets exe mask 0. It still
+matches uid/cgroup-only selectors and is counted in `exe_unclassified`. Key reports close this
+window for every binary the policy names by path. Binaries named only by hash are closed on
+first exec.
 
 ## 6. Rule evaluation
 
-```c
-struct Rule {                       // 48 bytes
-    u64 sel;                        // selector mask (0 = any identity)
-    u32 id; u32 dst_set;            // dst_set 0 = any address
-    u16 port_lo, port_hi;           // host order; 0..65535 = any
-    u8  proto;                      // 0 = any, 6 tcp, 17 udp, 1/58 icmp
-    u8  dir;                        // 1 egress, 2 ingress
-    u8  verdict; u8 fail;           // fail: 0 open, 1 closed
-    u64 not_after_ns;               // 0 = no TTL (CLOCK_BOOTTIME, rebased by kavachd)
-    u64 _reserved[2];
-};
+`kv_evaluate(snapshot, dir, mask, remote, port, proto)` runs `bpf_loop` over `n_rules`
+(≤ 1024), first match wins:
+
+```
+(rule.sel == 0 || rule.sel & mask) && dir ok && proto ok && port in [lo, hi]
+  && (rule.set == ANY || set_bitmap(remote) & bit(rule.set)) && !expired
 ```
 
-`evaluate(gen, dir, m, key)`: `bpf_loop(hdr.n_rules)` in priority order; first rule where
-`(sel==0 || sel&m) && proto ok && port in range && dir ok && (dst_set==0 || addr_sets hit) &&
-not expired` wins. No match ⇒ `hdr.default[dir]`. Because LSM runs once per connection and TC only
-on flow-cache misses, the loop cost (≤ 1024 iterations, ~2-3 µs worst case) is paid once per flow.
+* No match ⇒ `default[dir]`.
+* `Punt` (no L7 consumer before v0.4) resolves through the rule's fail mode: closed ⇒ drop,
+  open ⇒ log.
+* Egress to loopback bypasses evaluation unless the policy sets `loopback_bypass = false`.
+* The scan runs once per connection (LSM) or once per new flow (TC).
 
-`kavach-core::evaluate()` implements the identical algorithm over the identical `#[repr(C)]` tables
-in Rust. It is the reference semantics: `kavachctl explain` uses it, and the differential test suite
-feeds random flows to both it and the BPF programs (via `BPF_PROG_TEST_RUN`) and asserts equality.
-In v0.4 `kavach.ko` exports it as a kfunc, so the kernel and the tooling run literally the same code.
+`kavach-core::evaluate()` is the same algorithm over the same `#[repr(C)]` tables in Rust. It is
+the reference semantics:
+* `kavachctl explain` runs it with per-rule traces.
+* The privileged differential test feeds 400 random flows to both the C program
+  (`BPF_PROG_TEST_RUN`) and the Rust evaluator and asserts identical verdicts.
 
 ## 7. Life of a packet / connection
 
-1. **XDP** (`xdp_filter.c`): parse → `blocklist` LPM → token bucket → `XDP_DROP` / `XDP_PASS`.
-2. **TC ingress** (`tc_flow.c`): `flow_cache` hit with current gen ⇒ verdict. Miss + new flow ⇒
-   ingress rule scan ⇒ cache ⇒ verdict. Miss + mid-stream TCP ⇒ pass (FR-TC-3).
-3. **LSM egress** (`lsm_egress.c`): `socket_connect` → identity mask → egress rule scan →
-   `-EPERM` or allow; writes `identity_by_cookie`; emits event on Drop/Log.
-4. **TC egress**: inserts the reply key into `flow_cache` so return traffic is O(1).
-5. **Punt** (v0.4): rule verdict `Punt` → `punt_queue` → gateway decides → writes `flow_cache`;
-   until then the rule's `fail` decides.
+1. **XDP** (`xdp_filter.c`):
+   - Parse up to 2 VLAN tags, IPv4 options and 4 IPv6 extension headers.
+   - Blocklist LPM lookup (with expiry), then the GCRA check.
+   - Result is `XDP_DROP` or `XDP_PASS`; unparseable frames pass and are counted.
+2. **LSM egress** (`socket_connect`, and `socket_sendmsg` when it carries a destination):
+   - Build the identity mask, run the egress scan, return `-EPERM` or allow.
+   - Store `Identity` in `sk_ident`; emit an event on drop or log.
+3. **TC egress**:
+   - On first sight, insert the reply key with the socket's identity.
+   - On a hit whose generation is stale, re-evaluate egress with the socket's identity
+     (recomputed for the new slot). An established flow newly denied by a policy swap is cut
+     (FR-HS-4).
+4. **TC ingress**:
+   - A reply-flow hit uses the cached verdict. An ingress-flow hit is used only if its
+     generation is current.
+   - The always-pass list (ICMP errors, ICMPv6 other than echo request, DHCP replies, non-first
+     fragments) is never dropped.
+   - Mid-stream TCP with no state passes unless `strict_ingress` is set.
+   - New flows run the ingress scan with mask 0 (identity-agnostic in v0.3) and are cached.
 
 ## 8. Policy lifecycle and atomic hot-swap
 
 ```
-build time (CI / laptop)                     run time (kavachd, every host)
-1 parse  → 2 validate → 3 lower to IR →      6 verify sig + serial + not_after
-4 compile tables → 5 sign (ed25519)          7 stage into INACTIVE slot
-                                             8 flip policy_gen (one u32 write)
-                                             9 drain (synchronize, ≥ 1 grace period) + clear old slot
+build time (CI)                              run time (kavachd)
+compile → validate → sign (Ed25519)   ──►    verify (before decoding) → diff → stage → flip → drain
 ```
 
-Programs read `policy_gen` **once** per invocation and use `slot = gen & 1` for every subsequent
-lookup (`policy_slots`, `policy_rules`, `addr_sets` keyed by slot). A packet therefore never sees
-half of each policy (same idea as RCU). `FlowVal.gen` holds the low 8 bits of the generation; a
-mismatching entry is a miss, so the new policy takes effect on the next packet of every cached flow.
+`stage()` writes everything for the **inactive** slot:
+1. uid, cgroup and exe `mask[slot]`.
+2. Flattened `addr_sets`, including resolved FQDNs.
+3. The `Policy` table.
+
+It then flips `policy_gen` with one u32 write. Next it forces `synchronize_rcu()` by updating
+the `sync_rcu` map-of-maps; after that, no program still runs on the old slot. Each program reads
+`policy_gen` once and uses `slot = gen & 1` for every lookup, so a packet never sees half of two
+policies. Measured flip and drain on 7.1: 20–100 µs.
 
 ### Bundle format (`.kvb`)
 
 ```
-magic "KVB1" | u16 format_ver | u16 flags | u64 serial | u64 not_after_unix | [u8;8] key_id
-| u32 payload_len | payload (postcard-encoded CompiledPolicy) | [u8;64] ed25519 signature
-signature = Ed25519(sk, SHA-256("kavach-bundle-v1\0" ‖ header ‖ payload))
+"KVB1" | u16 version | u16 flags | u64 serial | u64 created | u64 not_after | [u8;8] key_id
+| fleet[16] | u32 payload_len | payload (postcard CompiledPolicy) | [u8;64] Ed25519 signature
+signature = Ed25519(sk, "kavach-bundle-v1\0" ‖ header ‖ payload)     key_id = SHA-256(pk)[..8]
 ```
 
-kavachd rejects a bundle if: signature fails, key_id not trusted, `serial ≤ last_applied_serial`
-(persisted), `not_after` passed, or payload fails structural validation (defence in depth — the
-compiler already validated it).
+kavachd rejects a bundle when any of these hold:
+* The key is untrusted or revoked.
+* The signature fails.
+* The fleet differs.
+* `serial` ≤ the active serial (anti-rollback).
+* The payload fails structural decoding.
+
+An **expired** bundle is refused on apply. One that expires while active keeps enforcing and is
+flagged in `status` and metrics, because silently dropping protection would be worse.
 
 ## 9. kavachd internals
 
 ```
-control_api (UDS + SO_PEERCRED) ──> map_sync ──> loader (aya: load, attach, pin)
-ringbuf_reader (events, punt) ──> event_bus (tokio broadcast) ──> audit_log | metrics | anomaly
-identity_broker (exec events → sha256 → exe/uid/cgroup class maps; FQDN resolver → addr_sets)
+control API (UDS NDJSON, SO_PEERCRED roles) ──► Daemon (Mutex) ──► Kernel (aya: load/attach/pin/maps)
+ring-buffer reader ──► broadcast (events stream) + audit (≤10 drops/s) + identity jobs
+identity broker ──► hash outside the lock ──► exe_class (seq-pair)       housekeeping (30 s):
+                                                                         FQDN refresh, blocklist purge
 ```
 
-Each box is one tokio task under a supervisor; a panic restarts that task only. Kernel state is
-pinned under `/sys/fs/bpf/kavach/`, so restarting the daemon never opens an enforcement gap.
+* **Attach.** XDP falls back from native to generic and is replaced in place through the pinned
+  link on upgrade. TC uses tcx on 6.6+ and clsact before that. Both attach the new program before
+  detaching the old, so there is no window.
+* **Audit.** Every change is appended to a hash-chained JSONL audit log. `kavachctl audit`
+  verifies the chain, and a log that fails verification at startup is rotated aside rather than
+  extended.
 
 ## 10. Failure semantics
 
 | Event | Behaviour |
 |-------|-----------|
-| kavachd crash / restart | Programs + maps stay pinned; last policy enforces; daemon re-adopts pins on start |
-| Punt with no consumer | Rule `fail` decides (open ⇒ allow, closed ⇒ drop) |
-| Bundle invalid | Rejected, active policy unchanged, audit record + error to caller |
-| Verifier rejects program on this kernel | kavachd refuses to start that feature, reports capability matrix |
-| `kavachctl kill-switch` | Detach all links, unpin, remove `/sys/fs/bpf/kavach` |
+| kavachd crash / stop | Programs, links and maps stay pinned; the last policy keeps enforcing (verified live) |
+| kavachd restart | Re-adopts pins, continues the generation counter, re-stages the persisted bundle, reconciles exe cache |
+| Bundle invalid / rollback / wrong fleet | Rejected; active policy unchanged; audit record + error |
+| Punt with no consumer | Rule fail mode decides |
+| BPF LSM not active | Identity egress is reported as off; XDP/TC still work |
+| `kavachctl kill-switch --yes` (root) | Detach all links, unpin everything, remove the pin dir |
 
 ## 11. Security posture
 
-* The only parser of attacker bytes in C is the XDP/TC header parser, which is verifier-bounded.
-  Everything else (TLS, DNS, QUIC, TOML, bundle, JSON control messages) is Rust.
-* No TCP listener for control. UDS 0600 + `SO_PEERCRED`.
-* `#![forbid(unsafe_code)]` in `kavach-policy`, `kavachctl`, `kavach-parsers`; `unsafe` confined
-  to `kavach-common` (Pod impls) and `kavachd` (aya map access), each with `// SAFETY:`.
-* Signing keys live with CI; hosts only carry public keys.
+* **Attacker-supplied bytes.** In C, only the verifier-bounded header parser touches them.
+  TOML, bundles and control JSON are handled in Rust.
+* **Control channel.** No network listener. The UDS is 0600, or 0660 with `control_group`, and
+  peers are checked with `SO_PEERCRED`. Operators get read/apply/block; the kill-switch is
+  root-only.
+* **Unsafe code.** `forbid(unsafe_code)` in kavach-core, kavach-policy, kavach-api and kavachctl.
+  Workspace lints require a `// SAFETY:` comment on every `unsafe` block.
+* **Keys.** Signing keys live in CI; hosts only carry public keys.
 
 ## 12. Portability
 
-`kavach-core` exposes `trait Platform { now_ns, identity(cookie), emit(event) }` and a generic
-`evaluate<P: Platform>`. Linux eBPF uses the C mirror for the hot path (the verifier cannot run
-Rust core today); the BSD kernel module and the macOS Network Extension link the Rust core
-directly; `kavach.ko` (v0.4) brings it into the Linux kernel as a kfunc.
+`kavach-core` exposes the `Tables` and `Platform` traits.
+* **Linux eBPF** runs the C mirror on the hot path, because the verifier cannot run the Rust
+  core. The differential test keeps the two in lockstep.
+* **v0.4** `kavach.ko` exports the Rust core as a kfunc.
+* **v0.5** the BSD kernel module and the macOS Network Extension link the Rust core directly.

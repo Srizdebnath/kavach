@@ -28,11 +28,11 @@ dbg_macro = "deny"
 todo = "warn"
 
 [workspace.dependencies]
-kavach-common = { path = "crates/kavach-common" }
-kavach-parsers = { path = "crates/kavach-parsers" }
-kavach-core = { path = "crates/kavach-core" }
-kavach-policy = { path = "crates/kavach-policy" }
-kavach-api = { path = "crates/kavach-api" }
+kavach-common = { path = "crates/kavach-common", version = "0.1.0" }
+kavach-parsers = { path = "crates/kavach-parsers", version = "0.1.0" }
+kavach-core = { path = "crates/kavach-core", version = "0.1.0" }
+kavach-policy = { path = "crates/kavach-policy", version = "0.1.0" }
+kavach-api = { path = "crates/kavach-api", version = "0.1.0" }
 anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
