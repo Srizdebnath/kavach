@@ -1,0 +1,9 @@
+/target
+**/*.o
+**/*.skel.h
+bpf/include/vmlinux.h
+/.claude/
+*.key
+*.secret
+/fuzz/artifacts
+/fuzz/corpus
