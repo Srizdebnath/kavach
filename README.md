@@ -30,11 +30,15 @@ and still need maintenance windows to apply a rule. Kavach fixes this from the h
 
 | Release | Scope | State |
 |---------|-------|-------|
-| v0.1 | XDP blocklist + per-source rate limiting (C, loaded from Rust with Aya) | 🚧 building |
-| v0.2 | Identity-aware egress via BPF-LSM + cgroup identity | 🚧 building |
-| v0.3 | `kavach.toml` policy-as-code + `kavachctl`, signed bundles, A/B hot-swap | 🚧 building |
-| v0.4 | Agent gateway: MCP / A2A policies, `kavach.ko` Rust kfunc core | planned |
+| v0.1 | XDP blocklist + per-source rate limiting (C, loaded from Rust with Aya) | ✅ working, kernel-tested |
+| v0.2 | Identity-aware egress via BPF-LSM: binary hash/path, uid, cgroup; tamper revocation | ✅ working, kernel-tested |
+| v0.3 | `kavach.toml` policy-as-code + `kavachctl`, signed bundles, A/B hot-swap, audit log | ✅ working, kernel-tested |
+| v0.4 | Agent gateway: MCP / A2A policies, `kavach.ko` Rust kfunc core | 🧪 policy core + designs |
 | v0.5 | FreeBSD shim, macOS Network Extension | planned |
+
+Verified on every push: lint, unit tests, Miri on the `no_std` crates, dependency/license
+audit, and the root-only eBPF suite (XDP, TC, LSM, real traffic over a veth pair in a private
+network namespace) on GitHub's runner kernel. Parsers (TLS ClientHello, JA4, DNS) are fuzzed.
 
 ## Documents
 
