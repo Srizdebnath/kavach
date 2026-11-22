@@ -65,6 +65,7 @@ static __always_inline bool kv_user_backed_bdev(struct super_block *sb)
 #define KV_F2FS_MAGIC 0xF2F52010
 #define KV_SQUASHFS_MAGIC 0x73717368
 #define KV_EROFS_MAGIC 0xE0F5E1E2
+#define KV_OVERLAYFS_MAGIC 0x794C7630
 
 /*
  * Can a hash of this file be trusted to stay true? Only on local filesystems where every
@@ -96,11 +97,49 @@ static __always_inline bool kv_trusted_file(struct file *f)
 	}
 }
 
+static __always_inline bool kv_is_overlay(struct file *f)
+{
+	return BPF_CORE_READ(f, f_inode, i_sb, s_magic) == KV_OVERLAYFS_MAGIC;
+}
+
+struct kv_vma_ctx {
+	struct file *file;
+};
+
+static long kv_vma_file(struct task_struct *task, struct vm_area_struct *vma, void *data)
+{
+	struct kv_vma_ctx *c = data;
+	c->file = BPF_CORE_READ(vma, vm_file);
+	return 0;
+}
+
+/*
+ * Overlay executables (containers): the identity is the *real* file overlay maps the code from.
+ * ovl_mmap installs the backing (upper or lower-data) file in the VMA, so the VMA holding the
+ * code segment names the real ext4/xfs/... inode. Writes to that file (e.g. a rootless user
+ * editing a layer directly) taint exactly that inode, and a copy-up creates a new one.
+ */
+static __always_inline struct file *kv_real_exe(struct task_struct *t, struct file *exe)
+{
+	if (!kv_is_overlay(exe))
+		return exe;
+	struct kv_vma_ctx c = {};
+	__u64 code = BPF_CORE_READ(t, mm, start_code);
+	if (!code || bpf_find_vma(t, code, kv_vma_file, &c, 0))
+		return NULL; /* mmap lock contended or no mapping: unclassified (fail closed) */
+	if (!c.file || kv_is_overlay(c.file))
+		return NULL;
+	return c.file;
+}
+
 static __always_inline void kv_current_exe(struct kv_exe_key *k)
 {
 	struct task_struct *t = bpf_get_current_task_btf();
 	/* mm (and so exe_file) is NULL for kernel threads: the key stays zero = unclassified. */
 	struct file *exe = BPF_CORE_READ(t, mm, exe_file);
+	if (!exe)
+		return;
+	exe = kv_real_exe(t, exe);
 	if (!exe || !kv_trusted_file(exe))
 		return;
 	struct inode *ino = BPF_CORE_READ(exe, f_inode);
@@ -314,7 +353,16 @@ SEC("lsm/bprm_committed_creds")
 int BPF_PROG(kavach_exec, struct linux_binprm *bprm)
 {
 	struct file *f = BPF_CORE_READ(bprm, file);
-	if (!f || !kv_trusted_file(f))
+	if (!f)
+		return 0;
+	if (kv_is_overlay(f)) {
+		/* The code is not mapped yet, so the real file is unknown here: ask kavachd, which
+		 * resolves it through /proc/<pid>/exe (and skips hashing if it is already known). */
+		struct kv_exe_key none = {};
+		kv_emit_exe(KV_EVENT_KIND_EXEC, &none);
+		return 0;
+	}
+	if (!kv_trusted_file(f))
 		return 0; /* never classifiable: do not bother kavachd */
 	struct inode *ino = BPF_CORE_READ(f, f_inode);
 	if (!ino)
@@ -358,6 +406,9 @@ static __always_inline void kv_key_report(struct file *file, struct inode *ino)
 		return;
 	__u64 nonce = READ_ONCE(req->nonce);
 	if (!nonce || req->tid != (__u32)bpf_get_current_pid_tgid())
+		return;
+	/* Overlay: answer for the backing file overlay opens next, inside this same open(). */
+	if (kv_is_overlay(file))
 		return;
 	WRITE_ONCE(req->nonce, 0);
 
@@ -451,8 +502,20 @@ int kavach_task_scan(struct bpf_iter__task *ctx)
 	if (BPF_CORE_READ(task, pid) != BPF_CORE_READ(task, tgid))
 		return 0; /* one event per process, not per thread */
 	struct file *exe = BPF_CORE_READ(task, mm, exe_file);
-	if (!exe || !kv_trusted_file(exe))
-		return 0; /* kernel thread, or never classifiable */
+	if (!exe)
+		return 0; /* kernel thread */
+	if (kv_is_overlay(exe)) {
+		struct kv_event *o = kv_event_reserve();
+		if (!o)
+			return 0;
+		o->kind = KV_EVENT_KIND_EXEC; /* zero key: kavachd resolves the real file */
+		o->pid = BPF_CORE_READ(task, tgid);
+		BPF_CORE_READ_STR_INTO(&o->comm, task, comm);
+		bpf_ringbuf_submit(o, 0);
+		return 0;
+	}
+	if (!kv_trusted_file(exe))
+		return 0; /* never classifiable */
 	struct inode *ino = BPF_CORE_READ(exe, f_inode);
 	if (!ino)
 		return 0;

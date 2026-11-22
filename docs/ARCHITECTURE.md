@@ -119,7 +119,8 @@ m = (exe_mask | wild_exe) & (uid_mask | wild_uid) & (cgroup_mask | wild_cgroup) 
   8 ancestors.
 
 **Executable identity.**
-* The LSM reads `task->mm->exe_file` via CO-RE and builds `ExeKey{inode pointer, i_ino}`. Two
+* The LSM reads `task->mm->exe_file` via CO-RE and builds `ExeKey{inode pointer, i_ino, s_dev,
+  i_generation}`. Two
   live inodes never share a pointer, whatever the filesystem reports (btrfs subvolumes share
   `s_dev` and reuse inode numbers; FUSE chooses its own), and `inode_free_security` deletes the
   class when the inode is freed, so a recycled address inherits nothing. **Δ** This chain yields
@@ -128,9 +129,13 @@ m = (exe_mask | wild_exe) & (uid_mask | wild_uid) & (cgroup_mask | wild_cgroup) 
 * **Trusted filesystems only.** Identity is given only for ext4, xfs, btrfs, f2fs, tmpfs,
   squashfs and erofs, and never for kernel-internal mounts. memfd/shm files change without a
   write-open; FUSE servers can show kavachd different bytes than the loader; network filesystems
-  have remote writers; overlayfs lower/upper files can be rewritten behind the overlay inode
-  (rootless containers). nbd/ublk devices (served by a user-space process) are refused by the
-  LSM. Processes from those get exe mask 0 and fall back to uid/cgroup selectors.
+  have remote writers; nbd/ublk devices are served by a user-space process. Processes from
+  those get exe mask 0 and fall back to uid/cgroup selectors.
+* **Overlay (containers).** An overlay executable is identified by the *real* file its code is
+  mapped from: `ovl_mmap` puts the backing upper/lower-data file in the VMA, so at connect the
+  LSM resolves `bpf_find_vma(mm->start_code)->vm_file`. The key report answers for overlay's
+  backing open (same `open()`), so the hash is of that same real file. A rootless user rewriting
+  a layer file writes the real inode, which taints it; a copy-up creates a new inode.
 * **Backing-device stack** (`crates/kavachd/src/backing.rs`). Before committing a hash, kavachd
   walks every layer under the file: partitions → whole disk, device-mapper/md → `slaves/`,
   multi-device btrfs → `BTRFS_IOC_FS_INFO` + `/sys/fs/btrfs/<fsid>/devices`. A loop device is

@@ -241,7 +241,9 @@ pub async fn identity_broker(state: Arc<Mutex<Daemon>>, jobs: JobRx, prewarm: Jo
                 let (st, gate) = (state.clone(), gate.clone());
                 tokio::spawn(async move {
                     let path = format!("/proc/{pid}/exe");
-                    if let Err(e) = classify(&st, &gate, &path, Some(key)).await {
+                    // Zero key: an overlay executable, whose real file only the report names.
+                    let expect = (key.inode != 0).then_some(key);
+                    if let Err(e) = classify(&st, &gate, &path, expect).await {
                         debug!(pid, error = %e, "could not classify executable");
                     }
                     drop(permit);
@@ -337,6 +339,28 @@ async fn classify(
     if expect.is_some_and(|k| k != rep.key) {
         return Err(abandon("now a different inode than the one that ran"));
     }
+    // Already classified (e.g. another exec of the same container binary): nothing to hash.
+    {
+        let mut st = state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("state poisoned"))?;
+        let known = st
+            .exe_cache
+            .get(&rep.key)
+            .map(|row| row.nonce)
+            .zip(
+                st.k()
+                    .ok()
+                    .and_then(|k| k.exe_class(&rep.key).ok().flatten()),
+            )
+            .is_some_and(|(n, c)| c.flags & KV_EXE_F_COMMITTED != 0 && c.nonce == n);
+        if known {
+            if !path.starts_with("/proc/") {
+                st.pinned.insert(path.to_owned(), file);
+            }
+            return Ok(());
+        }
+    }
     if rep.untrusted_fs {
         return Err(abandon(
             "filesystem cannot be vouched for (memfd, FUSE, network, overlay); left unclassified",
@@ -365,7 +389,7 @@ async fn classify(
         .map_err(|_| anyhow::anyhow!("state poisoned"))?;
     if st.commit_classification(rep.key, info, rep.nonce)? {
         debug!(exe, ino = rep.key.ino, "classified");
-        if expect.is_none() {
+        if !path.starts_with("/proc/") {
             st.pinned.insert(path.to_owned(), file); // policy-named: keep the inode alive
         }
     } else {

@@ -890,6 +890,117 @@ deny = {{ to = "192.0.2.0/24", port = 1 }}
         .expect("classified binary allowed");
 }
 
+#[test]
+#[ignore = "needs root + BPF LSM: scripts/priv-test.sh"]
+fn lsm_overlay_executables_use_the_real_file() {
+    let lsms = std::fs::read_to_string("/sys/kernel/security/lsm").unwrap_or_default();
+    let Ok(curl) = std::fs::canonicalize("/usr/bin/curl") else {
+        eprintln!("skipping: needs /usr/bin/curl");
+        return;
+    };
+    if !lsms.contains("bpf") {
+        eprintln!("skipping: BPF LSM not active");
+        return;
+    }
+    let dir = tempfile::tempdir_in("/var/tmp").unwrap();
+    let d = |n: &str| {
+        let p = dir.path().join(n);
+        std::fs::create_dir(&p).unwrap();
+        p
+    };
+    let (lower, upper, work, merged) = (d("lower"), d("upper"), d("work"), d("merged"));
+    std::fs::copy(&curl, lower.join("c")).unwrap();
+    let ok = std::process::Command::new("mount")
+        .args(["-t", "overlay", "overlay", "-o"])
+        .arg(format!(
+            "lowerdir={},upperdir={},workdir={}",
+            lower.display(),
+            upper.display(),
+            work.display()
+        ))
+        .arg(&merged)
+        .status()
+        .is_ok_and(|s| s.success());
+    if !ok {
+        eprintln!("skipping: overlay mount failed");
+        return;
+    }
+    struct Umount(std::path::PathBuf);
+    impl Drop for Umount {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("umount").arg(&self.0).status();
+        }
+    }
+    let _umount = Umount(merged.clone());
+
+    let mut f = Fixture::new();
+    let mut rb = f.k().take_events().unwrap();
+    f.k().attach_lsm().expect("attach LSM");
+    let sha = hex::encode(
+        daemon::hash_file(&mut std::fs::File::open(&curl).unwrap())
+            .unwrap()
+            .sha256,
+    );
+    f.apply_toml(&format!(
+        r#"
+version = 1
+[defaults]
+egress = "allow"
+ingress = "allow"
+[[rule]]
+id = "curl-no-testnet"
+who = {{ binary = "sha256:{sha}" }}
+deny = {{ to = "192.0.2.3", port = 9, proto = "tcp" }}
+"#
+    ));
+
+    // Reading through the overlay reports the REAL (lower) inode, not the overlay one.
+    let (rep, file) = key_report(&mut f, &mut rb, merged.join("c").to_str().unwrap());
+    let lower_ino =
+        std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(lower.join("c")).unwrap());
+    assert_eq!(rep.key.ino, lower_ino, "key is the backing file's inode");
+    assert!(!rep.untrusted_fs && !rep.writers);
+    let info = daemon::hash_file(&mut { file }).unwrap();
+    assert!(
+        f.d()
+            .commit_classification(rep.key, info, rep.nonce)
+            .unwrap()
+    );
+
+    // A process running from the overlay is identified by that real file at connect time.
+    let run = |ip: &str| {
+        std::process::Command::new(merged.join("c"))
+            .args(["-sS", "-m", "1", &format!("http://{ip}:9/")])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .code()
+    };
+    assert_eq!(
+        run("192.0.2.3"),
+        Some(7),
+        "denied by hash from inside the overlay (EPERM)"
+    );
+
+    // A rootless user rewriting the layer file directly taints the real inode.
+    drop(
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(lower.join("c"))
+            .unwrap(),
+    );
+    assert!(
+        f.k().exe_class(&rep.key).unwrap().is_none(),
+        "layer write revoked the class"
+    );
+    assert_eq!(
+        run("192.0.2.3"),
+        Some(28),
+        "unclassified after the layer was modified (timeout)"
+    );
+}
+
 // ---------------------------------------------------------------------------------------------
 // Real traffic: network namespace + veth pair (T31)
 // ---------------------------------------------------------------------------------------------
