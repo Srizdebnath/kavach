@@ -281,7 +281,7 @@ pub const KV_EXE_F_COMMITTED: u64 = 1;
 /// `KeyReport` [`Event::verdict`] bits.
 pub const KV_REPORT_WRITERS: u8 = 1;
 /// The file lives on a filesystem whose content kavachd cannot vouch for (memfd / internal
-/// mount, FUSE, network, overlay, a loop/nbd/ublk device, ...): it is never classified.
+/// mount, FUSE, network, overlay, an nbd/ublk device, ...): it is never classified.
 pub const KV_REPORT_UNTRUSTED_FS: u8 = 2;
 
 /// `key_req[0]` (kavachd-owned): the next file_open by thread `tid` answers with a

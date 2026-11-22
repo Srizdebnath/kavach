@@ -124,7 +124,7 @@
 
 /**
  * The file lives on a filesystem whose content kavachd cannot vouch for (memfd / internal
- * mount, FUSE, network, overlay, a loop/nbd/ublk device, ...): it is never classified.
+ * mount, FUSE, network, overlay, an nbd/ublk device, ...): it is never classified.
  */
 #define KV_REPORT_UNTRUSTED_FS 2
 

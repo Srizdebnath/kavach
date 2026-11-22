@@ -37,8 +37,9 @@ static __always_inline void kv_event_exe_key(struct kv_event *e, const struct kv
 	e->key.dst[1] = k->generation;
 }
 
-/* Block devices whose bytes an unprivileged user can control (udisks loop-setup of an image
- * file, nbd, ublk): the image can be rewritten underneath a mounted, "trusted" filesystem. */
+/* Block devices served by a user-space process (nbd, ublk): the bytes under a mounted,
+ * "trusted" filesystem can change at will. Loop devices are judged by kavachd, which can check
+ * who owns the image (crates/kavachd/src/backing.rs), and so are dm/md stacks. */
 static __always_inline bool kv_user_backed_bdev(struct super_block *sb)
 {
 	struct block_device *bdev = BPF_CORE_READ(sb, s_bdev);
@@ -49,8 +50,6 @@ static __always_inline bool kv_user_backed_bdev(struct super_block *sb)
 		return false;
 	char n[6] = {};
 	bpf_core_read_str(n, sizeof(n), &disk->disk_name);
-	if (n[0] == 'l' && n[1] == 'o' && n[2] == 'o' && n[3] == 'p')
-		return true;
 	if (n[0] == 'n' && n[1] == 'b' && n[2] == 'd')
 		return true;
 	if (n[0] == 'u' && n[1] == 'b' && n[2] == 'l' && n[3] == 'k')

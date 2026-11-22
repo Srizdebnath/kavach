@@ -348,6 +348,7 @@ async fn classify(
     }
     let hashed = tokio::task::spawn_blocking(move || {
         let mut file = file;
+        crate::backing::vouch(&file)?; // every layer under the file must be root-controlled
         daemon::hash_file(&mut file).map(|info| (info, file))
     })
     .await

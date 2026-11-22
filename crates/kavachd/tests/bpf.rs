@@ -789,7 +789,7 @@ log = {{ to = "192.0.2.0/24" }}
         "no placeholder for an untrusted filesystem"
     );
 
-    // ext4 on a loop device: the backing image can be rewritten underneath the mount.
+    // ext4 on a loop device: trusted only while root alone can rewrite the image.
     let img = dir.path().join("fs.img");
     let mnt = dir.path().join("mnt");
     std::fs::create_dir(&mnt).unwrap();
@@ -807,9 +807,40 @@ log = {{ to = "192.0.2.0/24" }}
         m = mnt.display()
     )) {
         let (rep, file) = key_report(&mut f, &mut rb, mnt.join("t").to_str().unwrap());
+        assert!(!rep.untrusted_fs, "loop devices are judged in user space");
+        f.d().abandon_classification(rep.key, rep.nonce);
+        kavachd::backing::vouch(&file).expect("root-owned 0644 image is trusted");
+        std::os::unix::fs::chown(&img, Some(65534), None).unwrap();
+        let err = kavachd::backing::vouch(&file).unwrap_err();
         drop(file);
         let _ = sh(&format!("umount {}", mnt.display()));
-        assert!(rep.untrusted_fs, "loop-backed filesystem is untrusted");
+        assert!(
+            format!("{err:#}").contains("non-root"),
+            "user-owned image refused: {err:#}"
+        );
+        // device-mapper stacked on that loop device: the walk follows `slaves/`.
+        let dm = format!("kvt{}", std::process::id());
+        if sh(&format!(
+            "l=$(losetup -f --show {i}) && echo \"0 $(blockdev --getsz $l) linear $l 0\" | dmsetup create {dm} && mount /dev/mapper/{dm} {m}",
+            i = img.display(),
+            m = mnt.display()
+        )) {
+            let file = std::fs::File::open(mnt.join("t")).unwrap();
+            let err = kavachd::backing::vouch(&file).unwrap_err();
+            drop(file);
+            let _ = sh(&format!(
+                "umount {m}; dmsetup remove {dm}; losetup -j {i} -O NAME -n | xargs -r -n1 losetup -d",
+                m = mnt.display(),
+                i = img.display()
+            ));
+            assert!(
+                format!("{err:#}").contains("non-root"),
+                "dm over user loop refused: {err:#}"
+            );
+        } else {
+            let _ = sh(&format!("dmsetup remove {dm}"));
+            eprintln!("skipping dm-over-loop check (dmsetup unavailable)");
+        }
     } else {
         let _ = sh(&format!("umount {}", mnt.display()));
         eprintln!("skipping loop-device check (mkfs.ext4 / loop mount unavailable)");

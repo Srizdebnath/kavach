@@ -129,12 +129,15 @@ m = (exe_mask | wild_exe) & (uid_mask | wild_uid) & (cgroup_mask | wild_cgroup) 
   squashfs and erofs, and never for kernel-internal mounts. memfd/shm files change without a
   write-open; FUSE servers can show kavachd different bytes than the loader; network filesystems
   have remote writers; overlayfs lower/upper files can be rewritten behind the overlay inode
-  (rootless containers). Filesystems on loop, nbd or ublk devices are refused too: a desktop
-  user can loop-mount an image file (udisks) and rewrite it underneath the mount. Processes from
-  those get exe mask 0 and fall back to uid/cgroup selectors (use cgroup selectors for
-  containers). Known residual: device-mapper stacked on a loop device (e.g. a LUKS image unlocked
-  via udisks) and filesystems without `s_bdev` (multi-device btrfs) are not traced to their
-  backing device.
+  (rootless containers). nbd/ublk devices (served by a user-space process) are refused by the
+  LSM. Processes from those get exe mask 0 and fall back to uid/cgroup selectors.
+* **Backing-device stack** (`crates/kavachd/src/backing.rs`). Before committing a hash, kavachd
+  walks every layer under the file: partitions → whole disk, device-mapper/md → `slaves/`,
+  multi-device btrfs → `BTRFS_IOC_FS_INFO` + `/sys/fs/btrfs/<fsid>/devices`. A loop device is
+  trusted only if the image inode it holds (`LOOP_GET_STATUS64`, not the path) is root-owned and
+  not group/other-writable, and the filesystem holding the image passes the same walk. So a
+  udisks loop-mount of a user's image (with or without dm-crypt on top) is refused, while
+  root-owned images (e.g. snaps) keep working.
 * kavachd learns keys from three sources:
   1. `bprm_committed_creds` exec events.
   2. A startup task iterator (`iter/task`) over all running processes.
