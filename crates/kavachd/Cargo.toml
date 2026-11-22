@@ -3,6 +3,8 @@ name = "kavachd"
 description = "Kavach host daemon: loads and pins the eBPF programs, applies signed policy, brokers identity"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
 license.workspace = true
 repository.workspace = true
 

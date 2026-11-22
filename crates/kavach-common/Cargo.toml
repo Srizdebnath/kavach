@@ -3,6 +3,8 @@ name = "kavach-common"
 description = "Kavach C <-> Rust ABI: #[repr(C)] types shared by eBPF programs, kernel module and user space"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
 license.workspace = true
 repository.workspace = true
 

@@ -3,6 +3,8 @@ name = "kavachctl"
 description = "Kavach operator CLI: policy compile/sign/apply/diff/explain, blocklist, events, stats"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
 license.workspace = true
 repository.workspace = true
 

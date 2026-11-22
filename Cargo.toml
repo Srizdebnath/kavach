@@ -14,7 +14,7 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "Apache-2.0 OR MIT"
 repository = "https://github.com/Srizdebnath/kavach"
 authors = ["The Kavach Authors"]
@@ -30,7 +30,6 @@ todo = "warn"
 
 [workspace.dependencies]
 kavach-common = { path = "crates/kavach-common", version = "0.1.0" }
-kavach-parsers = { path = "crates/kavach-parsers", version = "0.1.0" }
 kavach-core = { path = "crates/kavach-core", version = "0.1.0" }
 kavach-policy = { path = "crates/kavach-policy", version = "0.1.0" }
 kavach-api = { path = "crates/kavach-api", version = "0.1.0" }
@@ -50,9 +49,7 @@ ipnet = { version = "2", features = ["serde"] }
 bytemuck = { version = "1", features = ["derive", "min_const_generics"] }
 proptest = "1"
 aya = "0.16"
-aya-log = "0.4"
 getrandom = "0.3"
-libc = "0.2"
 
 [profile.release]
 lto = "thin"

@@ -3,6 +3,8 @@ name = "kavach-core"
 description = "Kavach reference policy engine (no_std, no alloc): the semantics the eBPF programs mirror"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
 license.workspace = true
 repository.workspace = true
 

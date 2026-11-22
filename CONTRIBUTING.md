@@ -38,3 +38,10 @@ kill-switch on drop.
 ## Commits
 Conventional commits (`feat(kavachd): …`, `fix(bpf): …`), one logical change each, with the
 requirement IDs from `docs/SRS.md` where relevant. `cargo fmt` and clippy must be clean.
+
+## Fuzzing
+```sh
+cargo install cargo-fuzz
+cd fuzz && cargo +nightly fuzz run tls_client_hello   # also: dns_message, policy_compile,
+                                                      #       bundle_verify, control_request
+```

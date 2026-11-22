@@ -3,6 +3,8 @@ name = "kavach-api"
 description = "Kavach control-plane protocol (UDS, newline-delimited JSON) and hash-chained audit log"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
 license.workspace = true
 repository.workspace = true
 

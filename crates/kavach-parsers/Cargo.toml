@@ -3,6 +3,8 @@ name = "kavach-parsers"
 description = "no_std, allocation-free parsers for attacker-controlled bytes: TLS ClientHello (SNI/ALPN/JA4) and DNS"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
 license.workspace = true
 repository.workspace = true
 
