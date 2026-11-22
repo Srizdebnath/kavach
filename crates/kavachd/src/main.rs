@@ -39,6 +39,8 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let mut cfg = Config::load(&args.config)?;
     cfg.interfaces.extend(args.interface);
+    cfg.resolve_interfaces();
+    info!(interfaces = ?cfg.interfaces, "XDP/TC interfaces");
 
     let mut k = Kernel::load(&cfg.pin_dir).context("loading Kavach eBPF programs")?;
 

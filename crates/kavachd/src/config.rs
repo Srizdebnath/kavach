@@ -8,6 +8,7 @@ use serde::Deserialize;
 #[serde(deny_unknown_fields, default)]
 pub struct Config {
     /// Interfaces that get XDP + TC programs. Empty = none (LSM egress still works).
+    /// `"auto"` = the interfaces carrying a default route (IPv4 or IPv6) at startup.
     pub interfaces: Vec<String>,
     /// `auto` (native, falling back to generic), `native`, `skb`.
     pub xdp_mode: String,
@@ -79,7 +80,57 @@ impl Default for Config {
     }
 }
 
+/// Interfaces that carry a default route, from `/proc/net/route` and `/proc/net/ipv6_route`.
+pub fn default_route_interfaces() -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |i: &str| {
+        if i != "lo" && !out.iter().any(|o| o == i) {
+            out.push(i.to_owned());
+        }
+    };
+    if let Ok(s) = std::fs::read_to_string("/proc/net/route") {
+        for l in s.lines().skip(1) {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            // Iface Destination Gateway Flags ... Mask: default = dest 0 and mask 0, RTF_UP set
+            if f.len() >= 8
+                && f[1] == "00000000"
+                && f[7] == "00000000"
+                && u16::from_str_radix(f[3], 16).is_ok_and(|fl| fl & 1 != 0)
+            {
+                push(f[0]);
+            }
+        }
+    }
+    if let Ok(s) = std::fs::read_to_string("/proc/net/ipv6_route") {
+        for l in s.lines() {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            // dest plen src splen nexthop metric refcnt use flags iface; default = ::/0 via a gateway
+            if f.len() >= 10
+                && f[1] == "00"
+                && f[0].bytes().all(|b| b == b'0')
+                && f[4].bytes().any(|b| b != b'0')
+            {
+                push(f[9]);
+            }
+        }
+    }
+    out
+}
+
 impl Config {
+    /// Replace `"auto"` in `interfaces` with the current default-route interfaces.
+    pub fn resolve_interfaces(&mut self) {
+        if self.interfaces.iter().any(|i| i == "auto") {
+            let auto = default_route_interfaces();
+            self.interfaces.retain(|i| i != "auto");
+            for i in auto {
+                if !self.interfaces.contains(&i) {
+                    self.interfaces.push(i);
+                }
+            }
+        }
+    }
+
     pub fn load(path: &std::path::Path) -> anyhow::Result<Self> {
         match std::fs::read_to_string(path) {
             Ok(s) => Ok(toml::from_str(&s)?),
@@ -98,7 +149,24 @@ mod tests {
     fn example_config_parses() {
         let c: super::Config =
             toml::from_str(include_str!("../../../examples/kavachd.toml")).unwrap();
-        assert_eq!(c.interfaces, ["eth0"]);
+        assert_eq!(c.interfaces, ["auto"]);
         assert_eq!(c.ratelimit.unwrap().pps, 20000);
+    }
+
+    #[test]
+    fn auto_resolves_to_real_default_route_interfaces() {
+        let mut c = super::Config {
+            interfaces: vec!["auto".into()],
+            ..Default::default()
+        };
+        c.resolve_interfaces();
+        assert!(!c.interfaces.iter().any(|i| i == "auto" || i == "lo"));
+        // every resolved name is a real interface on this host
+        for i in &c.interfaces {
+            assert!(
+                std::path::Path::new("/sys/class/net").join(i).exists(),
+                "{i}"
+            );
+        }
     }
 }

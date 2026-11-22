@@ -1,7 +1,7 @@
 # /etc/kavach/kavachd.toml — host configuration for kavachd (policy itself comes in signed bundles).
 
 # Interfaces for XDP (blocklist + rate limit) and TC (flow tracking + ingress policy).
-interfaces = ["eth0"]
+interfaces = ["auto"]       # "auto" = interfaces with a default route; or list them, e.g. ["eth0"]
 xdp_mode   = "auto"          # auto | native | generic
 tc         = true
 lsm        = true            # identity-aware egress (needs `bpf` in /sys/kernel/security/lsm)

@@ -1,6 +1,8 @@
 //! kavachctl — the Kavach operator CLI. Talks to kavachd over the local Unix socket only.
 #![forbid(unsafe_code)]
 
+mod doctor;
+
 use std::io::{BufRead, BufReader, Write};
 use std::net::IpAddr;
 use std::os::unix::net::UnixStream;
@@ -33,6 +35,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Check this host against Kavach's requirements (kernel, BTF, BPF LSM, bpffs, cgroup v2).
+    Doctor,
     /// Daemon, kernel and policy status.
     Status,
     /// Verdict counters.
@@ -387,6 +391,11 @@ fn run(cli: Cli) -> Result<()> {
                     Response::Error { message } => eprintln!("warning: {message}"),
                     _ => {}
                 }
+            }
+        }
+        Cmd::Doctor => {
+            if !doctor::run() {
+                bail!("a required check failed");
             }
         }
         Cmd::Compile { policy } => {
