@@ -86,7 +86,7 @@ static __always_inline void kv_emit_ingress(struct __sk_buff *skb, const struct 
 	bpf_ringbuf_submit(e, 0);
 }
 
-SEC("tc")
+SEC("classifier")
 int kavach_tc_egress(struct __sk_buff *skb)
 {
 	void *data = (void *)(long)skb->data;
@@ -166,7 +166,7 @@ static __always_inline int kv_always_pass(const struct kv_pkt *p)
 	return 0;
 }
 
-SEC("tc")
+SEC("classifier")
 int kavach_tc_ingress(struct __sk_buff *skb)
 {
 	void *data = (void *)(long)skb->data;

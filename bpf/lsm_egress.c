@@ -286,3 +286,40 @@ int BPF_PROG(kavach_truncate, const struct path *path, int ret)
 		kv_taint(ino);
 	return 0;
 }
+
+/*
+ * Startup scan: kavachd runs this task iterator once so processes that were already running
+ * before Kavach started get classified too (user space cannot compute the kernel's ExeKey).
+ */
+SEC("iter/task")
+int kavach_task_scan(struct bpf_iter__task *ctx)
+{
+	struct task_struct *task = ctx->task;
+	if (!task)
+		return 0;
+	if (BPF_CORE_READ(task, pid) != BPF_CORE_READ(task, tgid))
+		return 0; /* one event per process, not per thread */
+	struct inode *ino = BPF_CORE_READ(task, mm, exe_file, f_inode);
+	if (!ino)
+		return 0; /* kernel thread */
+
+	struct kv_exe_key k = {};
+	kv_inode_key(ino, &k);
+	struct kv_exe_class *c = bpf_map_lookup_elem(&exe_class, &k);
+	if (c) {
+		__u64 *dirty = bpf_map_lookup_elem(&exe_dirty, &k);
+		if ((dirty ? *dirty : 0) == c->seq_at_hash)
+			return 0;
+	}
+	struct kv_event *e = kv_event_reserve();
+	if (!e)
+		return 0;
+	e->kind = KV_EVENT_KIND_EXEC;
+	e->pid = BPF_CORE_READ(task, tgid);
+	e->identity = k.ino;
+	e->rule_id = k.dev;
+	e->generation = k.generation;
+	BPF_CORE_READ_STR_INTO(&e->comm, task, comm);
+	bpf_ringbuf_submit(e, 0);
+	return 0;
+}
