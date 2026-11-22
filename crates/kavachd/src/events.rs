@@ -100,15 +100,24 @@ pub fn render(e: &Event, rule_name: Option<String>) -> EventRecord {
 }
 
 /// Drain the ring buffer forever.
+/// The ring buffer wrapped for async readiness. Shared so a restarted reader resumes on it.
+pub type EventFd = Arc<tokio::sync::Mutex<AsyncFd<RingBuf<MapData>>>>;
+
+/// Wrap the events ring buffer for [`reader`].
+pub fn event_fd(rb: RingBuf<MapData>) -> Result<EventFd> {
+    // RingBuf owns its fd for the lifetime of the AsyncFd, which is the safety condition.
+    #[allow(deprecated)]
+    let fd = AsyncFd::new(rb)?;
+    Ok(Arc::new(tokio::sync::Mutex::new(fd)))
+}
+
 pub async fn reader(
-    rb: RingBuf<MapData>,
+    fd: EventFd,
     state: Arc<Mutex<Daemon>>,
     tx: broadcast::Sender<EventRecord>,
     jobs: mpsc::Sender<IdentityJob>,
 ) -> Result<()> {
-    // RingBuf owns its fd for the lifetime of the AsyncFd, which is the safety condition.
-    #[allow(deprecated)]
-    let mut fd = AsyncFd::new(rb)?;
+    let mut fd = fd.lock().await;
     let mut audit_window = (Instant::now(), 0u32);
     loop {
         let mut guard = fd.readable_mut().await?;
@@ -171,7 +180,11 @@ pub async fn reader(
 }
 
 /// Classify executables reported by the kernel. Hashing happens outside the state lock.
-pub async fn identity_broker(state: Arc<Mutex<Daemon>>, mut jobs: mpsc::Receiver<IdentityJob>) {
+/// Shared job queue so a restarted broker keeps draining the same channel.
+pub type JobRx = Arc<tokio::sync::Mutex<mpsc::Receiver<IdentityJob>>>;
+
+pub async fn identity_broker(state: Arc<Mutex<Daemon>>, jobs: JobRx) {
+    let mut jobs = jobs.lock().await;
     while let Some(job) = jobs.recv().await {
         match job {
             IdentityJob::Tainted { key } => {

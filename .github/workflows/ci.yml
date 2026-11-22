@@ -40,6 +40,19 @@ jobs:
       - name: verifier + BPF_PROG_TEST_RUN suite (real kernel, root)
         run: ./scripts/priv-test.sh
 
+  miri:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - run: cargo +nightly miri test -p kavach-common -p kavach-core -p kavach-parsers
+        env:
+          PROPTEST_CASES: "4"
+          PROPTEST_DISABLE_FAILURE_PERSISTENCE: "1"
+          MIRIFLAGS: -Zmiri-disable-isolation
+
   deny:
     runs-on: ubuntu-24.04
     steps:

@@ -83,15 +83,27 @@ async fn main() -> Result<()> {
     let (jobs_tx, jobs_rx) = mpsc::channel(8192);
     let shutdown = Arc::new(Notify::new());
 
-    tokio::spawn({
-        let (st, tx, jobs) = (state.clone(), tx.clone(), jobs_tx.clone());
-        async move {
-            if let Err(e) = events::reader(rb, st, tx, jobs).await {
-                error!(error = %format!("{e:#}"), "event reader stopped; kernel enforcement unaffected");
+    let events_fd = events::event_fd(rb)?;
+    let jobs_rx = Arc::new(tokio::sync::Mutex::new(jobs_rx));
+    supervise("event reader", state.clone(), {
+        let (st, tx, jobs, fd) = (
+            state.clone(),
+            tx.clone(),
+            jobs_tx.clone(),
+            events_fd.clone(),
+        );
+        move || events::reader(fd.clone(), st.clone(), tx.clone(), jobs.clone())
+    });
+    supervise("identity broker", state.clone(), {
+        let (st, rx) = (state.clone(), jobs_rx.clone());
+        move || {
+            let (st, rx) = (st.clone(), rx.clone());
+            async move {
+                events::identity_broker(st, rx).await;
+                Ok(())
             }
         }
     });
-    tokio::spawn(events::identity_broker(state.clone(), jobs_rx));
 
     {
         let mut st = state.lock().expect("fresh state");
@@ -105,27 +117,9 @@ async fn main() -> Result<()> {
     }
 
     // Housekeeping: blocklist expiry + FQDN refresh.
-    tokio::spawn({
+    supervise("housekeeping", state.clone(), {
         let st = state.clone();
-        async move {
-            let mut tick = tokio::time::interval(Duration::from_secs(30));
-            let mut n: u64 = 0;
-            loop {
-                tick.tick().await;
-                n += 1;
-                let Ok(mut s) = st.lock() else { return };
-                if s.kernel.is_none() {
-                    return;
-                }
-                let _ = s.purge_blocklist();
-                let every = (s.cfg.dns_min_ttl_secs.max(30) / 30).max(1);
-                if n.is_multiple_of(every)
-                    && let Err(e) = s.refresh_dns()
-                {
-                    warn!(error = %format!("{e:#}"), "FQDN refresh failed");
-                }
-            }
-        }
+        move || housekeeping(st.clone())
     });
 
     let api = tokio::spawn(api::serve(state.clone(), tx.clone(), shutdown.clone()));
@@ -146,4 +140,43 @@ async fn sigterm() {
         }
         Err(_) => std::future::pending::<()>().await,
     }
+}
+
+async fn housekeeping(st: Arc<Mutex<Daemon>>) -> Result<()> {
+    let mut tick = tokio::time::interval(Duration::from_secs(30));
+    let mut n: u64 = 0;
+    loop {
+        tick.tick().await;
+        n += 1;
+        let Ok(mut s) = st.lock() else { continue };
+        if s.kernel.is_none() {
+            return Ok(());
+        }
+        let _ = s.purge_blocklist();
+        let every = (s.cfg.dns_min_ttl_secs.max(30) / 30).max(1);
+        if n.is_multiple_of(every)
+            && let Err(e) = s.refresh_dns()
+        {
+            warn!(error = %format!("{e:#}"), "FQDN refresh failed");
+        }
+    }
+}
+
+/// Supervise a daemon task; restarts are audited and clear a poisoned state lock.
+fn supervise<F, Fut>(name: &'static str, state: Arc<Mutex<Daemon>>, make: F)
+where
+    F: FnMut() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<()>> + Send + 'static,
+{
+    kavachd::supervise::spawn(name, make, move |task, why| {
+        if state.is_poisoned() {
+            state.clear_poison();
+        }
+        if let Ok(mut st) = state.lock() {
+            st.audit.record(
+                "task_restart",
+                serde_json::json!({ "task": task, "reason": why }),
+            );
+        }
+    });
 }
