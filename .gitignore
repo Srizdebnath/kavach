@@ -7,3 +7,4 @@ bpf/include/vmlinux.h
 *.secret
 /fuzz/artifacts
 /fuzz/corpus
+/dist

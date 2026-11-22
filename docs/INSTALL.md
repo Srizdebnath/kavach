@@ -47,7 +47,7 @@ Every [release](https://github.com/Srizdebnath/kavach/releases) has these assets
 
 | Asset | For |
 |---|---|
-| `kavach_<ver>_amd64.deb`, `kavach_<ver>_arm64.deb` | Debian, Ubuntu, Mint, Pop!_OS |
+| `kavach_<ver>-1_amd64.deb`, `kavach_<ver>-1_arm64.deb` | Debian, Ubuntu, Mint, Pop!_OS |
 | `kavach-<ver>-1.x86_64.rpm`, `kavach-<ver>-1.aarch64.rpm` | Fedora, RHEL/Rocky/Alma, openSUSE |
 | `kavach-<ver>-x86_64-linux-musl.tar.gz`, `…-aarch64-linux-musl.tar.gz` | any distro (Arch, Alpine, NixOS, Gentoo, …): static binaries + `install.sh` |
 | `SHA256SUMS`, `SHA256SUMS.sigstore.json` | checksums + keyless Sigstore signature |
@@ -60,7 +60,7 @@ tagged commit. Two independent checks are available:
 
 ```sh
 # a) GitHub build-provenance attestation (SLSA): proves which workflow + commit built the file
-gh attestation verify kavach_0.3.1_amd64.deb --repo Srizdebnath/kavach
+gh attestation verify kavach_0.3.1-1_amd64.deb --repo Srizdebnath/kavach
 
 # b) Sigstore signature over the checksum list, then the checksums
 cosign verify-blob SHA256SUMS \
@@ -78,7 +78,7 @@ GitHub's OIDC token and recorded in the public Rekor transparency log.
 **Debian / Ubuntu**
 
 ```sh
-sudo apt install ./kavach_0.3.1_amd64.deb
+sudo apt install ./kavach_0.3.1-1_amd64.deb
 ```
 
 **Fedora / RHEL / openSUSE**
