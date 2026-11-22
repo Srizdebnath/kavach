@@ -26,6 +26,8 @@
 #define ETH_P_8021Q 0x8100
 #define ETH_P_8021AD 0x88A8
 #define EPERM 1
+#define ENOENT 2
+#define EBUSY 16
 #define AF_INET 2
 #define AF_INET6 10
 #define SOCK_STREAM 1

@@ -131,8 +131,7 @@ pub enum EventKind {
     /// `exe_class` entry.
     ExeTainted = 5,
     /// Answer to a one-shot [`KeyReq`]: kavachd's read-open of a file, with the kernel's key for
-    /// that inode (exact even on btrfs/overlayfs). `cgroup_id` echoes the request nonce and
-    /// `verdict` is 1 when the inode had open writers (it must not be classified then).
+    /// that inode. `cgroup_id` echoes the request nonce; `verdict` holds `KV_REPORT_*` bits.
     KeyReport = 6,
 }
 
@@ -239,15 +238,16 @@ pub struct ClassVal {
     pub mask: [u64; 2],
 }
 
-/// Key for `exe_class`: the executable's inode **as the kernel sees it**
-/// (`i_sb->s_dev`, `i_generation`, `i_ino`). kavachd never derives it from `stat(2)` (the
-/// encodings differ, e.g. on btrfs); it copies it from `Exec` events. `i_generation` changes when
-/// an inode number is reused, so a new file never inherits an old classification.
+/// Key for `exe_class`: the executable's **live kernel inode** (`struct inode *`) plus its
+/// `i_ino`. Distinct live inodes never share a key, whatever the filesystem reports (btrfs
+/// subvolumes share `s_dev` and reuse inode numbers; FUSE picks its own). The LSM deletes the
+/// class when the inode is freed (`inode_free_security`), so a recycled pointer never inherits
+/// one. kavachd only copies keys from events; `inode` is a kernel address and never leaves the
+/// daemon (event rendering zeroes it).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Pod, Zeroable)]
 pub struct ExeKey {
-    pub dev: u32,
-    pub generation: u32,
+    pub inode: u64,
     pub ino: u64,
 }
 
@@ -267,8 +267,19 @@ pub struct ExeClass {
     pub mask: [u64; 2],
     /// Nonce of the [`KeyReq`] that produced this entry (placeholder or committed).
     pub nonce: u64,
-    pub _reserved: u64,
+    /// `KV_EXE_F_*`. A placeholder has no flags.
+    pub flags: u64,
 }
+
+/// [`ExeClass::flags`]: kavachd committed a hash for this entry (not a placeholder). Only
+/// committed entries count as classified for exec reporting and mask updates.
+pub const KV_EXE_F_COMMITTED: u64 = 1;
+
+/// `KeyReport` [`Event::verdict`] bits.
+pub const KV_REPORT_WRITERS: u8 = 1;
+/// The file lives on a filesystem whose content kavachd cannot vouch for (memfd / internal
+/// mount, FUSE, network, overlay, ...): it is never classified.
+pub const KV_REPORT_UNTRUSTED_FS: u8 = 2;
 
 /// `key_req[0]` (kavachd-owned): the next file_open by thread `tid` answers with a
 /// `KeyReport` carrying `nonce`, then the LSM clears `nonce` (one-shot).
@@ -402,11 +413,22 @@ pub struct Event {
     pub cgroup_id: u64,
     /// Identity selector mask. For `Exec` / `ExeTainted` / `KeyReport`: the inode number.
     pub identity: u64,
-    /// Matching rule id. For `Exec` / `ExeTainted` / `KeyReport`: the kernel `s_dev`.
+    /// Matching rule id. For `Exec` / `ExeTainted` / `KeyReport`: low half of [`ExeKey::inode`].
     pub rule_id: u32,
-    /// Policy generation. For `Exec` / `ExeTainted` / `KeyReport`: the inode's `i_generation`.
+    /// Policy generation. For `Exec` / `ExeTainted` / `KeyReport`: high half of
+    /// [`ExeKey::inode`].
     pub generation: u32,
     pub comm: [u8; 16],
+}
+
+impl Event {
+    /// The executable key carried by `Exec` / `ExeTainted` / `KeyReport` events.
+    pub const fn exe_key(&self) -> ExeKey {
+        ExeKey {
+            inode: (self.generation as u64) << 32 | self.rule_id as u64,
+            ino: self.identity,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------

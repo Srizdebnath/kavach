@@ -29,6 +29,8 @@ pub const LSM_HOOKS: &[(&str, &str)] = &[
     ("kavach_exec", "bprm_committed_creds"),
     ("kavach_file_open", "file_open"),
     ("kavach_truncate", "path_truncate"),
+    ("kavach_file_truncate", "file_truncate"),
+    ("kavach_inode_free", "inode_free_security"),
 ];
 
 /// `addr_sets` key payload after the LPM prefix length.

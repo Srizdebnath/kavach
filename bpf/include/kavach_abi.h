@@ -112,6 +112,23 @@
 #define KV_RATE_V6_PREFIX 64
 
 /**
+ * [`ExeClass::flags`]: kavachd committed a hash for this entry (not a placeholder). Only
+ * committed entries count as classified for exec reporting and mask updates.
+ */
+#define KV_EXE_F_COMMITTED 1
+
+/**
+ * `KeyReport` [`Event::verdict`] bits.
+ */
+#define KV_REPORT_WRITERS 1
+
+/**
+ * The file lives on a filesystem whose content kavachd cannot vouch for (memfd / internal
+ * mount, FUSE, network, overlay, ...): it is never classified.
+ */
+#define KV_REPORT_UNTRUSTED_FS 2
+
+/**
  * Final decision for a packet, connection or flow.
  */
 enum kv_verdict
@@ -188,8 +205,7 @@ enum kv_event_kind
   KV_EVENT_KIND_EXE_TAINTED = 5,
   /**
    * Answer to a one-shot [`KeyReq`]: kavachd's read-open of a file, with the kernel's key for
-   * that inode (exact even on btrfs/overlayfs). `cgroup_id` echoes the request nonce and
-   * `verdict` is 1 when the inode had open writers (it must not be classified then).
+   * that inode. `cgroup_id` echoes the request nonce; `verdict` holds `KV_REPORT_*` bits.
    */
   KV_EVENT_KIND_KEY_REPORT = 6,
 };
@@ -313,14 +329,15 @@ struct kv_class_val {
 };
 
 /**
- * Key for `exe_class`: the executable's inode **as the kernel sees it**
- * (`i_sb->s_dev`, `i_generation`, `i_ino`). kavachd never derives it from `stat(2)` (the
- * encodings differ, e.g. on btrfs); it copies it from `Exec` events. `i_generation` changes when
- * an inode number is reused, so a new file never inherits an old classification.
+ * Key for `exe_class`: the executable's **live kernel inode** (`struct inode *`) plus its
+ * `i_ino`. Distinct live inodes never share a key, whatever the filesystem reports (btrfs
+ * subvolumes share `s_dev` and reuse inode numbers; FUSE picks its own). The LSM deletes the
+ * class when the inode is freed (`inode_free_security`), so a recycled pointer never inherits
+ * one. kavachd only copies keys from events; `inode` is a kernel address and never leaves the
+ * daemon (event rendering zeroes it).
  */
 struct kv_exe_key {
-  __u32 dev;
-  __u32 generation;
+  __u64 inode;
   __u64 ino;
 };
 
@@ -342,7 +359,10 @@ struct kv_exe_class {
    * Nonce of the [`KeyReq`] that produced this entry (placeholder or committed).
    */
   __u64 nonce;
-  __u64 _reserved;
+  /**
+   * `KV_EXE_F_*`. A placeholder has no flags.
+   */
+  __u64 flags;
 };
 
 /**
@@ -510,11 +530,12 @@ struct kv_event {
    */
   __u64 identity;
   /**
-   * Matching rule id. For `Exec` / `ExeTainted` / `KeyReport`: the kernel `s_dev`.
+   * Matching rule id. For `Exec` / `ExeTainted` / `KeyReport`: low half of [`ExeKey::inode`].
    */
   __u32 rule_id;
   /**
-   * Policy generation. For `Exec` / `ExeTainted` / `KeyReport`: the inode's `i_generation`.
+   * Policy generation. For `Exec` / `ExeTainted` / `KeyReport`: high half of
+   * [`ExeKey::inode`].
    */
   __u32 generation;
   __u8 comm[16];

@@ -110,7 +110,7 @@ The kernel ↔ user boundary is crossed only through BPF maps, ring buffers, and
 ### 3.2 Identity (v0.2)
 | ID | Requirement |
 |----|-------------|
-| FR-ID-1 | Every outbound connection MUST be attributed to: pid/tgid, uid/gid, cgroup id, executable (kernel `s_dev`, `i_generation`, inode), and `comm`. |
+| FR-ID-1 | Every outbound connection MUST be attributed to: pid/tgid, uid/gid, cgroup id, executable (the live kernel inode, on trusted local filesystems), and `comm`. |
 | FR-ID-2 | kavachd MUST map executables to SHA-256 digests and publish `exe → selector-mask` classifications to the kernel. |
 | FR-ID-3 | Opening an executable for write or truncating it MUST invalidate its classification in-kernel, including a modification that races the hash (sequence-pair protocol). |
 | FR-ID-4 | kavachd MUST map uids and cgroup ids (and in v0.3+ k8s pod labels via cgroup path) to selector masks. |

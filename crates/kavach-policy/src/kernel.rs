@@ -236,8 +236,7 @@ impl OfflineTables {
 }
 
 const PROBE_KEY: ExeKey = ExeKey {
-    dev: u32::MAX,
-    generation: u32::MAX,
+    inode: u64::MAX,
     ino: u64::MAX,
 };
 
@@ -247,7 +246,7 @@ impl kavach_core::Tables for OfflineTables {
         (*key == PROBE_KEY).then_some(ExeClass {
             mask: [self.mask; 2],
             nonce: 0,
-            _reserved: 0,
+            flags: KV_EXE_F_COMMITTED,
         })
     }
     fn uid_class(&self, uid: u32) -> Option<ClassVal> {

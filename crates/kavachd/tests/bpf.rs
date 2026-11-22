@@ -554,7 +554,7 @@ fn key_report(
 fn classify(f: &mut Fixture, rb: &mut RingBuf<MapData>, path: &str) -> bool {
     let (rep, file) = key_report(f, rb, path);
     assert!(!rep.writers, "{path} has no open writers");
-    let info = daemon::hash_file(file).unwrap();
+    let info = daemon::hash_file(&mut { file }).unwrap();
     f.d()
         .commit_classification(rep.key, info, rep.nonce)
         .unwrap()
@@ -579,11 +579,7 @@ fn lsm_identity_egress_end_to_end() {
     while let Some(item) = rb.next() {
         let e = kavachd::events::decode(&item).unwrap();
         if e.kind == EventKind::Exec as u8 && e.pid == me {
-            key = Some(ExeKey {
-                dev: e.rule_id,
-                generation: e.generation,
-                ino: e.identity,
-            });
+            key = Some(e.exe_key());
         }
     }
     let key = key.expect("task scan reported this process");
@@ -591,7 +587,7 @@ fn lsm_identity_egress_end_to_end() {
     let (rep, file) = key_report(&mut f, &mut rb, &format!("/proc/{me}/exe"));
     assert_eq!(rep.key, key, "key report matches the task scan's key");
     assert!(!rep.writers);
-    let info = daemon::hash_file(file).unwrap();
+    let info = daemon::hash_file(&mut { file }).unwrap();
     assert_eq!(std::path::Path::new(&info.path), exe);
     let sha = hex::encode(info.sha256);
     // one-shot: a second read-open by this thread reports nothing
@@ -682,11 +678,7 @@ log = {{ to = "192.0.2.0/24" }}
     while let Some(item) = rb.next() {
         let e = kavachd::events::decode(&item).unwrap();
         if e.kind == EventKind::Exec as u8 && e.comm.starts_with(b"kv-true") {
-            copy_key = Some(ExeKey {
-                dev: e.rule_id,
-                generation: e.generation,
-                ino: e.identity,
-            });
+            copy_key = Some(e.exe_key());
         }
     }
     let copy_key = copy_key.expect("exec of the copy was reported");
@@ -732,7 +724,8 @@ log = {{ to = "192.0.2.0/24" }}
         .append(true)
         .open(&copy)
         .unwrap();
-    let (rep, _file) = key_report(&mut f, &mut rb, path);
+    let (rep, file) = key_report(&mut f, &mut rb, path);
+    drop(file);
     assert!(rep.writers, "open writer reported");
     f.d().abandon_classification(rep.key, rep.nonce);
     assert!(!classified(&mut f), "placeholder removed");
@@ -742,7 +735,7 @@ log = {{ to = "192.0.2.0/24" }}
     let (rep, file) = key_report(&mut f, &mut rb, path);
     assert!(!rep.writers);
     write_open();
-    let info = daemon::hash_file(file).unwrap();
+    let info = daemon::hash_file(&mut { file }).unwrap();
     assert!(
         !f.d()
             .commit_classification(rep.key, info, rep.nonce)
@@ -756,6 +749,45 @@ log = {{ to = "192.0.2.0/24" }}
     assert!(classify(&mut f, &mut rb, path));
     nix::unistd::truncate(&copy, 0).unwrap();
     assert!(!classified(&mut f), "truncate revoked the class");
+
+    // open(O_RDONLY | O_TRUNC) truncates without FMODE_WRITE (file_truncate hook).
+    std::fs::copy("/usr/bin/true", &copy).unwrap();
+    assert!(classify(&mut f, &mut rb, path));
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        drop(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(nix::libc::O_TRUNC)
+                .open(&copy),
+        );
+    }
+    assert!(!classified(&mut f), "O_RDONLY|O_TRUNC revoked the class");
+
+    // A freed inode takes its class with it, so a recycled inode address inherits nothing.
+    assert!(classify(&mut f, &mut rb, path));
+    std::fs::remove_file(&copy).unwrap();
+    for _ in 0..50 {
+        if !classified(&mut f) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(!classified(&mut f), "inode_free_security removed the class");
+
+    // memfd: written without file_open and without i_writecount, so never classifiable.
+    // SAFETY: plain syscall with a valid NUL-terminated name; the fd is owned below.
+    let fd = unsafe { nix::libc::memfd_create(c"kv-memfd".as_ptr(), 0) };
+    assert!(fd >= 0);
+    // SAFETY: fd is a fresh descriptor we own.
+    let mut mem = unsafe { <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(fd) };
+    std::io::Write::write_all(&mut mem, &std::fs::read("/usr/bin/true").unwrap()).unwrap();
+    let (rep, _file) = key_report(&mut f, &mut rb, &format!("/proc/self/fd/{fd}"));
+    assert!(rep.untrusted_fs, "memfd is on an internal mount");
+    assert!(
+        f.k().exe_class(&rep.key).unwrap().is_none(),
+        "no placeholder for an untrusted filesystem"
+    );
     let _ = IpNet::from(IpAddr::V4(Ipv4Addr::LOCALHOST));
 }
 

@@ -36,10 +36,10 @@ static __always_inline int kv_snapshot_get(struct kv_snapshot *s)
 }
 
 /* Selector mask contributed by an executable: present in exe_class = trusted (the LSM deletes
- * entries on taint). A zero key (kernel thread, or a binary with open writers) has no class. */
+ * entries on taint). A zero key (kernel thread, untrusted filesystem, open writers) has none. */
 static __always_inline __u64 kv_exe_mask(const struct kv_exe_key *k, __u32 slot)
 {
-	if (!k->ino)
+	if (!k->inode)
 		return 0;
 	struct kv_exe_class *c = bpf_map_lookup_elem(&exe_class, k);
 	if (!c) {

@@ -189,18 +189,14 @@ fn identity_mask_and_selectors() {
     p.hdr.wild_cgroup = !0b10;
     p.hdr.sel_used = 0b11;
     let s = Snapshot::new(&p, 3).unwrap(); // slot 1
-    let exe = ExeKey {
-        dev: 8,
-        generation: 1,
-        ino: 42,
-    };
+    let exe = ExeKey { inode: 8, ino: 42 };
     let mut t = Mem::default();
     t.exe.insert(
         exe,
         ExeClass {
             mask: [0, 0b01],
             nonce: 0,
-            _reserved: 0,
+            flags: KV_EXE_F_COMMITTED,
         },
     );
     t.uid.insert(1000, ClassVal { mask: [0, 0b01] });
@@ -244,18 +240,14 @@ fn tainted_executable_loses_identity() {
     p.hdr.wild_exe = !1;
     p.hdr.sel_used = 1;
     let s = Snapshot::new(&p, 0).unwrap();
-    let exe = ExeKey {
-        dev: 1,
-        generation: 0,
-        ino: 9,
-    };
+    let exe = ExeKey { inode: 1, ino: 9 };
     let mut t = Mem::default();
     t.exe.insert(
         exe,
         ExeClass {
             mask: [1, 0],
             nonce: 0,
-            _reserved: 0,
+            flags: KV_EXE_F_COMMITTED,
         },
     );
     let who = Who {

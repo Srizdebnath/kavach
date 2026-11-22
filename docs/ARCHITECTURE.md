@@ -60,7 +60,7 @@ serves both families.
 |---|---|---|
 | `FlowKey` | 40 | family, proto, ports (network order), src, dst |
 | `FlowVal` | 48 | identity mask, rule_id, **u32 generation** Δ, verdict, flags (REPLY/INGRESS), counters |
-| `ExeKey` | 16 | `{s_dev, i_generation, ino}` read from the kernel inode Δ |
+| `ExeKey` | 16 | `{inode pointer, i_ino}` of the live kernel inode Δ |
 | `ExeClass` | 32 | `mask[2]` (one per policy slot) + `nonce` of the key request |
 | `KeyReq` | 16 | one-shot `{nonce, tid}` armed by kavachd |
 | `ClassVal` | 16 | `mask[2]` for uid / cgroup classes |
@@ -119,32 +119,48 @@ m = (exe_mask | wild_exe) & (uid_mask | wild_uid) & (cgroup_mask | wild_cgroup) 
   8 ancestors.
 
 **Executable identity.**
-* The LSM reads `task->mm->exe_file->f_inode` via CO-RE and builds `ExeKey{s_dev, i_generation, ino}`.
-  The key uses the kernel's own view of the inode rather than userspace `st_dev`, which differs
-  on btrfs and overlayfs. **Δ** This chain yields an untrusted pointer, so INODE_STORAGE is not
-  usable here; a hash map keyed by `ExeKey` is used instead.
+* The LSM reads `task->mm->exe_file` via CO-RE and builds `ExeKey{inode pointer, i_ino}`. Two
+  live inodes never share a pointer, whatever the filesystem reports (btrfs subvolumes share
+  `s_dev` and reuse inode numbers; FUSE chooses its own), and `inode_free_security` deletes the
+  class when the inode is freed, so a recycled address inherits nothing. **Δ** This chain yields
+  an untrusted pointer, so INODE_STORAGE is not usable here; a hash map keyed by `ExeKey` is used
+  instead. The pointer stays inside kavachd: event rendering zeroes it.
+* **Trusted filesystems only.** Identity is given only for ext4, xfs, btrfs, f2fs, tmpfs,
+  squashfs and erofs, and never for kernel-internal mounts. memfd/shm files change without a
+  write-open; FUSE servers can show kavachd different bytes than the loader; network filesystems
+  have remote writers; overlayfs lower/upper files can be rewritten behind the overlay inode
+  (rootless containers). Processes from those get exe mask 0 and fall back to uid/cgroup
+  selectors (use cgroup selectors for containers).
 * kavachd learns keys from three sources:
   1. `bprm_committed_creds` exec events.
   2. A startup task iterator (`iter/task`) over all running processes.
   3. **Key reports**: after each apply, kavachd opens every policy-named executable read-only. The
      LSM answers the armed one-shot `key_req` (thread id + nonce) with that inode's kernel key. Those binaries are
-     classified before they ever run, and `apply` returns only once this is done (bounded 1 s).
-* Each executable is hashed with SHA-256 from the fd the LSM reported. The cache only recomputes
-  masks for classes that still exist; it is never used to re-trust a binary, and on restart rows
-  without a live `exe_class` entry are dropped.
+     classified before they ever run, and `apply` returns only once this is done (bounded 3 s).
+     These jobs have their own priority queue, and kavachd keeps a read-only fd on each such
+     binary so its inode (and class) is not evicted while idle.
+* Each executable is hashed with SHA-256 from the fd the LSM reported (up to 4 hashes in
+  parallel; the arm/open/disarm step is serialised because `key_req` is one slot). Committed
+  entries carry `KV_EXE_F_COMMITTED` and their nonce; each cache row stores the same nonce.
+  Mask updates and restart reconciliation touch only (row, committed entry) pairs whose nonces
+  match, so a stale row can never re-arm a placeholder. The cache never re-trusts a binary.
 
 **Tamper revocation (placeholder protocol, FR-ID-3).** `file_open` for write and `path_truncate`
-of *any* regular file (whatever its mode) delete `exe_class[key]`. To classify, kavachd arms
+(and `file_truncate`, which also covers `open(O_RDONLY|O_TRUNC)`) of *any* regular file,
+whatever its mode, delete `exe_class[key]`; if the delete fails for any reason but "absent", the
+modification is refused. To classify, kavachd arms
 `key_req` and read-opens the file; the LSM inserts a placeholder (mask 0) under the bucket lock,
 *then* reads `i_writecount` and reports key + writers. kavachd refuses files with open writers,
 hashes the reported fd and commits with `BPF_EXIST`: a write-open after the report deleted the
 placeholder, so the commit fails. There is no side table to evict or overflow. At connect time a
-binary with open writers gets no exe identity at all.
+binary with open writers gets no exe identity at all. Only committed entries count as "known"
+for exec reporting, so a placeholder left behind (e.g. a dropped event) never hides a binary.
 
 **Unclassified window.** A process whose binary is not yet classified gets exe mask 0. It still
 matches uid/cgroup-only selectors and is counted in `exe_unclassified`. Key reports close this
-window for every binary the policy names by path. Binaries named only by hash are closed on
-first exec.
+window for every binary the policy names by path. Binaries named only by hash are classified on
+first exec, so a very short-lived first run (or a first run after its inode was evicted) can
+finish before its hash is known.
 
 ## 6. Rule evaluation
 

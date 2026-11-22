@@ -4,7 +4,8 @@
  *
  *   socket_connect / socket_sendmsg  → who (exe, uid, cgroup subtree) → rule scan → 0 | -EPERM
  *   bprm_committed_creds             → Exec event so kavachd can hash + classify the binary
- *   file_open (write) / path_truncate → delete exe_class: a modified binary loses its identity
+ *   file_open (write) / path_truncate / file_truncate → delete exe_class (tamper revocation)
+ *   inode_free_security               → delete exe_class (a recycled inode never inherits one)
  *   file_open (kavachd, armed key_req) → placeholder + KeyReport (classification protocol)
  *
  * Requirements: FR-ID-1..6, FR-EG-1..5. LSM hooks get a trailing `ret` (result of earlier LSMs):
@@ -20,22 +21,66 @@
 
 static __always_inline void kv_inode_key(struct inode *ino, struct kv_exe_key *k)
 {
-	k->dev = BPF_CORE_READ(ino, i_sb, s_dev);
-	k->generation = BPF_CORE_READ(ino, i_generation);
+	k->inode = (__u64)(unsigned long)ino;
 	k->ino = BPF_CORE_READ(ino, i_ino);
+}
+
+#define KV_SB_KERNMOUNT (1 << 22)
+#define KV_EXT4_MAGIC 0xEF53
+#define KV_XFS_MAGIC 0x58465342
+#define KV_BTRFS_MAGIC 0x9123683E
+#define KV_TMPFS_MAGIC 0x01021994
+#define KV_F2FS_MAGIC 0xF2F52010
+#define KV_SQUASHFS_MAGIC 0x73717368
+#define KV_EROFS_MAGIC 0xE0F5E1E2
+
+/*
+ * Can a hash of this file be trusted to stay true? Only on local filesystems where every
+ * content change goes through a write-open or truncate we hook. Not: kernel-internal mounts
+ * (memfd/shm: written without file_open, i_writecount stays 0), FUSE (the server can serve
+ * different bytes to different readers), network filesystems (remote writers), overlayfs
+ * (rootless users can rewrite the lower/upper file behind the overlay inode).
+ */
+static __always_inline bool kv_trusted_file(struct file *f)
+{
+	if (BPF_CORE_READ(f, f_path.mnt, mnt_flags) & MNT_INTERNAL)
+		return false;
+	struct super_block *sb = BPF_CORE_READ(f, f_inode, i_sb);
+	if (BPF_CORE_READ(sb, s_flags) & KV_SB_KERNMOUNT)
+		return false;
+	switch (BPF_CORE_READ(sb, s_magic)) {
+	case KV_EXT4_MAGIC:
+	case KV_XFS_MAGIC:
+	case KV_BTRFS_MAGIC:
+	case KV_TMPFS_MAGIC:
+	case KV_F2FS_MAGIC:
+	case KV_SQUASHFS_MAGIC:
+	case KV_EROFS_MAGIC:
+		return true;
+	default:
+		return false;
+	}
 }
 
 static __always_inline void kv_current_exe(struct kv_exe_key *k)
 {
 	struct task_struct *t = bpf_get_current_task_btf();
 	/* mm (and so exe_file) is NULL for kernel threads: the key stays zero = unclassified. */
-	struct inode *ino = BPF_CORE_READ(t, mm, exe_file, f_inode);
-	if (!ino)
+	struct file *exe = BPF_CORE_READ(t, mm, exe_file);
+	if (!exe || !kv_trusted_file(exe))
 		return;
+	struct inode *ino = BPF_CORE_READ(exe, f_inode);
 	/* A binary someone holds open for write may already differ from what was hashed. */
-	if (BPF_CORE_READ(ino, i_writecount.counter) > 0)
+	if (!ino || BPF_CORE_READ(ino, i_writecount.counter) > 0)
 		return;
 	kv_inode_key(ino, k);
+}
+
+/* Committed (not a placeholder) classification for this key? */
+static __always_inline bool kv_exe_known(const struct kv_exe_key *k)
+{
+	struct kv_exe_class *c = bpf_map_lookup_elem(&exe_class, k);
+	return c && (c->flags & KV_EXE_F_COMMITTED);
 }
 
 static __always_inline __u64 kv_current_cg_mask(__u64 cgid, __u32 slot)
@@ -216,8 +261,8 @@ static __always_inline void kv_emit_exe(__u8 kind, const struct kv_exe_key *k)
 	e->uid = (__u32)bpf_get_current_uid_gid();
 	e->cgroup_id = bpf_get_current_cgroup_id();
 	e->identity = k->ino;
-	e->rule_id = k->dev;
-	e->generation = k->generation;
+	e->rule_id = (__u32)k->inode;
+	e->generation = (__u32)(k->inode >> 32);
 	bpf_get_current_comm(e->comm, sizeof(e->comm));
 	bpf_ringbuf_submit(e, 0);
 }
@@ -226,14 +271,16 @@ static __always_inline void kv_emit_exe(__u8 kind, const struct kv_exe_key *k)
 SEC("lsm/bprm_committed_creds")
 int BPF_PROG(kavach_exec, struct linux_binprm *bprm)
 {
-	struct kv_exe_key k = {};
-	struct inode *ino = BPF_CORE_READ(bprm, file, f_inode);
+	struct file *f = BPF_CORE_READ(bprm, file);
+	if (!f || !kv_trusted_file(f))
+		return 0; /* never classifiable: do not bother kavachd */
+	struct inode *ino = BPF_CORE_READ(f, f_inode);
 	if (!ino)
 		return 0;
+	struct kv_exe_key k = {};
 	kv_inode_key(ino, &k);
-
-	if (bpf_map_lookup_elem(&exe_class, &k))
-		return 0; /* known (or being classified) and unmodified since */
+	if (kv_exe_known(&k))
+		return 0; /* classified and unmodified since */
 	kv_emit_exe(KV_EVENT_KIND_EXEC, &k);
 	return 0;
 }
@@ -241,22 +288,27 @@ int BPF_PROG(kavach_exec, struct linux_binprm *bprm)
 /*
  * Any regular file, whatever its mode: chmod -x / write / chmod +x must not keep the identity.
  * The delete is unconditional because it takes the bucket lock, which orders it against a
- * placeholder insert in kv_key_report (a lockless lookup first would not).
+ * placeholder insert in kv_key_report (a lockless lookup first would not). If the delete
+ * fails for any reason but "absent", the modification is refused (fail closed).
  */
-static __always_inline void kv_taint(struct inode *ino)
+static __always_inline int kv_taint(struct inode *ino)
 {
 	umode_t mode = BPF_CORE_READ(ino, i_mode);
 	if ((mode & S_IFMT) != S_IFREG)
-		return;
+		return 0;
 
 	struct kv_exe_key k = {};
 	kv_inode_key(ino, &k);
-	if (bpf_map_delete_elem(&exe_class, &k) == 0)
+	long err = bpf_map_delete_elem(&exe_class, &k);
+	if (err == 0)
 		kv_emit_exe(KV_EVENT_KIND_EXE_TAINTED, &k);
+	else if (err != -ENOENT)
+		return -EBUSY;
+	return 0;
 }
 
 /* kavachd armed key_req and this thread is opening a file read-only: answer once. */
-static __always_inline void kv_key_report(struct inode *ino)
+static __always_inline void kv_key_report(struct file *file, struct inode *ino)
 {
 	__u32 zero = 0;
 	struct kv_key_req *req = bpf_map_lookup_elem(&key_req, &zero);
@@ -269,24 +321,31 @@ static __always_inline void kv_key_report(struct inode *ino)
 
 	struct kv_exe_key k = {};
 	kv_inode_key(ino, &k);
+	bool trusted = kv_trusted_file(file);
+	long inserted = -1;
 	/* Placeholder first, writers second. A writer increments i_writecount before its own
 	 * file_open hook runs: either we see that count here, or its kv_taint takes the bucket
 	 * lock after our insert and deletes the placeholder, so kavachd's commit fails. */
-	struct kv_exe_class ph = { .nonce = nonce };
-	bpf_map_update_elem(&exe_class, &k, &ph, BPF_NOEXIST);
+	if (trusted) {
+		struct kv_exe_class ph = { .nonce = nonce };
+		inserted = bpf_map_update_elem(&exe_class, &k, &ph, BPF_NOEXIST);
+	}
 	int writers = BPF_CORE_READ(ino, i_writecount.counter);
 
 	struct kv_event *e = kv_event_reserve();
-	if (!e)
+	if (!e) {
+		if (inserted == 0) /* nobody will ever commit or abandon it */
+			bpf_map_delete_elem(&exe_class, &k);
 		return;
+	}
 	e->kind = KV_EVENT_KIND_KEY_REPORT;
-	e->verdict = writers > 0;
+	e->verdict = (writers > 0 ? KV_REPORT_WRITERS : 0) | (trusted ? 0 : KV_REPORT_UNTRUSTED_FS);
 	e->pid = bpf_get_current_pid_tgid() >> 32;
 	e->uid = (__u32)bpf_get_current_uid_gid();
 	e->cgroup_id = nonce;
 	e->identity = k.ino;
-	e->rule_id = k.dev;
-	e->generation = k.generation;
+	e->rule_id = (__u32)k.inode;
+	e->generation = (__u32)(k.inode >> 32);
 	bpf_get_current_comm(e->comm, sizeof(e->comm));
 	bpf_ringbuf_submit(e, 0);
 }
@@ -301,9 +360,8 @@ int BPF_PROG(kavach_file_open, struct file *file, int ret)
 	if (!ino)
 		return 0;
 	if (BPF_CORE_READ(file, f_mode) & FMODE_WRITE)
-		kv_taint(ino);
-	else
-		kv_key_report(ino);
+		return kv_taint(ino);
+	kv_key_report(file, ino);
 	return 0;
 }
 
@@ -314,8 +372,29 @@ int BPF_PROG(kavach_truncate, const struct path *path, int ret)
 	if (ret)
 		return ret;
 	struct inode *ino = BPF_CORE_READ(path, dentry, d_inode);
-	if (ino)
-		kv_taint(ino);
+	return ino ? kv_taint(ino) : 0;
+}
+
+/* ftruncate(2), and open(O_RDONLY | O_TRUNC), which truncates without FMODE_WRITE (6.2+). */
+SEC("lsm/file_truncate")
+int BPF_PROG(kavach_file_truncate, struct file *file, int ret)
+{
+	if (ret)
+		return ret;
+	struct inode *ino = BPF_CORE_READ(file, f_inode);
+	return ino ? kv_taint(ino) : 0;
+}
+
+/* The inode is going away: its address may be reused, its classification must not be. */
+SEC("lsm/inode_free_security")
+int BPF_PROG(kavach_inode_free, struct inode *inode)
+{
+	struct kv_exe_key k = {};
+	kv_inode_key(inode, &k);
+	/* lockless check first: this runs for every inode eviction. No insert can race for a
+	 * dying inode (an insert needs an open file, which pins the inode). */
+	if (bpf_map_lookup_elem(&exe_class, &k))
+		bpf_map_delete_elem(&exe_class, &k);
 	return 0;
 }
 
@@ -331,13 +410,16 @@ int kavach_task_scan(struct bpf_iter__task *ctx)
 		return 0;
 	if (BPF_CORE_READ(task, pid) != BPF_CORE_READ(task, tgid))
 		return 0; /* one event per process, not per thread */
-	struct inode *ino = BPF_CORE_READ(task, mm, exe_file, f_inode);
+	struct file *exe = BPF_CORE_READ(task, mm, exe_file);
+	if (!exe || !kv_trusted_file(exe))
+		return 0; /* kernel thread, or never classifiable */
+	struct inode *ino = BPF_CORE_READ(exe, f_inode);
 	if (!ino)
-		return 0; /* kernel thread */
+		return 0;
 
 	struct kv_exe_key k = {};
 	kv_inode_key(ino, &k);
-	if (bpf_map_lookup_elem(&exe_class, &k))
+	if (kv_exe_known(&k))
 		return 0;
 	struct kv_event *e = kv_event_reserve();
 	if (!e)
@@ -345,8 +427,8 @@ int kavach_task_scan(struct bpf_iter__task *ctx)
 	e->kind = KV_EVENT_KIND_EXEC;
 	e->pid = BPF_CORE_READ(task, tgid);
 	e->identity = k.ino;
-	e->rule_id = k.dev;
-	e->generation = k.generation;
+	e->rule_id = (__u32)k.inode;
+	e->generation = (__u32)(k.inode >> 32);
 	BPF_CORE_READ_STR_INTO(&e->comm, task, comm);
 	bpf_ringbuf_submit(e, 0);
 	return 0;
