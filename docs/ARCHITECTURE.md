@@ -207,7 +207,7 @@ policies. Measured flip and drain on 7.1: 20–100 µs.
 
 ```
 "KVB1" | u16 version | u16 flags | u64 serial | u64 created | u64 not_after | [u8;8] key_id
-| fleet[16] | u32 payload_len | payload (postcard CompiledPolicy) | [u8;64] Ed25519 signature
+| fleet[32] | u32 payload_len | payload (postcard CompiledPolicy) | [u8;64] Ed25519 signature
 signature = Ed25519(sk, "kavach-bundle-v1\0" ‖ header ‖ payload)     key_id = SHA-256(pk)[..8]
 ```
 

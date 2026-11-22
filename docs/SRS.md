@@ -99,8 +99,8 @@ The kernel ↔ user boundary is crossed only through BPF maps, ring buffers, and
 | ID | Requirement |
 |----|-------------|
 | FR-XDP-1 | The system MUST drop packets whose source address matches an IPv4 or IPv6 blocklist CIDR using longest-prefix matching (`LPM_TRIE`). |
-| FR-XDP-2 | The system MUST enforce a per-source token-bucket rate limit (pps + burst) configurable at runtime without reload. |
-| FR-XDP-3 | Rate-limit state MUST live in an LRU per-CPU hash so a spoofed-source flood evicts cold entries instead of exhausting the map. |
+| FR-XDP-2 | The system MUST enforce a per-source rate limit (GCRA: pps + burst) configurable at runtime without reload. IPv6 sources MUST share one budget per /64. |
+| FR-XDP-3 | Rate-limit state MUST live in an LRU hash (one shared, atomically updated state per source) so a spoofed-source flood evicts cold entries instead of exhausting the map, and the rate is exact regardless of RSS. |
 | FR-XDP-4 | Header parsing MUST be bounds-checked (Ethernet, single + double 802.1Q VLAN, IPv4 with options, IPv6 with up to 4 extension headers, TCP/UDP/ICMP). Unparseable frames are `XDP_PASS` (the kernel stack decides). |
 | FR-XDP-5 | Per-reason drop counters MUST be exported via a per-CPU array (`stats`). |
 | FR-XDP-6 | Sampled drop events (1/N, configurable) MUST be emitted to the `events` ring buffer. |
@@ -110,11 +110,12 @@ The kernel ↔ user boundary is crossed only through BPF maps, ring buffers, and
 ### 3.2 Identity (v0.2)
 | ID | Requirement |
 |----|-------------|
-| FR-ID-1 | Every outbound connection MUST be attributed to: pid/tgid, uid/gid, cgroup id, executable (device, inode), and `comm`. |
+| FR-ID-1 | Every outbound connection MUST be attributed to: pid/tgid, uid/gid, cgroup id, executable (kernel `s_dev`, `i_generation`, inode), and `comm`. |
 | FR-ID-2 | kavachd MUST map executables to SHA-256 digests and publish `exe → selector-mask` classifications to the kernel. |
-| FR-ID-3 | Opening a classified executable for write MUST invalidate its classification in-kernel (closes hash/inode TOCTOU). |
+| FR-ID-3 | Opening an executable for write or truncating it MUST invalidate its classification in-kernel, including a modification that races the hash (sequence-pair protocol). |
 | FR-ID-4 | kavachd MUST map uids and cgroup ids (and in v0.3+ k8s pod labels via cgroup path) to selector masks. |
-| FR-ID-5 | The socket cookie of every connected socket MUST be recorded in `identity_by_cookie` for later lookup by TC and user space. |
+| FR-ID-5 | The identity of every connected socket MUST be recorded in socket-local storage (`sk_ident`) for later use by TC (re-evaluation after a policy swap). |
+| FR-ID-7 | Executables named by path in the active policy MUST be classified before their first execution after an apply; already-running processes MUST be classified at daemon start. |
 | FR-ID-6 | A process matches selector *s* iff it satisfies every dimension *s* constrains (AND across dimensions, OR within a list). |
 
 ### 3.3 Egress enforcement (v0.2)
@@ -160,7 +161,7 @@ The kernel ↔ user boundary is crossed only through BPF maps, ring buffers, and
 |----|-------------|
 | FR-D-1 | Load, verify, attach and pin (`/sys/fs/bpf/kavach/`) all programs and maps. |
 | FR-D-2 | On restart, re-use pinned maps/links (no enforcement gap). |
-| FR-D-3 | Control API over UDS `/run/kavach/kavach.sock` (0600), length-prefixed JSON, peer-credential checked (`SO_PEERCRED` uid 0 or `kavach` group). |
+| FR-D-3 | Control API over UDS `/run/kavach/kavach.sock` (0600), newline-delimited JSON, peer-credential checked (`SO_PEERCRED` uid 0 or `kavach` group). |
 | FR-D-4 | One async task per job (map_sync, ringbuf_reader, identity_broker, event_bus, audit_log, metrics); a crashed task is restarted without touching the kernel side. |
 | FR-D-5 | Prometheus metrics on a UDS or opt-in loopback port. |
 | FR-D-6 | Watchdog: kernel programs keep enforcing the last good policy if kavachd dies; `kavachctl kill-switch` detaches everything. |
@@ -240,7 +241,8 @@ FR-PORT-3 macOS NEFilterDataProvider shim; FR-PORT-4 Windows WFP callout (later)
 | UB | `cargo miri test` | core, common, parsers |
 | Differential | `BPF_PROG_TEST_RUN` vs `kavach-core::evaluate` on the same compiled tables | ABI + semantics parity |
 | Verifier | load every object on 6.1 / 6.6 / 6.12 / latest (virtme-ng) | NFR-REL-1 |
-| Integration | netns + veth harness, real traffic | XDP / TC / LSM end-to-end |
+| Privileged kernel suite | `scripts/priv-test.sh` (`crates/kavachd/tests/bpf.rs`): `BPF_PROG_TEST_RUN` for XDP/TC, live `connect()`/`sendto()` through the LSM hooks | XDP / TC / LSM end-to-end, FR-ID-3, FR-HS-4 |
+| Integration | netns + veth harness, real traffic | multi-interface, XDP native mode |
 | Fuzz | cargo-fuzz (parsers, toml, bundle), syzkaller (kavach.ko) | SR-6 |
 | Perf | pktgen / TRex, criterion | NFR-PERF-* |
 
