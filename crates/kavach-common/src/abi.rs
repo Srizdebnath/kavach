@@ -59,6 +59,9 @@ pub const KV_POL_F_VALID: u32 = 1 << 0;
 pub const KV_POL_F_STRICT_INGRESS: u32 = 1 << 1;
 /// Do not exempt loopback from egress policy.
 pub const KV_POL_F_NO_LOOPBACK_BYPASS: u32 = 1 << 2;
+/// Refuse egress from a classifiable executable that has no committed hash yet, while the
+/// policy has executable selectors (closes the first-run window; `unclassified = "deny"`).
+pub const KV_POL_F_UNCLASSIFIED_DENY: u32 = 1 << 3;
 
 /// [`FlowVal::flags`] bits.
 /// Entry is the reply direction of a locally-originated flow (always allowed).
@@ -116,6 +119,8 @@ pub enum StatReason {
     PolicyNoSlot = 12,
     ExeUnclassified = 13,
     FlowCacheStale = 14,
+    /// Egress refused because the executable was not classified yet (strict mode).
+    EgressUnclassified = 15,
 }
 
 /// Event type tag in [`Event::kind`].

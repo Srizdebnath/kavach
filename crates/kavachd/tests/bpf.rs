@@ -848,6 +848,48 @@ log = {{ to = "192.0.2.0/24" }}
     let _ = IpNet::from(IpAddr::V4(Ipv4Addr::LOCALHOST));
 }
 
+#[test]
+#[ignore = "needs root + BPF LSM: scripts/priv-test.sh"]
+fn lsm_strict_mode_refuses_unclassified_until_hashed() {
+    let lsms = std::fs::read_to_string("/sys/kernel/security/lsm").unwrap_or_default();
+    if !lsms.contains("bpf") {
+        eprintln!("skipping: BPF LSM not active");
+        return;
+    }
+    let mut f = Fixture::new();
+    let mut rb = f.k().take_events().unwrap();
+    f.k().attach_lsm().expect("attach LSM");
+    // A hash selector (for some other binary) + strict mode; nothing denies this traffic.
+    f.apply_toml(&format!(
+        r#"
+version = 1
+[defaults]
+egress = "allow"
+ingress = "allow"
+unclassified = "deny"
+[[rule]]
+id = "other-binary"
+who = {{ binary = "sha256:{}" }}
+deny = {{ to = "192.0.2.0/24", port = 1 }}
+"#,
+        "ab".repeat(32)
+    ));
+    let sock = UdpSocket::bind("0.0.0.0:0").unwrap();
+    let err = sock.send_to(b"x", "192.0.2.5:9").unwrap_err();
+    assert_eq!(
+        err.raw_os_error(),
+        Some(nix::libc::EPERM),
+        "unclassified binary refused"
+    );
+    assert!(f.stat(StatReason::EgressUnclassified) >= 1);
+
+    // Classify this test binary through the real protocol: now it is let through.
+    let me = std::process::id();
+    assert!(classify(&mut f, &mut rb, &format!("/proc/{me}/exe")));
+    sock.send_to(b"x", "192.0.2.5:9")
+        .expect("classified binary allowed");
+}
+
 // ---------------------------------------------------------------------------------------------
 // Real traffic: network namespace + veth pair (T31)
 // ---------------------------------------------------------------------------------------------

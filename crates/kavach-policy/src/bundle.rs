@@ -20,7 +20,9 @@ use thiserror::Error;
 use crate::compile::CompiledPolicy;
 
 pub const MAGIC: &[u8; 4] = b"KVB1";
-pub const FORMAT: u16 = 1;
+pub const FORMAT: u16 = 2;
+/// Bundles signed before `CompiledDefaults::unclassified_deny` existed; still accepted.
+pub const FORMAT_V1: u16 = 1;
 pub const DOMAIN: &[u8] = b"kavach-bundle-v1\0";
 pub const HEADER_LEN: usize = 4 + 2 + 2 + 8 + 8 + 8 + 8 + 32 + 4;
 pub const SIG_LEN: usize = 64;
@@ -65,7 +67,7 @@ pub struct BundleHeader {
 }
 
 impl BundleHeader {
-    fn encode(&self, payload_len: u32) -> [u8; HEADER_LEN] {
+    fn encode_as(&self, format: u16, payload_len: u32) -> [u8; HEADER_LEN] {
         let mut h = [0u8; HEADER_LEN];
         let mut o = 0;
         let mut put = |b: &[u8]| {
@@ -73,7 +75,7 @@ impl BundleHeader {
             o += b.len();
         };
         put(MAGIC);
-        put(&FORMAT.to_le_bytes());
+        put(&format.to_le_bytes());
         put(&self.flags.to_le_bytes());
         put(&self.serial.to_le_bytes());
         put(&self.created_unix.to_le_bytes());
@@ -87,7 +89,7 @@ impl BundleHeader {
         h
     }
 
-    fn decode(h: &[u8]) -> Result<(Self, u32), BundleError> {
+    fn decode(h: &[u8]) -> Result<(Self, u32, u16), BundleError> {
         if h.len() < HEADER_LEN {
             return Err(BundleError::Size);
         }
@@ -97,7 +99,7 @@ impl BundleHeader {
         let u16le = |o: usize| u16::from_le_bytes([h[o], h[o + 1]]);
         let u64le = |o: usize| u64::from_le_bytes(h[o..o + 8].try_into().unwrap());
         let format = u16le(4);
-        if format != FORMAT {
+        if format != FORMAT && format != FORMAT_V1 {
             return Err(BundleError::Format(format));
         }
         let fleet_raw = &h[40..72];
@@ -111,7 +113,7 @@ impl BundleHeader {
             fleet: String::from_utf8_lossy(&fleet_raw[..end]).into_owned(),
         };
         let len = u32::from_le_bytes(h[72..76].try_into().unwrap());
-        Ok((hdr, len))
+        Ok((hdr, len, format))
     }
 }
 
@@ -152,22 +154,66 @@ pub fn sign(
         return Err(BundleError::Encode("fleet id longer than 32 bytes".into()));
     }
     let payload = postcard::to_allocvec(policy).map_err(|e| BundleError::Encode(e.to_string()))?;
+    sign_payload(
+        FORMAT,
+        &payload,
+        policy.created_unix,
+        sk,
+        serial,
+        not_after_unix,
+        fleet,
+    )
+}
+
+/// A format-1 bundle, as older `kavachctl` versions signed them (compatibility tests).
+#[doc(hidden)]
+pub fn sign_v1(
+    policy: &crate::compile::CompiledPolicyV1,
+    sk: &SigningKey,
+    serial: u64,
+    not_after_unix: u64,
+    fleet: &str,
+) -> Result<Vec<u8>, BundleError> {
+    let payload = postcard::to_allocvec(policy).map_err(|e| BundleError::Encode(e.to_string()))?;
+    sign_payload(
+        FORMAT_V1,
+        &payload,
+        policy.created_unix,
+        sk,
+        serial,
+        not_after_unix,
+        fleet,
+    )
+}
+
+fn sign_payload(
+    format: u16,
+    payload: &[u8],
+    created_unix: u64,
+    sk: &SigningKey,
+    serial: u64,
+    not_after_unix: u64,
+    fleet: &str,
+) -> Result<Vec<u8>, BundleError> {
+    if fleet.len() > 32 {
+        return Err(BundleError::Encode("fleet id longer than 32 bytes".into()));
+    }
     if payload.len() > MAX_PAYLOAD {
         return Err(BundleError::Size);
     }
     let hdr = BundleHeader {
         flags: 0,
         serial,
-        created_unix: policy.created_unix,
+        created_unix,
         not_after_unix,
         key_id: key_id(&sk.verifying_key()),
         fleet: fleet.to_owned(),
     }
-    .encode(payload.len() as u32);
-    let sig = sk.sign(&signed_message(&hdr, &payload));
+    .encode_as(format, payload.len() as u32);
+    let sig = sk.sign(&signed_message(&hdr, payload));
     let mut out = Vec::with_capacity(HEADER_LEN + payload.len() + SIG_LEN);
     out.extend_from_slice(&hdr);
-    out.extend_from_slice(&payload);
+    out.extend_from_slice(payload);
     out.extend_from_slice(&sig.to_bytes());
     Ok(out)
 }
@@ -193,7 +239,7 @@ pub struct VerifiedBundle {
 
 /// Parse the header without trusting anything (for `kavachctl verify` display).
 pub fn peek_header(bytes: &[u8]) -> Result<BundleHeader, BundleError> {
-    BundleHeader::decode(bytes).map(|(h, _)| h)
+    BundleHeader::decode(bytes).map(|(h, _, _)| h)
 }
 
 /// Verify and decode a bundle under `trust`. Strict mode rejects expired bundles; non-strict
@@ -206,7 +252,7 @@ pub fn verify(
     if bytes.len() < HEADER_LEN + SIG_LEN || bytes.len() > HEADER_LEN + MAX_PAYLOAD + SIG_LEN {
         return Err(BundleError::Size);
     }
-    let (header, len) = BundleHeader::decode(&bytes[..HEADER_LEN])?;
+    let (header, len, format) = BundleHeader::decode(&bytes[..HEADER_LEN])?;
     let len = len as usize;
     if len > MAX_PAYLOAD || bytes.len() != HEADER_LEN + len + SIG_LEN {
         return Err(BundleError::Size);
@@ -241,8 +287,14 @@ pub fn verify(
     if expired && strict_expiry {
         return Err(BundleError::Expired(header.not_after_unix));
     }
-    let policy: CompiledPolicy =
-        postcard::from_bytes(payload).map_err(|e| BundleError::Decode(e.to_string()))?;
+    let decode_err = |e: postcard::Error| BundleError::Decode(e.to_string());
+    let policy: CompiledPolicy = if format == FORMAT_V1 {
+        postcard::from_bytes::<crate::compile::CompiledPolicyV1>(payload)
+            .map_err(decode_err)?
+            .into()
+    } else {
+        postcard::from_bytes(payload).map_err(decode_err)?
+    };
     Ok(VerifiedBundle {
         header,
         policy,

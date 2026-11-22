@@ -9,6 +9,7 @@ version = 1
 egress  = "allow"     # observe-first: flip to "drop" for zero-trust egress
 ingress = "drop"      # new inbound flows only; replies to our own flows always pass
 fail    = "closed"
+# unclassified = "deny"   # strict: refuse a binary's egress until its hash is known
 
 [sets]
 resolvers = ["1.1.1.1", "1.0.0.1", "9.9.9.9", "2606:4700:4700::1111"]

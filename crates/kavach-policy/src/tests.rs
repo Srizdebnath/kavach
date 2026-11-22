@@ -269,6 +269,44 @@ fn trust(vk: crate::VerifyingKey) -> TrustPolicy {
 }
 
 #[test]
+fn format_v1_bundles_still_verify_and_strict_mode_compiles() {
+    let p = compile(EXAMPLE, 50).unwrap().policy;
+    let v1 = crate::compile::CompiledPolicyV1 {
+        version: p.version,
+        created_unix: p.created_unix,
+        source_sha256: p.source_sha256,
+        defaults: crate::compile::CompiledDefaultsV1 {
+            egress: p.defaults.egress,
+            ingress: p.defaults.ingress,
+            strict_ingress: p.defaults.strict_ingress,
+            loopback_bypass: p.defaults.loopback_bypass,
+        },
+        selectors: p.selectors.clone(),
+        sets: p.sets.clone(),
+        rules: p.rules.clone(),
+        agents: p.agents.clone(),
+    };
+    let sk = bundle::generate_key();
+    let b = bundle::sign_v1(&v1, &sk, 2, 1_000, "prod").unwrap();
+    let v = bundle::verify(&b, &trust(sk.verifying_key()), true).unwrap();
+    assert_eq!(v.policy, p, "a format-1 bundle decodes to the same policy");
+    assert!(!v.policy.defaults.unclassified_deny);
+
+    let strict = EXAMPLE.replacen("[defaults]", "[defaults]\nunclassified = \"deny\"", 1);
+    let s = compile(&strict, 50).unwrap().policy;
+    assert!(s.defaults.unclassified_deny);
+    let table = s.to_kernel(
+        2,
+        1,
+        crate::kernel::Clocks {
+            unix_ns: 0,
+            boot_ns: 0,
+        },
+    );
+    assert!(table.hdr.flags & KV_POL_F_UNCLASSIFIED_DENY != 0);
+}
+
+#[test]
 fn bundle_roundtrip_and_rejections() {
     let p = compile(EXAMPLE, 50).unwrap().policy;
     let sk = bundle::generate_key();

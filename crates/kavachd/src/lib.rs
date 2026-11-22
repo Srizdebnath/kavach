@@ -5,4 +5,5 @@ pub mod config;
 pub mod daemon;
 pub mod events;
 pub mod kernel;
+pub mod scan;
 pub mod supervise;

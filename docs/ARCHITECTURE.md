@@ -165,9 +165,13 @@ for exec reporting, so a placeholder left behind (e.g. a dropped event) never hi
 
 **Unclassified window.** A process whose binary is not yet classified gets exe mask 0. It still
 matches uid/cgroup-only selectors and is counted in `exe_unclassified`. Key reports close this
-window for every binary the policy names by path. Binaries named only by hash are classified on
-first exec, so a very short-lived first run (or a first run after its inode was evicted) can
-finish before its hash is known.
+window for every binary the policy names by path. For binaries named by hash, the scanner
+(`crates/kavachd/src/scan.rs`) hashes the executables in `hash_scan_dirs` (the standard binary
+directories by default; stat-keyed cache, inotify for upgrades) and pre-classifies every match.
+A matching copy anywhere else is classified on its first exec. `[defaults] unclassified =
+"deny"` closes that last window: while the policy has executable selectors, egress from a
+classifiable binary without a committed hash is refused (`egress_unclassified`) until kavachd
+has hashed it, typically within milliseconds of exec.
 
 ## 6. Rule evaluation
 

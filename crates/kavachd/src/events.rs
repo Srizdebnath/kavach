@@ -58,6 +58,7 @@ fn reason_name(r: u8) -> &'static str {
         x if x == StatReason::XdpDropRate as u32 => "rate_limit",
         x if x == StatReason::EgressDrop as u32 => "egress_policy",
         x if x == StatReason::EgressLog as u32 => "egress_log",
+        x if x == StatReason::EgressUnclassified as u32 => "unclassified",
         x if x == StatReason::IngressDrop as u32 => "ingress_policy",
         x if x == StatReason::IngressAllow as u32 => "ingress_log",
         _ => "",

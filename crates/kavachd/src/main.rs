@@ -77,6 +77,7 @@ async fn main() -> Result<()> {
     }
 
     let rb = k.take_events()?;
+    let scan_dirs = cfg.hash_scan_dirs.clone();
     let state = Arc::new(Mutex::new(Daemon::new(cfg, k)));
     let (tx, _) = broadcast::channel(4096);
     let (jobs_tx, jobs_rx) = mpsc::channel(8192);
@@ -117,6 +118,13 @@ async fn main() -> Result<()> {
             warn!(error = %format!("{e:#}"), "startup task scan failed");
         }
     }
+
+    // Hash pre-classification of the standard binary directories (+ inotify).
+    supervise("hash scanner", state.clone(), {
+        let st = state.clone();
+        let kick = state.lock().expect("fresh state").scan_kick.clone();
+        move || kavachd::scan::scanner(st.clone(), scan_dirs.clone(), kick.clone())
+    });
 
     // Housekeeping: blocklist expiry + FQDN refresh.
     supervise("housekeeping", state.clone(), {

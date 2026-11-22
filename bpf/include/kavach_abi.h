@@ -96,6 +96,12 @@
 #define KV_POL_F_NO_LOOPBACK_BYPASS (1 << 2)
 
 /**
+ * Refuse egress from a classifiable executable that has no committed hash yet, while the
+ * policy has executable selectors (closes the first-run window; `unclassified = "deny"`).
+ */
+#define KV_POL_F_UNCLASSIFIED_DENY (1 << 3)
+
+/**
  * [`FlowVal::flags`] bits.
  * Entry is the reply direction of a locally-originated flow (always allowed).
  */
@@ -176,6 +182,10 @@ enum kv_stat
   KV_STAT_POLICY_NO_SLOT = 12,
   KV_STAT_EXE_UNCLASSIFIED = 13,
   KV_STAT_FLOW_CACHE_STALE = 14,
+  /**
+   * Egress refused because the executable was not classified yet (strict mode).
+   */
+  KV_STAT_EGRESS_UNCLASSIFIED = 15,
 };
 #if __STDC_VERSION__ >= 202311L
 typedef enum kv_stat kv_stat;

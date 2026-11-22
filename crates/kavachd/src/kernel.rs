@@ -17,7 +17,35 @@ use kavach_common::addr::{from_mapped, mapped_prefix, mask_addr, to_mapped};
 use tracing::{info, warn};
 
 /// Bump whenever a map layout changes: pins live under `/sys/fs/bpf/kavach/v<ABI_VERSION>`.
-pub const ABI_VERSION: u32 = 1;
+pub const ABI_VERSION: u32 = 2;
+
+/// Fingerprint of every shared struct size (`kavach_common::abi::LAYOUT`) that `ABI_VERSION`
+/// was last bumped for; the test below fails when the layout changes without a bump.
+pub const ABI_LAYOUT_FINGERPRINT: u64 = 14051614165168947846;
+
+/// FNV-1a over (name, size) of every ABI type.
+pub fn layout_fingerprint() -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for (name, size) in kavach_common::abi::LAYOUT {
+        for b in name.bytes().chain((*size as u64).to_le_bytes()) {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+    h
+}
+
+#[cfg(test)]
+mod abi_tests {
+    #[test]
+    fn abi_version_tracks_the_layout() {
+        assert_eq!(
+            super::layout_fingerprint(),
+            super::ABI_LAYOUT_FINGERPRINT,
+            "map layout changed: bump ABI_VERSION and record the new fingerprint"
+        );
+    }
+}
 
 /// The compiled eBPF object, embedded at build time (see build.rs).
 pub static OBJECT: &[u8] = aya::include_bytes_aligned!(concat!(env!("OUT_DIR"), "/kavach.bpf.o"));

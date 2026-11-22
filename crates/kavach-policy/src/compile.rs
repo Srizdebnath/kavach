@@ -144,6 +144,8 @@ pub struct CompiledDefaults {
     pub ingress: u8,
     pub strict_ingress: bool,
     pub loopback_bypass: bool,
+    /// `unclassified = "deny"` (bundle format 2+).
+    pub unclassified_deny: bool,
 }
 
 /// The portable, host-independent compiled policy carried inside a signed bundle.
@@ -157,6 +159,48 @@ pub struct CompiledPolicy {
     pub sets: Vec<AddrSet>,
     pub rules: Vec<CompiledRule>,
     pub agents: Vec<AgentSpec>,
+}
+
+/// Bundle format 1 payload (before `unclassified_deny`); decoded and upgraded on verify.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompiledPolicyV1 {
+    pub version: u32,
+    pub created_unix: u64,
+    pub source_sha256: [u8; 32],
+    pub defaults: CompiledDefaultsV1,
+    pub selectors: Vec<Selector>,
+    pub sets: Vec<AddrSet>,
+    pub rules: Vec<CompiledRule>,
+    pub agents: Vec<AgentSpec>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompiledDefaultsV1 {
+    pub egress: u8,
+    pub ingress: u8,
+    pub strict_ingress: bool,
+    pub loopback_bypass: bool,
+}
+
+impl From<CompiledPolicyV1> for CompiledPolicy {
+    fn from(p: CompiledPolicyV1) -> Self {
+        Self {
+            version: p.version,
+            created_unix: p.created_unix,
+            source_sha256: p.source_sha256,
+            defaults: CompiledDefaults {
+                egress: p.defaults.egress,
+                ingress: p.defaults.ingress,
+                strict_ingress: p.defaults.strict_ingress,
+                loopback_bypass: p.defaults.loopback_bypass,
+                unclassified_deny: false,
+            },
+            selectors: p.selectors,
+            sets: p.sets,
+            rules: p.rules,
+            agents: p.agents,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -612,6 +656,7 @@ pub fn compile_file(
             ingress: action_verdict(file.defaults.ingress),
             strict_ingress: file.defaults.strict_ingress,
             loopback_bypass: file.defaults.loopback_bypass,
+            unclassified_deny: file.defaults.unclassified == crate::schema::Unclassified::Deny,
         },
         selectors: sel_list,
         sets: set_list,

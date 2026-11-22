@@ -13,7 +13,11 @@ fleet            = "default"
 # Members of this group may use read/operate commands; kill-switch stays root-only.
 # control_group = "kavach"
 
-sample_rate = 64            # 1-in-N verdict events to the ring buffer (0 = off)
+sample_rate = 64
+
+# Executables hashed ahead of time when the policy names binaries by sha256 (non-recursive,
+# watched with inotify). Default: the standard bin/sbin/libexec directories.
+# hash_scan_dirs = ["/usr/bin", "/usr/sbin", "/usr/local/bin", "/usr/local/sbin", "/usr/libexec"]            # 1-in-N verdict events to the ring buffer (0 = off)
 
 [ratelimit]                 # per-source GCRA at XDP; IPv6 sources share a /64 budget
 pps   = 20000

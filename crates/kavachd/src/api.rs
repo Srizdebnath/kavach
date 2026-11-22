@@ -193,6 +193,7 @@ const STAT_NAMES: &[&str] = &[
     "policy_no_slot",
     "exe_unclassified",
     "flow_cache_stale",
+    "egress_unclassified",
 ];
 
 fn handle(state: &Arc<Mutex<Daemon>>, req: Request) -> Response {

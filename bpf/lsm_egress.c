@@ -172,14 +172,15 @@ static __always_inline int kv_sockaddr(struct sockaddr *addr, int addrlen, __u32
 
 static __always_inline void kv_emit_egress(const struct kv_identity *id, const __u32 *remote,
 					   __u16 port, __u8 family, __u8 proto,
-					   const struct kv_decision *d, __u32 gen)
+					   const struct kv_decision *d, __u32 gen,
+					   __u8 reason)
 {
 	struct kv_event *e = kv_event_reserve();
 	if (!e)
 		return;
 	e->kind = KV_EVENT_KIND_EGRESS_VERDICT;
 	e->verdict = d->verdict;
-	e->reason = d->verdict == KV_VERDICT_DROP ? KV_STAT_EGRESS_DROP : KV_STAT_EGRESS_LOG;
+	e->reason = reason;
 	e->key.family = family;
 	e->key.proto = proto;
 	e->key.dport = bpf_htons(port);
@@ -236,6 +237,15 @@ static __always_inline int kv_egress(struct socket *sock, struct sockaddr *addr,
 	id.generation = s.gen;
 
 	struct kv_decision d;
+	/* Strict mode: a binary we could classify but have not yet is refused until we have. */
+	if ((pol->hdr.flags & KV_POL_F_UNCLASSIFIED_DENY) && pol->hdr.wild_exe != ~0ULL &&
+	    id.exe.inode && !kv_exe_known(&id.exe)) {
+		struct kv_decision u = { .verdict = KV_VERDICT_DROP };
+		kv_count(KV_STAT_EGRESS_UNCLASSIFIED);
+		kv_emit_egress(&id, remote, port, family, proto, &u, s.gen, KV_STAT_EGRESS_UNCLASSIFIED);
+		return -EPERM;
+	}
+
 	kv_evaluate(&s, KV_DIR_EGRESS, id.mask, remote, port, proto, &d);
 
 	/* Remember the owner for TC and user space (freed with the socket). */
@@ -247,11 +257,11 @@ static __always_inline int kv_egress(struct socket *sock, struct sockaddr *addr,
 	switch (d.verdict) {
 	case KV_VERDICT_DROP:
 		kv_count(KV_STAT_EGRESS_DROP);
-		kv_emit_egress(&id, remote, port, family, proto, &d, s.gen);
+		kv_emit_egress(&id, remote, port, family, proto, &d, s.gen, KV_STAT_EGRESS_DROP);
 		return -EPERM;
 	case KV_VERDICT_LOG:
 		kv_count(KV_STAT_EGRESS_LOG);
-		kv_emit_egress(&id, remote, port, family, proto, &d, s.gen);
+		kv_emit_egress(&id, remote, port, family, proto, &d, s.gen, KV_STAT_EGRESS_LOG);
 		return 0;
 	default:
 		kv_count(KV_STAT_EGRESS_ALLOW);

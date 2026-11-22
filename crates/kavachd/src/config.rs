@@ -33,6 +33,9 @@ pub struct Config {
     /// FQDN refresh bounds (FR-EG-3).
     pub dns_min_ttl_secs: u64,
     pub dns_max_ttl_secs: u64,
+    /// Directories whose executables are hashed ahead of time when the policy names binaries by
+    /// hash (non-recursive, watched with inotify). Empty = classify hash-named binaries on exec.
+    pub hash_scan_dirs: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -61,6 +64,17 @@ impl Default for Config {
             sample_rate: 64,
             dns_min_ttl_secs: 5,
             dns_max_ttl_secs: 3600,
+            hash_scan_dirs: [
+                "/usr/bin",
+                "/usr/sbin",
+                "/usr/local/bin",
+                "/usr/local/sbin",
+                "/bin",
+                "/sbin",
+                "/usr/libexec",
+            ]
+            .map(PathBuf::from)
+            .to_vec(),
         }
     }
 }

@@ -61,6 +61,9 @@ impl CompiledPolicy {
         if !self.defaults.loopback_bypass {
             flags |= KV_POL_F_NO_LOOPBACK_BYPASS;
         }
+        if self.defaults.unclassified_deny {
+            flags |= KV_POL_F_UNCLASSIFIED_DENY;
+        }
         p.hdr = PolicyHeader {
             n_rules: self.rules.len().min(KV_MAX_RULES as usize) as u32,
             flags,

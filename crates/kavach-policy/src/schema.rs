@@ -60,6 +60,18 @@ pub struct Defaults {
     /// Report shadowed rules as warnings instead of errors.
     #[serde(default)]
     pub allow_shadowed: bool,
+    /// Egress from an executable whose hash is not known yet (its first moments after exec):
+    /// `allow` (default) or `deny` (strict; the program may see one EPERM while kavachd hashes).
+    #[serde(default)]
+    pub unclassified: Unclassified,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum Unclassified {
+    #[default]
+    Allow,
+    Deny,
 }
 
 fn yes() -> bool {
@@ -85,6 +97,7 @@ impl Default for Defaults {
             strict_ingress: false,
             loopback_bypass: true,
             allow_shadowed: false,
+            unclassified: Unclassified::Allow,
         }
     }
 }

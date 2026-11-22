@@ -133,6 +133,8 @@ pub struct Daemon {
     /// as its inode (`inode_free_security` deletes it); holding the file keeps an idle binary's
     /// inode, and so its classification, from being evicted. Not a writer: taint still works.
     pub pinned: HashMap<String, File>,
+    /// Wakes the hash scanner (full scan) after the active policy changed.
+    pub scan_kick: Arc<tokio::sync::Notify>,
 }
 
 impl Daemon {
@@ -155,6 +157,7 @@ impl Daemon {
             prewarm_tx: None,
             prewarm_pending: 0,
             pinned: HashMap::new(),
+            scan_kick: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -371,6 +374,7 @@ impl Daemon {
         report.swap_micros = self.stage(policy.clone(), v.header.serial)?;
         report.generation = self.generation;
         report.warnings.extend(self.prewarm(&policy));
+        self.scan_kick.notify_one();
         self.expired = false;
         persist(&self.cfg.state_dir, bytes)?;
         self.audit.record(
@@ -513,6 +517,7 @@ impl Daemon {
         for w in self.prewarm(&policy) {
             warn!("{w}");
         }
+        self.scan_kick.notify_one();
         info!(
             serial = self.serial,
             generation = self.generation,
