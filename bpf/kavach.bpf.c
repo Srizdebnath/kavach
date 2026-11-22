@@ -5,5 +5,6 @@
  */
 #include "xdp_filter.c"
 #include "lsm_egress.c"
+#include "tc_flow.c"
 
 char LICENSE[] SEC("license") = "GPL";
