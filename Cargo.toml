@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/kavach-common",
     "crates/kavach-core",
+    "crates/kavach-policy",
     "xtask",
 ]
 

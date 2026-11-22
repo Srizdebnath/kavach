@@ -85,7 +85,7 @@ impl SrcKey {
 /// Convert a 16-byte address to the `[u32; 4]` layout used in `FlowKey` (bytes preserved).
 pub fn to_words(addr: [u8; 16]) -> [u32; 4] {
     let mut w = [0u32; 4];
-    for (i, chunk) in addr.chunks_exact(4).enumerate() {
+    for (i, chunk) in addr.as_chunks::<4>().0.iter().enumerate() {
         w[i] = u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
     }
     w
