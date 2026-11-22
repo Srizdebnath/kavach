@@ -1,0 +1,53 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/kavach-common",
+    "xtask",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/Srizdebnath/kavach"
+authors = ["The Kavach Authors"]
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "deny"
+dbg_macro = "deny"
+todo = "warn"
+
+[workspace.dependencies]
+kavach-common = { path = "crates/kavach-common" }
+kavach-parsers = { path = "crates/kavach-parsers" }
+kavach-core = { path = "crates/kavach-core" }
+kavach-policy = { path = "crates/kavach-policy" }
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "signal", "sync", "time", "fs"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+sha2 = "0.10"
+postcard = { version = "1", features = ["alloc"] }
+ipnet = { version = "2", features = ["serde"] }
+bytemuck = { version = "1", features = ["derive"] }
+proptest = "1"
+aya = "0.16"
+aya-log = "0.4"
+getrandom = "0.3"
+libc = "0.2"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"

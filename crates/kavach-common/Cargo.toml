@@ -1,0 +1,20 @@
+[package]
+name = "kavach-common"
+description = "Kavach C <-> Rust ABI: #[repr(C)] types shared by eBPF programs, kernel module and user space"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+# Implements aya::Pod for every ABI type (user space only).
+aya = ["dep:aya"]
+std = []
+
+[dependencies]
+bytemuck = { workspace = true }
+aya = { workspace = true, optional = true }
+
+[lints]
+workspace = true
