@@ -22,7 +22,7 @@ enum Cmd {
     },
     /// Dump bpf/include/vmlinux.h from the running kernel's BTF.
     Vmlinux,
-    /// Compile every bpf/*.c to target/bpf/*.o.
+    /// Compile bpf/kavach.bpf.c to target/bpf/kavach.bpf.o.
     BuildBpf,
 }
 
@@ -116,8 +116,9 @@ fn build_bpf() -> Result<()> {
     std::fs::create_dir_all(&out_dir)?;
     for entry in std::fs::read_dir(root.join("bpf"))? {
         let p = entry?.path();
-        if p.extension().is_some_and(|e| e == "c") {
-            let obj = out_dir.join(p.file_stem().unwrap()).with_extension("o");
+        // Only the unity translation unit is compiled; it #includes the program sources.
+        if p.file_name().is_some_and(|n| n == "kavach.bpf.c") {
+            let obj = out_dir.join("kavach.bpf.o");
             let status = Command::new("clang")
                 .args(bpf_cflags())
                 .arg("-I")
@@ -153,6 +154,7 @@ fn bpf_cflags() -> Vec<String> {
         "-Wall",
         "-Werror",
         "-Wno-unused-function",
+        "-Wno-missing-declarations",
         &format!("-D__TARGET_ARCH_{arch}"),
     ]
     .iter()

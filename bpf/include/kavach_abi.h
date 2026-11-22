@@ -86,6 +86,17 @@
 #define KV_POL_F_NO_LOOPBACK_BYPASS (1 << 2)
 
 /**
+ * [`FlowVal::flags`] bits.
+ * Entry is the reply direction of a locally-originated flow (always allowed).
+ */
+#define KV_FLOW_F_REPLY (1 << 0)
+
+/**
+ * Entry was produced by the ingress rule scan.
+ */
+#define KV_FLOW_F_INGRESS (1 << 1)
+
+/**
  * Fixed-point scale for token buckets: one packet costs this many "nano-tokens".
  */
 #define KV_TOKEN_SCALE 1000000000
@@ -189,7 +200,7 @@ struct kv_flow_key {
 };
 
 /**
- * Cached decision for a flow. 40 bytes.
+ * Cached decision for a flow. 48 bytes.
  */
 struct kv_flow_val {
   /**
@@ -198,15 +209,18 @@ struct kv_flow_val {
   __u64 identity;
   __u32 rule_id;
   /**
+   * Policy generation that produced this entry (ignored for `KV_FLOW_F_REPLY` entries).
+   */
+  __u32 generation;
+  /**
    * [`Verdict`] as u8.
    */
   __u8 verdict;
   /**
-   * Low 8 bits of the policy generation that produced this entry.
+   * `KV_FLOW_F_*`.
    */
-  __u8 generation;
   __u8 flags;
-  __u8 _pad;
+  __u8 _pad[6];
   __u64 last_seen_ns;
   __u64 pkts;
   __u64 bytes;
@@ -427,7 +441,7 @@ struct kv_event {
 
 /* Layout must match crates/kavach-common (checked at compile time). */
 _Static_assert(sizeof(struct kv_flow_key) == 40, "ABI drift: kv_flow_key");
-_Static_assert(sizeof(struct kv_flow_val) == 40, "ABI drift: kv_flow_val");
+_Static_assert(sizeof(struct kv_flow_val) == 48, "ABI drift: kv_flow_val");
 _Static_assert(sizeof(struct kv_block_key) == 20, "ABI drift: kv_block_key");
 _Static_assert(sizeof(struct kv_block_val) == 16, "ABI drift: kv_block_val");
 _Static_assert(sizeof(struct kv_src_key) == 16, "ABI drift: kv_src_key");

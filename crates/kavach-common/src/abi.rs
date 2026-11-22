@@ -56,6 +56,12 @@ pub const KV_POL_F_STRICT_INGRESS: u32 = 1 << 1;
 /// Do not exempt loopback from egress policy.
 pub const KV_POL_F_NO_LOOPBACK_BYPASS: u32 = 1 << 2;
 
+/// [`FlowVal::flags`] bits.
+/// Entry is the reply direction of a locally-originated flow (always allowed).
+pub const KV_FLOW_F_REPLY: u8 = 1 << 0;
+/// Entry was produced by the ingress rule scan.
+pub const KV_FLOW_F_INGRESS: u8 = 1 << 1;
+
 /// Fixed-point scale for token buckets: one packet costs this many "nano-tokens".
 pub const KV_TOKEN_SCALE: u64 = 1_000_000_000;
 
@@ -138,19 +144,20 @@ pub struct FlowKey {
     pub dst: [u32; 4],
 }
 
-/// Cached decision for a flow. 40 bytes.
+/// Cached decision for a flow. 48 bytes.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
 pub struct FlowVal {
     /// Selector mask of the identity that owns the flow.
     pub identity: u64,
     pub rule_id: u32,
+    /// Policy generation that produced this entry (ignored for `KV_FLOW_F_REPLY` entries).
+    pub generation: u32,
     /// [`Verdict`] as u8.
     pub verdict: u8,
-    /// Low 8 bits of the policy generation that produced this entry.
-    pub generation: u8,
+    /// `KV_FLOW_F_*`.
     pub flags: u8,
-    pub _pad: u8,
+    pub _pad: [u8; 6],
     pub last_seen_ns: u64,
     pub pkts: u64,
     pub bytes: u64,
@@ -340,7 +347,7 @@ macro_rules! assert_size {
     };
 }
 assert_size!(FlowKey, 40);
-assert_size!(FlowVal, 40);
+assert_size!(FlowVal, 48);
 assert_size!(BlockKey, 20);
 assert_size!(BlockVal, 16);
 assert_size!(SrcKey, 16);
