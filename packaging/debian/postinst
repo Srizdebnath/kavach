@@ -1,0 +1,8 @@
+#!/bin/sh
+set -e
+if [ "$1" = configure ]; then
+    install -d -m 0750 /etc/kavach/trusted_keys /var/lib/kavach /var/log/kavach
+    chmod 0750 /etc/kavach
+    echo "kavach: run 'kavachctl doctor', add a key to /etc/kavach/trusted_keys, then 'systemctl enable --now kavachd'"
+fi
+#DEBHELPER#

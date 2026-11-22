@@ -57,10 +57,14 @@ async fn main() -> Result<()> {
     }
     k.set_xdp_config(xdp)?;
 
+    let mut xdp_failed = vec![];
     for iface in &cfg.interfaces {
         match k.attach_xdp(iface, &cfg.xdp_mode) {
             Ok(mode) => info!(iface, mode, "XDP attached"),
-            Err(e) => error!(iface, error = %format!("{e:#}"), "XDP attach failed"),
+            Err(e) => {
+                error!(iface, error = %format!("{e:#}"), "XDP attach failed");
+                xdp_failed.push(iface.clone());
+            }
         }
         if cfg.tc {
             match k.attach_tc(iface) {
@@ -79,6 +83,7 @@ async fn main() -> Result<()> {
     }
 
     let rb = k.take_events()?;
+    let xdp_mode = cfg.xdp_mode.clone();
     let scan_dirs = cfg.hash_scan_dirs.clone();
     let state = Arc::new(Mutex::new(Daemon::new(cfg, k)));
     let (tx, _) = broadcast::channel(4096);
@@ -114,6 +119,34 @@ async fn main() -> Result<()> {
         st.prewarm_tx = Some(prewarm_tx.clone());
         if let Err(e) = st.restore() {
             error!(error = %format!("{e:#}"), "could not restore persisted policy");
+        }
+        // Upgrade across an ABI bump: our programs and policy are live now, so detach the
+        // previous version's, then give XDP the interfaces its link was holding.
+        match st.k().and_then(|k| k.retire_stale_abis()) {
+            Ok(old) if !old.is_empty() => {
+                warn!(retired = ?old, "detached programs pinned by an older Kavach ABI");
+                // bpffs frees an unlinked pin after an RCU grace period, so the old link lets
+                // go of the interface shortly after the unlink: retry for up to ~2 s.
+                for iface in &xdp_failed {
+                    let mut last = None;
+                    for _ in 0..40 {
+                        match st.k().and_then(|k| k.attach_xdp(iface, &xdp_mode)) {
+                            Ok(mode) => {
+                                info!(iface, mode, "XDP attached");
+                                last = None;
+                                break;
+                            }
+                            Err(e) => last = Some(e),
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                    if let Some(e) = last {
+                        error!(iface, error = %format!("{e:#}"), "XDP attach failed");
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(e) => error!(error = %format!("{e:#}"), "could not retire older ABI pins"),
         }
         // Classify processes that were running before we started.
         if let Err(e) = st.k().and_then(|k| k.scan_tasks()) {

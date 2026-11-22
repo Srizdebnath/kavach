@@ -269,6 +269,37 @@ impl Kernel {
     }
 
     /// Detach everything and remove every pin (kill-switch, NFR-REL-2).
+    /// After an upgrade across an ABI bump, the previous daemon's programs are still attached
+    /// from `<parent>/v<old>`. Once this daemon's programs and policy are live, remove those
+    /// pins: their links detach (an XDP link would otherwise keep the interface busy).
+    /// Only for the default `…/v<ABI_VERSION>` layout. Returns the retired directories.
+    pub fn retire_stale_abis(&self) -> Result<Vec<PathBuf>> {
+        let Some(dir) = &self.pin_dir else {
+            return Ok(vec![]);
+        };
+        let ours = format!("v{ABI_VERSION}");
+        if dir.file_name().and_then(|n| n.to_str()) != Some(ours.as_str()) {
+            return Ok(vec![]);
+        }
+        let Some(parent) = dir.parent() else {
+            return Ok(vec![]);
+        };
+        let mut out = vec![];
+        for e in std::fs::read_dir(parent)? {
+            let e = e?;
+            let name = e.file_name().to_string_lossy().into_owned();
+            let versioned = name
+                .strip_prefix('v')
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+            if versioned && name != ours && e.file_type()?.is_dir() {
+                std::fs::remove_dir_all(e.path())
+                    .with_context(|| format!("removing {}", e.path().display()))?;
+                out.push(e.path());
+            }
+        }
+        Ok(out)
+    }
+
     pub fn kill_switch(self) -> Result<()> {
         if let Some(dir) = &self.pin_dir
             && dir.exists()

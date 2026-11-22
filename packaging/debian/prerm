@@ -1,0 +1,8 @@
+#!/bin/sh
+set -e
+# Removing the package detaches enforcement (stopping the daemon alone keeps it in the kernel).
+if [ "$1" = remove ]; then
+    systemctl disable --now kavachd >/dev/null 2>&1 || true
+    /usr/bin/kavachctl kill-switch --yes >/dev/null 2>&1 || true
+fi
+#DEBHELPER#

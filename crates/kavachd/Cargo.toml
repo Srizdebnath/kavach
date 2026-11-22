@@ -35,3 +35,43 @@ hex = "0.4"
 
 [lints]
 workspace = true
+
+# `cargo deb -p kavachd --target x86_64-unknown-linux-musl` (built in the release workflow).
+[package.metadata.deb]
+name = "kavach"
+maintainer = "The Kavach Authors"
+section = "net"
+priority = "optional"
+depends = ""
+extended-description = """\
+Kavach is a kernel-native firewall built on eBPF: XDP blocklist and per-source rate limiting, \
+TC flow tracking and ingress policy, and BPF-LSM egress control keyed by the hash of the \
+executable. Policy is git-reviewed TOML compiled into ed25519-signed bundles."""
+conf-files = ["/etc/kavach/kavachd.toml"]
+maintainer-scripts = "../../packaging/debian"
+systemd-units = { unit-name = "kavachd", unit-scripts = "../../packaging/systemd", enable = false, start = false }
+assets = [
+    ["target/release/kavachd", "usr/bin/", "755"],
+    ["target/release/kavachctl", "usr/bin/", "755"],
+    ["../../examples/kavachd.toml", "etc/kavach/kavachd.toml", "640"],
+    ["../../examples/kavach.toml", "usr/share/doc/kavach/examples/kavach.toml", "644"],
+    ["../../README.md", "usr/share/doc/kavach/README.md", "644"],
+    ["../../docs/INSTALL.md", "usr/share/doc/kavach/INSTALL.md", "644"],
+    ["../../docs/ARCHITECTURE.md", "usr/share/doc/kavach/ARCHITECTURE.md", "644"],
+]
+
+# `cargo generate-rpm -p crates/kavachd --target x86_64-unknown-linux-musl`
+[package.metadata.generate-rpm]
+name = "kavach"
+summary = "Kernel-native eBPF firewall with executable-identity egress control"
+post_install_script = "mkdir -p /etc/kavach/trusted_keys /var/lib/kavach /var/log/kavach && chmod 0750 /etc/kavach /etc/kavach/trusted_keys /var/lib/kavach /var/log/kavach && systemctl daemon-reload >/dev/null 2>&1 || :"
+pre_uninstall_script = "if [ \"$1\" = 0 ]; then systemctl disable --now kavachd >/dev/null 2>&1 || :; /usr/bin/kavachctl kill-switch --yes >/dev/null 2>&1 || :; fi"
+assets = [
+    { source = "target/release/kavachd", dest = "/usr/bin/kavachd", mode = "755" },
+    { source = "target/release/kavachctl", dest = "/usr/bin/kavachctl", mode = "755" },
+    { source = "../../packaging/systemd/kavachd.service", dest = "/usr/lib/systemd/system/kavachd.service", mode = "644" },
+    { source = "../../examples/kavachd.toml", dest = "/etc/kavach/kavachd.toml", mode = "640", config = "noreplace" },
+    { source = "../../examples/kavach.toml", dest = "/usr/share/doc/kavach/examples/kavach.toml", mode = "644", doc = true },
+    { source = "../../README.md", dest = "/usr/share/doc/kavach/README.md", mode = "644", doc = true },
+    { source = "../../docs/INSTALL.md", dest = "/usr/share/doc/kavach/INSTALL.md", mode = "644", doc = true },
+]
