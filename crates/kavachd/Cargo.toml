@@ -26,7 +26,7 @@ sha2 = { workspace = true }
 hex = "0.4"
 ipnet = { workspace = true }
 postcard = { workspace = true }
-nix = { version = "0.30", features = ["time", "user", "fs", "socket"] }
+nix = { version = "0.30", features = ["sched", "time", "user", "fs", "socket"] }
 bytemuck = { workspace = true }
 
 [dev-dependencies]

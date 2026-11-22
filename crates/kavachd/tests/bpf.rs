@@ -674,3 +674,129 @@ log = {{ to = "192.0.2.0/24" }}
     assert_eq!(f.k().exe_dirty(&copy_key).unwrap(), s0 + 2);
     let _ = IpNet::from(IpAddr::V4(Ipv4Addr::LOCALHOST));
 }
+
+// ---------------------------------------------------------------------------------------------
+// Real traffic: network namespace + veth pair (T31)
+// ---------------------------------------------------------------------------------------------
+
+struct Netns {
+    ns: String,
+    host_if: String,
+}
+
+impl Netns {
+    fn new(tag: u32) -> Self {
+        let ns = format!("kvt{}{tag}", std::process::id() % 10000);
+        let host_if = format!("kvh{tag}");
+        let peer = format!("kvn{tag}");
+        let sh = |args: &str| {
+            let ok = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(args)
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "setup failed: {args}");
+        };
+        sh(&format!("ip netns add {ns}"));
+        sh(&format!("ip link add {host_if} type veth peer name {peer}"));
+        sh(&format!("ip link set {peer} netns {ns}"));
+        sh(&format!(
+            "ip addr add 10.203.{tag}.1/24 dev {host_if} && ip link set {host_if} up"
+        ));
+        sh(&format!(
+            "ip -n {ns} addr add 10.203.{tag}.2/24 dev {peer} && ip -n {ns} link set {peer} up && ip -n {ns} link set lo up"
+        ));
+        Self { ns, host_if }
+    }
+
+    /// Run a shell snippet inside the namespace; true if it exits 0.
+    fn run(&self, cmd: &str) -> bool {
+        std::process::Command::new("ip")
+            .args(["netns", "exec", &self.ns, "timeout", "3", "bash", "-c", cmd])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    }
+}
+
+impl Drop for Netns {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("ip")
+            .args(["link", "del", &self.host_if])
+            .status();
+        let _ = std::process::Command::new("ip")
+            .args(["netns", "del", &self.ns])
+            .status();
+    }
+}
+
+#[test]
+#[ignore = "needs root: scripts/priv-test.sh"]
+fn netns_veth_real_traffic_xdp_and_tc() {
+    // Run this test thread in a private network namespace: the host's own firewall (e.g. an
+    // INPUT drop policy) and interfaces are untouched and cannot interfere.
+    nix::sched::unshare(nix::sched::CloneFlags::CLONE_NEWNET).expect("unshare(CLONE_NEWNET)");
+    let mut f = Fixture::new();
+    let n = Netns::new(7);
+    let mode = f
+        .k()
+        .attach_xdp(&n.host_if, "auto")
+        .expect("attach XDP to veth");
+    f.k().attach_tc(&n.host_if).expect("attach TC to veth");
+    enable_xdp(&mut f, KV_XDP_F_BLOCKLIST, 1, 1);
+    eprintln!("xdp mode on veth: {mode}");
+
+    let open = TcpListenerGuard::bind("10.203.7.1:47081");
+    let closed = TcpListenerGuard::bind("10.203.7.1:47080");
+    let tcp = |port: u16| format!("echo > /dev/tcp/10.203.7.1/{port}");
+
+    // Baseline: everything reachable.
+    assert!(n.run("ping -c1 -W1 10.203.7.1"), "baseline ping");
+    assert!(n.run(&tcp(47080)) && n.run(&tcp(47081)), "baseline tcp");
+
+    // TC ingress policy: deny new TCP to :47080 from the namespace subnet; replies keep flowing.
+    f.apply_toml(
+        r#"
+version = 1
+[defaults]
+egress = "allow"
+ingress = "allow"
+[[rule]]
+id = "no-47080-from-lab"
+direction = "ingress"
+deny = { from = "10.203.7.0/24", port = 47080, proto = "tcp" }
+"#,
+    );
+    assert!(!n.run(&tcp(47080)), "47080 must be dropped at TC ingress");
+    assert!(n.run(&tcp(47081)), "47081 still allowed");
+    assert!(n.run("ping -c1 -W1 10.203.7.1"), "icmp unaffected");
+    assert!(f.stat(StatReason::IngressDrop) >= 1);
+
+    // XDP blocklist: the whole peer is cut off before the stack sees a packet.
+    f.k()
+        .block_add("10.203.7.2/32".parse().unwrap(), 0, 1)
+        .unwrap();
+    assert!(!n.run("ping -c1 -W1 10.203.7.1"), "blocked at XDP");
+    assert!(!n.run(&tcp(47081)), "blocked at XDP");
+    assert!(f.stat(StatReason::XdpDropBlocklist) >= 1);
+    f.k().block_del("10.203.7.2/32".parse().unwrap()).unwrap();
+    assert!(n.run("ping -c1 -W1 10.203.7.1"), "unblocked");
+    drop((open, closed));
+}
+
+/// A listener that accepts in the background so client connects complete.
+struct TcpListenerGuard(#[allow(dead_code)] std::thread::JoinHandle<()>);
+
+impl TcpListenerGuard {
+    fn bind(addr: &str) -> Self {
+        let l = std::net::TcpListener::bind(addr).unwrap();
+        Self(std::thread::spawn(move || {
+            for s in l.incoming() {
+                drop(s);
+            }
+        }))
+    }
+}

@@ -60,13 +60,23 @@ impl Kernel {
     /// state or opens an enforcement gap). Tests pass a private directory.
     pub fn load(pin_dir: &Path) -> Result<Self> {
         let btf = btf()?;
+        let fresh = !pin_dir.exists();
         std::fs::create_dir_all(pin_dir.join("links"))
             .with_context(|| format!("creating {} (is bpffs mounted?)", pin_dir.display()))?;
-        let mut bpf = EbpfLoader::new()
+        let loaded = EbpfLoader::new()
             .btf(&btf)
             .default_map_pin_directory(pin_dir)
-            .load(OBJECT)
-            .context("loading eBPF object")?;
+            .load(OBJECT);
+        let mut bpf = match loaded {
+            Ok(b) => b,
+            Err(e) => {
+                // Never leave a half-populated pin dir behind that a later start would re-adopt.
+                if fresh {
+                    let _ = std::fs::remove_dir_all(pin_dir);
+                }
+                return Err(e).context("loading eBPF object");
+            }
+        };
         let sync_inner = bpf.take_map("sync_inner").and_then(|m| match m {
             aya::maps::Map::Array(d) => Some(d),
             _ => None,
