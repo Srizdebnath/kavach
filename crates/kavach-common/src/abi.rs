@@ -300,7 +300,9 @@ pub struct PolicyHeader {
     /// Full policy generation that activated this slot.
     pub generation: u32,
     pub _pad2: u32,
-    pub _reserved: u64,
+    /// Bitmap of defined selectors; identity masks are ANDed with it. Bits of undefined
+    /// selectors are set in every `wild_*` so `wild_* == u64::MAX` means "dimension unused".
+    pub sel_used: u64,
 }
 
 /// One compiled rule. 48 bytes.

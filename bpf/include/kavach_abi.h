@@ -387,7 +387,11 @@ struct kv_policy_header {
    */
   __u32 generation;
   __u32 _pad2;
-  __u64 _reserved;
+  /**
+   * Bitmap of defined selectors; identity masks are ANDed with it. Bits of undefined
+   * selectors are set in every `wild_*` so `wild_* == u64::MAX` means "dimension unused".
+   */
+  __u64 sel_used;
 };
 
 /**

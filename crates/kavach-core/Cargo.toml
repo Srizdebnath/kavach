@@ -1,0 +1,16 @@
+[package]
+name = "kavach-core"
+description = "Kavach reference policy engine (no_std, no alloc): the semantics the eBPF programs mirror"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+kavach-common = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[lints]
+workspace = true

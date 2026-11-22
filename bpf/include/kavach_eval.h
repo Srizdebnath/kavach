@@ -70,7 +70,7 @@ static __always_inline __u64 kv_combine_mask(const struct kv_policy *pol, __u64 
 					     __u64 cg_m)
 {
 	return (exe_m | pol->hdr.wild_exe) & (uid_m | pol->hdr.wild_uid) &
-	       (cg_m | pol->hdr.wild_cgroup);
+	       (cg_m | pol->hdr.wild_cgroup) & pol->hdr.sel_used;
 }
 
 static __always_inline __u64 kv_remote_sets(__u32 slot, const __u32 *addr)
