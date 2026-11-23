@@ -17,6 +17,18 @@
 //! allow = { to = "@payments", port = 443, proto = "tcp" }
 //! ttl   = "30d"
 //! fail  = "closed"
+//!
+//! # L7 gateway policy for MCP / A2A traffic, applied to flows a `punt` rule hands over.
+//! [gateway.github-agent]
+//! allow_tools     = ["github.*"]
+//! deny_tools      = ["github.delete_*"]
+//! allow_resources = ["repo://acme/"]
+//! tls             = "deny"
+//!
+//! [[rule]]
+//! id   = "agent-to-mcp"
+//! who  = { user = "agent" }
+//! punt = { to = "mcp.internal.example", port = 443, proto = "tcp", gateway = "github-agent" }
 //! ```
 
 use std::collections::BTreeMap;
@@ -37,6 +49,47 @@ pub struct PolicyFile {
     /// v0.4 agent policies (parsed and carried, enforced by the gateway).
     #[serde(default, rename = "agent")]
     pub agents: Vec<AgentSpec>,
+    /// Named L7 gateway policies (`[gateway.<name>]`), referenced by `punt` rules.
+    #[serde(default, rename = "gateway")]
+    pub gateways: BTreeMap<String, GatewaySpec>,
+}
+
+/// `[gateway.<name>]`: what an agent may do over a punted MCP / A2A connection.
+///
+/// Tool patterns are exact names or a prefix ending in `*` (`"github.*"`, `"*"`). A tool call
+/// is allowed when no `deny_tools` pattern and at least one `allow_tools` pattern matches.
+/// Handshake/discovery traffic (`initialize`, `ping`, `*/list`, notifications) always passes.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GatewaySpec {
+    /// MCP tool name patterns that may be called.
+    #[serde(default)]
+    pub allow_tools: Vec<String>,
+    /// MCP tool name patterns that are refused (checked before `allow_tools`).
+    #[serde(default)]
+    pub deny_tools: Vec<String>,
+    /// URI prefixes `resources/read` may read (plain prefixes, no `*`).
+    #[serde(default)]
+    pub allow_resources: Vec<String>,
+    /// A2A `message/send` / `message/stream` (delegating to another agent).
+    #[serde(default)]
+    pub allow_agent_messages: bool,
+    /// Any other JSON-RPC method.
+    #[serde(default)]
+    pub allow_other: bool,
+    /// TLS the gateway does not terminate (no frame visible): `deny` (default) or `allow`.
+    #[serde(default)]
+    pub tls: GatewayTls,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum GatewayTls {
+    /// Refuse opaque TLS streams (fail closed).
+    #[default]
+    Deny,
+    /// Pass them through uninspected; only the punting L3/L4 rule applies.
+    Allow,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -187,6 +240,8 @@ pub struct MatchSpec {
     pub port: Option<OneOrMany<PortSpec>>,
     /// `tcp`, `udp`, `icmp`, `icmpv6` or `any`.
     pub proto: Option<String>,
+    /// `punt` only: the `[gateway.<name>]` policy that decides the punted flow at L7.
+    pub gateway: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]

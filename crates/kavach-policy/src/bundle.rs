@@ -5,6 +5,10 @@
 //! | [u8; 8] key_id | [u8; 32] fleet | u32 payload_len | payload (postcard CompiledPolicy)
 //! | [u8; 64] signature
 //!
+//! format 1: payload without `unclassified_deny`        (CompiledPolicyV1)
+//! format 2: payload without gateway policies           (CompiledPolicyV2)
+//! format 3: `[gateway.*]` policies + per-rule gateway  (CompiledPolicy)
+//!
 //! signature = Ed25519(sk, "kavach-bundle-v1\0" || header || payload)   (pure Ed25519)
 //! key_id    = SHA-256(public key)[..8]
 //! ```
@@ -12,6 +16,9 @@
 //! Verification order: size caps → header → trusted key → revocation → signature → fleet →
 //! anti-rollback serial → expiry → decode. Nothing attacker-controlled is decoded before the
 //! signature is checked.
+//!
+//! [`sign`] writes the oldest format that can carry the policy: a policy without gateway
+//! policies is still a format-2 bundle, so hosts that predate format 3 keep loading it.
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use sha2::{Digest, Sha256};
@@ -20,7 +27,10 @@ use thiserror::Error;
 use crate::compile::CompiledPolicy;
 
 pub const MAGIC: &[u8; 4] = b"KVB1";
-pub const FORMAT: u16 = 2;
+/// Newest bundle format (gateway policies).
+pub const FORMAT: u16 = 3;
+/// Bundles without gateway policies; still written for gateway-free policies, still accepted.
+pub const FORMAT_V2: u16 = 2;
 /// Bundles signed before `CompiledDefaults::unclassified_deny` existed; still accepted.
 pub const FORMAT_V1: u16 = 1;
 pub const DOMAIN: &[u8] = b"kavach-bundle-v1\0";
@@ -99,7 +109,7 @@ impl BundleHeader {
         let u16le = |o: usize| u16::from_le_bytes([h[o], h[o + 1]]);
         let u64le = |o: usize| u64::from_le_bytes(h[o..o + 8].try_into().unwrap());
         let format = u16le(4);
-        if format != FORMAT && format != FORMAT_V1 {
+        if !matches!(format, FORMAT | FORMAT_V2 | FORMAT_V1) {
             return Err(BundleError::Format(format));
         }
         let fleet_raw = &h[40..72];
@@ -153,9 +163,13 @@ pub fn sign(
     if fleet.len() > 32 {
         return Err(BundleError::Encode("fleet id longer than 32 bytes".into()));
     }
-    let payload = postcard::to_allocvec(policy).map_err(|e| BundleError::Encode(e.to_string()))?;
+    let enc = |e: postcard::Error| BundleError::Encode(e.to_string());
+    let (format, payload) = match policy.to_v2() {
+        Some(v2) => (FORMAT_V2, postcard::to_allocvec(&v2).map_err(enc)?),
+        None => (FORMAT, postcard::to_allocvec(policy).map_err(enc)?),
+    };
     sign_payload(
-        FORMAT,
+        format,
         &payload,
         policy.created_unix,
         sk,
@@ -242,6 +256,11 @@ pub fn peek_header(bytes: &[u8]) -> Result<BundleHeader, BundleError> {
     BundleHeader::decode(bytes).map(|(h, _, _)| h)
 }
 
+/// The format field of a bundle header (unauthenticated; display and tests only).
+pub fn peek_format(bytes: &[u8]) -> Result<u16, BundleError> {
+    BundleHeader::decode(bytes).map(|(_, _, f)| f)
+}
+
 /// Verify and decode a bundle under `trust`. Strict mode rejects expired bundles; non-strict
 /// (used when re-loading the active bundle at boot) returns them flagged `expired`.
 pub fn verify(
@@ -288,13 +307,27 @@ pub fn verify(
         return Err(BundleError::Expired(header.not_after_unix));
     }
     let decode_err = |e: postcard::Error| BundleError::Decode(e.to_string());
-    let policy: CompiledPolicy = if format == FORMAT_V1 {
-        postcard::from_bytes::<crate::compile::CompiledPolicyV1>(payload)
+    let policy: CompiledPolicy = match format {
+        FORMAT_V1 => postcard::from_bytes::<crate::compile::CompiledPolicyV1>(payload)
             .map_err(decode_err)?
-            .into()
-    } else {
-        postcard::from_bytes(payload).map_err(decode_err)?
+            .into(),
+        FORMAT_V2 => postcard::from_bytes::<crate::compile::CompiledPolicyV2>(payload)
+            .map_err(decode_err)?
+            .into(),
+        _ => postcard::from_bytes(payload).map_err(decode_err)?,
     };
+    if let Some(r) = policy
+        .rules
+        .iter()
+        .find(|r| r.gateway as usize > policy.gateways.len())
+    {
+        return Err(BundleError::Decode(format!(
+            "rule {:?} references gateway #{} of {}",
+            r.name,
+            r.gateway,
+            policy.gateways.len()
+        )));
+    }
     Ok(VerifiedBundle {
         header,
         policy,

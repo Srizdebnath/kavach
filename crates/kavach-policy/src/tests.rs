@@ -283,7 +283,7 @@ fn format_v1_bundles_still_verify_and_strict_mode_compiles() {
         },
         selectors: p.selectors.clone(),
         sets: p.sets.clone(),
-        rules: p.rules.clone(),
+        rules: p.rules.iter().map(Into::into).collect(),
         agents: p.agents.clone(),
     };
     let sk = bundle::generate_key();
@@ -385,4 +385,339 @@ fn diff_reports_changes() {
         .collect();
     assert!(d.contains(&"~ rule dns".to_string()), "{d:?}");
     assert!(d.contains(&"+ rule new".to_string()), "{d:?}");
+}
+
+// ---------------------------------------------------------------------------------------------
+// L7 gateway policies
+// ---------------------------------------------------------------------------------------------
+
+const GATEWAY: &str = r#"
+version = 1
+
+[defaults]
+egress = "drop"
+
+[gateway.github-agent]
+allow_tools     = ["github.*", "search"]
+deny_tools      = ["github.delete_*"]
+allow_resources = ["repo://acme/*"]
+tls             = "deny"
+
+[gateway.support]
+allow_tools          = ["kb.search"]
+allow_agent_messages = true
+tls                  = "allow"
+
+[[rule]]
+id    = "dns"
+allow = { to = "1.1.1.1", port = 53, proto = "udp" }
+
+[[rule]]
+id   = "github-mcp"
+who  = { user = 1000 }
+punt = { to = "203.0.113.0/24", port = 443, proto = "tcp", gateway = "github-agent" }
+
+[[rule]]
+id   = "support-mcp"
+who  = { user = 1001 }
+punt = { to = "198.51.100.7", port = [443, 8443], proto = "tcp", gateway = "support" }
+"#;
+
+fn warnings(src: &str) -> Vec<String> {
+    compile(src, 1_000)
+        .expect("compiles")
+        .warnings
+        .iter()
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn with_gateway(body: &str) -> String {
+    format!(
+        "version = 1\n[gateway.g]\n{body}\n[[rule]]\nid = 'p'\npunt = {{ port = 443, proto = 'tcp', gateway = 'g' }}\n"
+    )
+}
+
+#[test]
+fn gateway_policies_compile_and_rules_reference_them() {
+    let out = compile(GATEWAY, 0).expect("compiles");
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    let p = out.policy;
+    // sorted by name; 1-based index on each compiled punt rule (port lists share it)
+    let names: Vec<_> = p.gateways.iter().map(|g| g.name.as_str()).collect();
+    assert_eq!(names, ["github-agent", "support"]);
+    let gw: Vec<_> = p
+        .rules
+        .iter()
+        .map(|r| (r.name.as_str(), r.gateway))
+        .collect();
+    assert_eq!(
+        gw,
+        [
+            ("dns", 0),
+            ("github-mcp", 1),
+            ("support-mcp", 2),
+            ("support-mcp", 2)
+        ]
+    );
+    let gh = p.gateway("github-agent").unwrap();
+    assert_eq!(gh.allow_resources, ["repo://acme/"], "trailing * dropped");
+    assert_eq!(gh.tls, crate::schema::GatewayTls::Deny);
+    assert_eq!(p.rule_gateway(&p.rules[1]), Some(gh));
+    assert_eq!(p.rule_gateway(&p.rules[0]), None);
+    assert_eq!(p.gateway_for_rule_id(3).unwrap().name, "support");
+    assert_eq!(p.gateway_for_rule_id(1), None);
+    assert_eq!(p.gateway_for_rule_id(99), None);
+    assert!(p.uses_gateways() && p.to_v2().is_none());
+}
+
+#[cfg(feature = "gateway")]
+#[test]
+fn gateway_policies_convert_to_tool_policies() {
+    use kavach_gateway::{Action, Decision, TlsMode};
+    let p = compile(GATEWAY, 0).unwrap().policy;
+    let m = p.tool_policies();
+    assert_eq!(m.len(), 2);
+    let gh = &m["github-agent"];
+    assert_eq!(gh.tls, TlsMode::Deny);
+    assert_eq!(m["support"].tls, TlsMode::Allow);
+    let call = |t: &str| Action::ToolCall { tool: t.into() };
+    assert_eq!(gh.decide(&call("github.create_issue")), Decision::Allow);
+    assert_eq!(gh.decide(&call("github.delete_repo")), Decision::Deny);
+    let read = Action::ResourceRead {
+        uri: "repo://acme/kavach/README.md".into(),
+    };
+    assert_eq!(gh.decide(&read), Decision::Allow);
+    assert_eq!(gh.decide(&Action::AgentMessage), Decision::Deny);
+    assert_eq!(m["support"].decide(&Action::AgentMessage), Decision::Allow);
+}
+
+#[test]
+fn gateway_reference_errors() {
+    let e = errors(&GATEWAY.replace("gateway = \"support\"", "gateway = \"nope\"")).join("\n");
+    assert!(e.contains("[support-mcp]: unknown gateway \"nope\""), "{e}");
+    let e = errors(&with_gateway("allow_tools = ['a']").replace("punt", "allow")).join("\n");
+    assert!(e.contains("only valid on `punt` rules"), "{e}");
+    let e = errors("version = 1\n[gateway.'bad name']\nallow_tools = ['a']\n").join("\n");
+    assert!(e.contains("[gateway.bad name]: gateway names"), "{e}");
+    // unknown keys are errors, as everywhere else
+    let e = errors(&with_gateway("allow_tools = ['a']\nallow_tool = ['b']")).join("\n");
+    assert!(e.contains("unknown field `allow_tool`"), "{e}");
+    let e = errors(&with_gateway("tls = 'inspect'")).join("\n");
+    assert!(e.contains("unknown variant"), "{e}");
+    // defaults still cannot be punt
+    let e = errors("version = 1\n[defaults]\negress = 'punt'\n").join("\n");
+    assert!(e.contains("defaults cannot be `punt`"), "{e}");
+}
+
+#[test]
+fn gateway_pattern_syntax() {
+    for (body, want) in [
+        (
+            "allow_tools = ['git*hub']",
+            "`*` is only allowed as the last character",
+        ),
+        (
+            "allow_tools = ['a**']",
+            "`*` is only allowed as the last character",
+        ),
+        (
+            "deny_tools = ['*.delete']",
+            "`*` is only allowed as the last character",
+        ),
+        ("allow_tools = ['']", "allow_tools: empty tool pattern"),
+        ("allow_tools = ['a b']", "whitespace"),
+        ("allow_resources = ['file:///*/x']", "`*` is only allowed"),
+        ("allow_resources = ['']", "empty resource prefix"),
+    ] {
+        let e = errors(&with_gateway(body)).join("\n");
+        assert!(e.contains(want), "{body}: {e}");
+    }
+    // multi-byte characters are fine (and must not panic)
+    assert!(errors(&with_gateway("allow_tools = ['wiki.é', 'ü*']")).is_empty());
+    assert!(errors(&with_gateway("allow_tools = ['*']")).is_empty());
+}
+
+#[test]
+fn gateway_warnings() {
+    // unused gateway
+    let w = warnings("version = 1\n[gateway.idle]\nallow_tools = ['a']\n").join("\n");
+    assert!(w.contains("warning[gateway.idle]: unused"), "{w}");
+    // empty allow list
+    let w = warnings(&with_gateway("allow_resources = ['file:///w/']")).join("\n");
+    assert!(w.contains("allow_tools is empty"), "{w}");
+    let w = warnings(&with_gateway("deny_tools = ['x']")).join("\n");
+    assert!(w.contains("deny_tools has no effect"), "{w}");
+    // duplicates and redundant entries
+    let w = warnings(&with_gateway(
+        "allow_tools = ['a.x', 'a.x', 'a.*', 'b']\nallow_resources = ['file:///w/', 'file:///w/*', 'file:///w/sub/']",
+    ))
+    .join("\n");
+    assert!(w.contains("allow_tools: duplicate entry \"a.x\""), "{w}");
+    assert!(
+        w.contains("\"a.x\" is redundant, \"a.*\" already covers it"),
+        "{w}"
+    );
+    assert!(
+        w.contains("allow_resources: duplicate entry \"file:///w/*\""),
+        "{w}"
+    );
+    assert!(w.contains("\"file:///w/sub/\" is redundant"), "{w}");
+    // a punt rule without a gateway still compiles (fail mode decides) but says so
+    let w = warnings("version = 1\n[[rule]]\nid = 'p'\npunt = { port = 443, proto = 'tcp' }\n")
+        .join("\n");
+    assert!(w.contains("[p]: punt rule has no `gateway`"), "{w}");
+}
+
+#[test]
+fn gateway_shadowed_tool_patterns() {
+    let src =
+        with_gateway("allow_tools = ['github.create_issue', 'search']\ndeny_tools = ['github.*']");
+    let e = errors(&src).join("\n");
+    assert!(
+        e.contains(
+            "[gateway.g]: allow_tools pattern \"github.create_issue\" can never match: \
+             deny_tools pattern \"github.*\" covers it"
+        ),
+        "{e}"
+    );
+    // a narrower deny inside a wider allow is the intended shape
+    assert!(
+        errors(&with_gateway(
+            "allow_tools = ['github.*']\ndeny_tools = ['github.delete_*', 'github.admin']"
+        ))
+        .is_empty()
+    );
+    let e = errors(&with_gateway("allow_tools = ['x']\ndeny_tools = ['*']")).join("\n");
+    assert!(e.contains("can never match"), "{e}");
+    // allow_shadowed downgrades it to a warning, like rule shadowing
+    let relaxed = src.replace(
+        "version = 1",
+        "version = 1\n[defaults]\nallow_shadowed = true",
+    );
+    assert!(warnings(&relaxed).join("\n").contains("can never match"));
+}
+
+#[test]
+fn tool_pattern_cover_semantics() {
+    use crate::compile::tool_pattern_covers as c;
+    assert!(c("*", "anything"));
+    assert!(c("git*", "github.*"));
+    assert!(c("git*", "git"));
+    assert!(!c("git*", "gi*"));
+    assert!(!c("github.x", "github.*"));
+    assert!(c("github.x", "github.x"));
+}
+
+#[test]
+fn gateway_bundles_are_format_3_and_round_trip() {
+    let p = compile(GATEWAY, 50).unwrap().policy;
+    let sk = bundle::generate_key();
+    let b = bundle::sign(&p, &sk, 2, 0, "prod").unwrap();
+    assert_eq!(bundle::peek_format(&b), Ok(bundle::FORMAT));
+    assert_eq!(bundle::FORMAT, 3);
+    let v = bundle::verify(&b, &trust(sk.verifying_key()), true).unwrap();
+    assert_eq!(v.policy, p);
+    assert_eq!(
+        v.policy.gateway("support").unwrap().allow_tools,
+        ["kb.search"]
+    );
+
+    // gateway-free policies keep the format-2 wire layout hosts before format 3 understand
+    let plain = compile(EXAMPLE, 50).unwrap().policy;
+    let b2 = bundle::sign(&plain, &sk, 2, 0, "prod").unwrap();
+    assert_eq!(bundle::peek_format(&b2), Ok(bundle::FORMAT_V2));
+    assert_eq!(
+        b2[bundle::HEADER_LEN..b2.len() - bundle::SIG_LEN],
+        postcard::to_allocvec(&plain.to_v2().unwrap()).unwrap()[..]
+    );
+    assert_eq!(
+        bundle::verify(&b2, &trust(sk.verifying_key()), true)
+            .unwrap()
+            .policy,
+        plain
+    );
+}
+
+#[test]
+fn signed_bundle_with_dangling_gateway_index_is_refused() {
+    let mut p = compile(GATEWAY, 50).unwrap().policy;
+    p.rules[1].gateway = 9;
+    let sk = bundle::generate_key();
+    let b = bundle::sign(&p, &sk, 2, 0, "prod").unwrap();
+    assert!(matches!(
+        bundle::verify(&b, &trust(sk.verifying_key()), true),
+        Err(BundleError::Decode(m)) if m.contains("gateway #9")
+    ));
+}
+
+/// Source of `testdata/format{1,2}.kvb`, signed by kavach-policy 0.3.1 (before gateway
+/// policies) with key `[7; 32]`, serial 2, fleet "prod", created 50.
+const GOLDEN_SRC: &str = r#"version = 1
+
+[defaults]
+egress = "drop"
+
+[[rule]]
+id    = "dns"
+allow = { to = ["1.1.1.1", "9.9.9.9"], port = 53, proto = "udp" }
+
+[[rule]]
+id    = "agent-mcp"
+who   = { user = 1000 }
+punt  = { to = "203.0.113.0/24", port = 443, proto = "tcp" }
+fail  = "open"
+"#;
+
+#[test]
+fn bundles_signed_before_gateways_still_verify() {
+    let vk = crate::SigningKey::from_bytes(&[7u8; 32]).verifying_key();
+    let want = compile(GOLDEN_SRC, 50).unwrap().policy;
+    for (bytes, format) in [
+        (
+            &include_bytes!("../testdata/format1.kvb")[..],
+            bundle::FORMAT_V1,
+        ),
+        (
+            &include_bytes!("../testdata/format2.kvb")[..],
+            bundle::FORMAT_V2,
+        ),
+    ] {
+        assert_eq!(bundle::peek_format(bytes), Ok(format));
+        let v = bundle::verify(bytes, &trust(vk), true).expect("old bundle verifies");
+        assert_eq!(v.header.serial, 2);
+        assert_eq!(v.policy, want, "format {format} decodes to today's compile");
+        assert!(v.policy.gateways.is_empty());
+        assert!(v.policy.rules.iter().all(|r| r.gateway == 0));
+        assert_eq!(v.policy.rules[1].verdict, Verdict::Punt as u8);
+    }
+    // and re-signing today's compile of the same source reproduces the format-2 bytes
+    let sk = crate::SigningKey::from_bytes(&[7u8; 32]);
+    assert_eq!(
+        bundle::sign(&want, &sk, 2, 0, "prod").unwrap(),
+        include_bytes!("../testdata/format2.kvb")
+    );
+}
+
+#[test]
+fn diff_reports_gateway_changes() {
+    let a = compile(GATEWAY, 0).unwrap().policy;
+    let b = compile(
+        &GATEWAY
+            .replace("\"search\"]", "\"search\", \"code.*\"]")
+            .replace("[gateway.support]", "[gateway.support2]")
+            .replace("gateway = \"support\"", "gateway = \"support2\""),
+        0,
+    )
+    .unwrap()
+    .policy;
+    let d: Vec<String> = crate::diff::diff(&a, &b)
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert!(d.contains(&"~ gateway github-agent".to_string()), "{d:?}");
+    assert!(d.contains(&"- gateway support".to_string()), "{d:?}");
+    assert!(d.contains(&"+ gateway support2".to_string()), "{d:?}");
+    assert!(d.contains(&"~ rule support-mcp".to_string()), "{d:?}");
+    assert!(crate::diff::diff(&a, &a).is_empty());
 }

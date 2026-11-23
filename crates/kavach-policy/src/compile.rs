@@ -12,6 +12,12 @@ use sha2::{Digest, Sha256};
 use crate::schema::*;
 
 pub const MAX_SET_ENTRIES: usize = 4096;
+/// `[gateway.<name>]` policies per kavach.toml.
+pub const MAX_GATEWAYS: usize = 256;
+/// Patterns/prefixes across all lists of one gateway policy.
+pub const MAX_GATEWAY_ENTRIES: usize = 4096;
+/// Longest tool pattern or resource prefix.
+pub const MAX_GATEWAY_PATTERN_LEN: usize = 1024;
 
 // ---------------------------------------------------------------------------------------------
 // Diagnostics
@@ -136,6 +142,74 @@ pub struct CompiledRule {
     pub fail: u8,
     /// Unix seconds; 0 = no TTL.
     pub not_after_unix: u64,
+    /// `punt` rules: 1-based index into [`CompiledPolicy::gateways`]; 0 = none (bundle format 3+).
+    pub gateway: u32,
+}
+
+/// Rule layout of bundle formats 1 and 2 (before [`CompiledRule::gateway`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompiledRuleV2 {
+    pub name: String,
+    pub id: u32,
+    pub sel: u64,
+    pub dir: u8,
+    pub proto: u8,
+    pub port_lo: u16,
+    pub port_hi: u16,
+    pub remote_set: u32,
+    pub verdict: u8,
+    pub fail: u8,
+    pub not_after_unix: u64,
+}
+
+impl From<CompiledRuleV2> for CompiledRule {
+    fn from(r: CompiledRuleV2) -> Self {
+        Self {
+            name: r.name,
+            id: r.id,
+            sel: r.sel,
+            dir: r.dir,
+            proto: r.proto,
+            port_lo: r.port_lo,
+            port_hi: r.port_hi,
+            remote_set: r.remote_set,
+            verdict: r.verdict,
+            fail: r.fail,
+            not_after_unix: r.not_after_unix,
+            gateway: 0,
+        }
+    }
+}
+
+impl From<&CompiledRule> for CompiledRuleV2 {
+    fn from(r: &CompiledRule) -> Self {
+        Self {
+            name: r.name.clone(),
+            id: r.id,
+            sel: r.sel,
+            dir: r.dir,
+            proto: r.proto,
+            port_lo: r.port_lo,
+            port_hi: r.port_hi,
+            remote_set: r.remote_set,
+            verdict: r.verdict,
+            fail: r.fail,
+            not_after_unix: r.not_after_unix,
+        }
+    }
+}
+
+/// A compiled `[gateway.<name>]` L7 policy (bundle format 3+). Lists are validated and
+/// de-duplicated; resource prefixes have any trailing `*` removed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompiledGateway {
+    pub name: String,
+    pub allow_tools: Vec<String>,
+    pub deny_tools: Vec<String>,
+    pub allow_resources: Vec<String>,
+    pub allow_agent_messages: bool,
+    pub allow_other: bool,
+    pub tls: GatewayTls,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -159,6 +233,107 @@ pub struct CompiledPolicy {
     pub sets: Vec<AddrSet>,
     pub rules: Vec<CompiledRule>,
     pub agents: Vec<AgentSpec>,
+    /// Named L7 gateway policies, sorted by name (bundle format 3+).
+    pub gateways: Vec<CompiledGateway>,
+}
+
+impl CompiledPolicy {
+    /// The gateway policy named `name`.
+    pub fn gateway(&self, name: &str) -> Option<&CompiledGateway> {
+        self.gateways.iter().find(|g| g.name == name)
+    }
+
+    /// The gateway policy a compiled (punt) rule hands its flows to.
+    pub fn rule_gateway(&self, rule: &CompiledRule) -> Option<&CompiledGateway> {
+        (rule.gateway as usize)
+            .checked_sub(1)
+            .and_then(|i| self.gateways.get(i))
+    }
+
+    /// The gateway policy for the numeric rule id carried in events and flow verdicts.
+    pub fn gateway_for_rule_id(&self, id: u32) -> Option<&CompiledGateway> {
+        self.rules
+            .iter()
+            .find(|r| r.id == id)
+            .and_then(|r| self.rule_gateway(r))
+    }
+
+    /// True when the policy needs bundle format 3 (it carries gateway policies).
+    pub fn uses_gateways(&self) -> bool {
+        !self.gateways.is_empty() || self.rules.iter().any(|r| r.gateway != 0)
+    }
+
+    /// The format-2 payload for this policy, or `None` when it uses gateways (format 3 only).
+    pub fn to_v2(&self) -> Option<CompiledPolicyV2> {
+        (!self.uses_gateways()).then(|| CompiledPolicyV2 {
+            version: self.version,
+            created_unix: self.created_unix,
+            source_sha256: self.source_sha256,
+            defaults: self.defaults.clone(),
+            selectors: self.selectors.clone(),
+            sets: self.sets.clone(),
+            rules: self.rules.iter().map(CompiledRuleV2::from).collect(),
+            agents: self.agents.clone(),
+        })
+    }
+}
+
+#[cfg(feature = "gateway")]
+impl CompiledGateway {
+    /// The gateway crate's decision type for this policy.
+    pub fn to_tool_policy(&self) -> kavach_gateway::ToolPolicy {
+        kavach_gateway::ToolPolicy {
+            allow_tools: self.allow_tools.clone(),
+            deny_tools: self.deny_tools.clone(),
+            allow_resources: self.allow_resources.clone(),
+            allow_agent_messages: self.allow_agent_messages,
+            allow_other: self.allow_other,
+            tls: match self.tls {
+                GatewayTls::Deny => kavach_gateway::TlsMode::Deny,
+                GatewayTls::Allow => kavach_gateway::TlsMode::Allow,
+            },
+        }
+    }
+}
+
+#[cfg(feature = "gateway")]
+impl CompiledPolicy {
+    /// Every gateway policy as the proxy consumes it, keyed by name.
+    pub fn tool_policies(&self) -> std::collections::HashMap<String, kavach_gateway::ToolPolicy> {
+        self.gateways
+            .iter()
+            .map(|g| (g.name.clone(), g.to_tool_policy()))
+            .collect()
+    }
+}
+
+/// Bundle format 2 payload (before gateway policies); decoded and upgraded on verify.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompiledPolicyV2 {
+    pub version: u32,
+    pub created_unix: u64,
+    pub source_sha256: [u8; 32],
+    pub defaults: CompiledDefaults,
+    pub selectors: Vec<Selector>,
+    pub sets: Vec<AddrSet>,
+    pub rules: Vec<CompiledRuleV2>,
+    pub agents: Vec<AgentSpec>,
+}
+
+impl From<CompiledPolicyV2> for CompiledPolicy {
+    fn from(p: CompiledPolicyV2) -> Self {
+        Self {
+            version: p.version,
+            created_unix: p.created_unix,
+            source_sha256: p.source_sha256,
+            defaults: p.defaults,
+            selectors: p.selectors,
+            sets: p.sets,
+            rules: p.rules.into_iter().map(CompiledRule::from).collect(),
+            agents: p.agents,
+            gateways: Vec::new(),
+        }
+    }
 }
 
 /// Bundle format 1 payload (before `unclassified_deny`); decoded and upgraded on verify.
@@ -170,7 +345,7 @@ pub struct CompiledPolicyV1 {
     pub defaults: CompiledDefaultsV1,
     pub selectors: Vec<Selector>,
     pub sets: Vec<AddrSet>,
-    pub rules: Vec<CompiledRule>,
+    pub rules: Vec<CompiledRuleV2>,
     pub agents: Vec<AgentSpec>,
 }
 
@@ -184,7 +359,7 @@ pub struct CompiledDefaultsV1 {
 
 impl From<CompiledPolicyV1> for CompiledPolicy {
     fn from(p: CompiledPolicyV1) -> Self {
-        Self {
+        CompiledPolicyV2 {
             version: p.version,
             created_unix: p.created_unix,
             source_sha256: p.source_sha256,
@@ -200,6 +375,7 @@ impl From<CompiledPolicyV1> for CompiledPolicy {
             rules: p.rules,
             agents: p.agents,
         }
+        .into()
     }
 }
 
@@ -398,6 +574,8 @@ pub fn compile_file(
     let mut set_list: Vec<AddrSet> = Vec::new();
     let mut rules: Vec<CompiledRule> = Vec::new();
     let mut seen_ids: BTreeMap<&str, usize> = BTreeMap::new();
+    let gateways = compile_gateways(file, &mut d);
+    let mut gateways_used = vec![false; gateways.len()];
 
     for (idx, r) in file.rules.iter().enumerate() {
         let rid = Some(r.id.as_str());
@@ -424,6 +602,35 @@ pub fn compile_file(
             continue;
         }
         let (action, m) = actions[0];
+
+        // L7 gateway (punt only)
+        let gateway = match (&m.gateway, action) {
+            (None, Action::Punt) => {
+                d.warn(
+                    rid,
+                    "punt rule has no `gateway`: its flows resolve through the rule's fail mode",
+                );
+                0
+            }
+            (None, _) => 0,
+            (Some(g), Action::Punt) => match gateways.iter().position(|c| &c.name == g) {
+                Some(i) => {
+                    gateways_used[i] = true;
+                    i as u32 + 1
+                }
+                None => {
+                    d.err(
+                        rid,
+                        format!("unknown gateway {g:?} (define it as [gateway.{g}])"),
+                    );
+                    0
+                }
+            },
+            (Some(_), _) => {
+                d.err(rid, "`gateway` is only valid on `punt` rules");
+                0
+            }
+        };
 
         // TTL
         let not_after_unix = match &r.ttl {
@@ -612,7 +819,16 @@ pub fn compile_file(
                 verdict: action_verdict(action),
                 fail,
                 not_after_unix,
+                gateway,
             });
+        }
+    }
+    for (g, used) in gateways.iter().zip(&gateways_used) {
+        if !used {
+            d.warn(
+                Some(&format!("gateway.{}", g.name)),
+                "unused: no punt rule references this gateway policy",
+            );
         }
     }
 
@@ -662,11 +878,174 @@ pub fn compile_file(
         sets: set_list,
         rules,
         agents: file.agents.clone(),
+        gateways,
     };
     Ok(CompileOutput {
         policy,
         warnings: d.0,
     })
+}
+
+// ---------------------------------------------------------------------------------------------
+// Gateway policies
+// ---------------------------------------------------------------------------------------------
+
+fn valid_gateway_name(n: &str) -> bool {
+    !n.is_empty()
+        && n.len() <= 64
+        && n.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+}
+
+/// Tool pattern `outer` matches every name tool pattern `inner` matches (`*` only as a suffix,
+/// the same semantics as `kavach_gateway::ToolPolicy`).
+pub fn tool_pattern_covers(outer: &str, inner: &str) -> bool {
+    match outer.strip_suffix('*') {
+        Some(prefix) => inner.starts_with(prefix),
+        None => outer == inner,
+    }
+}
+
+/// Syntax-check and de-duplicate one list (`prefixes`: resource URI prefixes, where a trailing
+/// `*` is accepted and dropped). Returns the cleaned list in source order.
+fn gateway_list(
+    gid: &str,
+    list: &str,
+    items: &[String],
+    prefixes: bool,
+    d: &mut Diags,
+) -> Vec<String> {
+    let what = if prefixes {
+        "resource prefix"
+    } else {
+        "tool pattern"
+    };
+    let mut out: Vec<String> = Vec::new();
+    for raw in items {
+        if raw.is_empty() {
+            d.err(Some(gid), format!("{list}: empty {what}"));
+            continue;
+        }
+        if raw.len() > MAX_GATEWAY_PATTERN_LEN {
+            d.err(
+                Some(gid),
+                format!("{list}: {what} longer than {MAX_GATEWAY_PATTERN_LEN} bytes"),
+            );
+            continue;
+        }
+        if raw.chars().any(|c| c.is_whitespace() || c.is_control()) {
+            d.err(
+                Some(gid),
+                format!("{list}: {what} {raw:?} contains whitespace or control characters"),
+            );
+            continue;
+        }
+        if raw.strip_suffix('*').unwrap_or(raw).contains('*') {
+            d.err(
+                Some(gid),
+                format!(
+                    "{list}: {what} {raw:?}: `*` is only allowed as the last character \
+                     (a prefix match)"
+                ),
+            );
+            continue;
+        }
+        let p = if prefixes {
+            raw.strip_suffix('*').unwrap_or(raw).to_owned()
+        } else {
+            raw.clone()
+        };
+        if out.contains(&p) {
+            d.warn(Some(gid), format!("{list}: duplicate entry {raw:?}"));
+            continue;
+        }
+        out.push(p);
+    }
+    // Entries another (distinct) entry of the same list already covers.
+    for inner in &out {
+        let outer = out.iter().find(|outer| {
+            *outer != inner
+                && if prefixes {
+                    inner.starts_with(outer.as_str())
+                } else {
+                    tool_pattern_covers(outer, inner)
+                }
+        });
+        if let Some(outer) = outer {
+            d.warn(
+                Some(gid),
+                format!("{list}: {inner:?} is redundant, {outer:?} already covers it"),
+            );
+        }
+    }
+    out
+}
+
+fn compile_gateways(file: &PolicyFile, d: &mut Diags) -> Vec<CompiledGateway> {
+    if file.gateways.len() > MAX_GATEWAYS {
+        d.err(
+            None,
+            format!(
+                "{} gateway policies exceed the limit of {MAX_GATEWAYS}",
+                file.gateways.len()
+            ),
+        );
+    }
+    let mut out = Vec::new();
+    for (name, g) in &file.gateways {
+        let gid = format!("gateway.{name}");
+        if !valid_gateway_name(name) {
+            d.err(
+                Some(&gid),
+                "gateway names are 1-64 characters of [A-Za-z0-9._-]",
+            );
+        }
+        let entries = g.allow_tools.len() + g.deny_tools.len() + g.allow_resources.len();
+        if entries > MAX_GATEWAY_ENTRIES {
+            d.err(
+                Some(&gid),
+                format!("{entries} entries exceed the limit of {MAX_GATEWAY_ENTRIES}"),
+            );
+            continue;
+        }
+        let allow_tools = gateway_list(&gid, "allow_tools", &g.allow_tools, false, d);
+        let deny_tools = gateway_list(&gid, "deny_tools", &g.deny_tools, false, d);
+        let allow_resources = gateway_list(&gid, "allow_resources", &g.allow_resources, true, d);
+
+        if allow_tools.is_empty() {
+            d.warn(
+                Some(&gid),
+                if deny_tools.is_empty() {
+                    "allow_tools is empty: every MCP tool call is denied"
+                } else {
+                    "allow_tools is empty: every MCP tool call is denied (deny_tools has no effect)"
+                },
+            );
+        }
+        // Deny is checked first: an allow pattern a deny pattern covers can never match.
+        for a in &allow_tools {
+            if let Some(dp) = deny_tools.iter().find(|dp| tool_pattern_covers(dp, a)) {
+                let msg = format!(
+                    "allow_tools pattern {a:?} can never match: deny_tools pattern {dp:?} covers it"
+                );
+                if file.defaults.allow_shadowed {
+                    d.warn(Some(&gid), msg);
+                } else {
+                    d.err(Some(&gid), msg);
+                }
+            }
+        }
+        out.push(CompiledGateway {
+            name: name.clone(),
+            allow_tools,
+            deny_tools,
+            allow_resources,
+            allow_agent_messages: g.allow_agent_messages,
+            allow_other: g.allow_other,
+            tls: g.tls,
+        });
+    }
+    out
 }
 
 /// Executables whose identity says nothing about the code they run.
