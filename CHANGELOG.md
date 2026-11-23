@@ -28,7 +28,7 @@ provenance.
 - Release pipeline, tarball `install.sh`, `docs/INSTALL.md`.
 - 23 SVG architecture and firewall-gap diagrams; README with benchmarks, test results and a setup guide.
 - Community files: CONTRIBUTING, Code of Conduct, governance, security policy, issue/PR
-  templates, CODEOWNERS, Dependabot, DCO check, OpenSSF Scorecard.
+  templates, CODEOWNERS, DCO check, OpenSSF Scorecard.
 
 ### Fixed
 - **Kernels before 6.4: every first write to an unclassified file failed with EBUSY** while

@@ -44,8 +44,8 @@ run PUT "repos/$REPO/topics" \
 
 # --- security features ------------------------------------------------------------------
 run PUT "repos/$REPO/private-vulnerability-reporting"
-run PUT "repos/$REPO/vulnerability-alerts"          # Dependabot alerts
-run PUT "repos/$REPO/automated-security-fixes"      # Dependabot security updates
+run PUT "repos/$REPO/vulnerability-alerts"          # vulnerability alerts only (no PRs, no Actions runs)
+run DELETE "repos/$REPO/automated-security-fixes"   # no Dependabot PRs (they burn Actions minutes)
 run PATCH "repos/$REPO" --input - <<'JSON'
 {"security_and_analysis": {
   "secret_scanning": {"status": "enabled"},
