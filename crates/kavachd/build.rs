@@ -16,6 +16,7 @@ fn main() {
         "include/kavach_bpf.h",
         "include/kavach_eval.h",
         "include/kavach_abi.h",
+        "include/kavach_kfunc.h",
     ] {
         println!("cargo:rerun-if-changed={}", bpf.join(f).display());
     }
