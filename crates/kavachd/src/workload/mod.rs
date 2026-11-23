@@ -328,70 +328,133 @@ impl Daemon {
     }
 }
 
-/// Start the node agent thread (blocking I/O; it locks the daemon only to publish).
-pub fn spawn(cfg: K8sConfig, st: Arc<Mutex<Daemon>>) -> Result<()> {
+/// A panicked holder leaves the state consistent enough to keep publishing (the supervisor
+/// clears the poison as well).
+fn lock(st: &Mutex<Daemon>) -> std::sync::MutexGuard<'_, Daemon> {
+    st.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The node agent between [`prime`] and [`Agent::spawn`].
+pub struct Agent {
+    cfg: K8sConfig,
+    src: Box<dyn source::Source>,
+    pods: HashMap<String, PodIdentity>,
+    last_fetch: Option<Instant>,
+    last_view: Option<CgroupView>,
+    last_warn: Option<Instant>,
+    ok: bool,
+    errors: u64,
+}
+
+impl std::fmt::Debug for Agent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Agent")
+            .field("source", &self.src.describe())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Validate, do the first cgroup scan and metadata fetch, and store them in `d`. Call it
+/// **before** the persisted policy is restored: the restore's stage then writes real workload
+/// masks instead of dropping the pinned ones (which would leave pods unclassified, i.e.
+/// fail-open, until the agent's first pass). It does not touch `wl_class` itself, since no
+/// policy slot is known yet.
+pub fn prime(cfg: K8sConfig, d: &mut Daemon) -> Result<Agent> {
     cfg.validate().map_err(anyhow::Error::msg)?;
     cgroup::ensure_cgroup2(&cfg.cgroup_root)?;
     let src = source::build(&cfg)?;
     info!(source = %src.describe(), node = %cfg.node(), "k8s / SPIFFE identity agent starting");
-    if let Ok(mut d) = st.lock() {
-        d.workloads.enabled = true;
+    let mut a = Agent {
+        cfg,
+        src,
+        pods: HashMap::new(),
+        last_fetch: None,
+        last_view: None,
+        last_warn: None,
+        ok: false,
+        errors: 0,
+    };
+    d.workloads.enabled = true;
+    if let Some(v) = a.poll() {
+        a.store(v, d);
     }
-    std::thread::Builder::new()
-        .name("k8s-agent".into())
-        .spawn(move || run(cfg, src, st))?;
-    Ok(())
+    Ok(a)
 }
 
-fn run(cfg: K8sConfig, mut src: Box<dyn source::Source>, st: Arc<Mutex<Daemon>>) {
-    let resync = Duration::from_secs(cfg.resync_secs);
-    let mut last_fetch: Option<Instant> = None;
-    let mut pods: HashMap<String, PodIdentity> = HashMap::new();
-    let mut last_view = None;
-    let mut ok = false;
-    let mut errors = 0u64;
-    let mut last_warn: Option<Instant> = None;
-    loop {
-        let view = cgroup::scan(&cfg.cgroup_root);
-        let missing = view.pods.iter().any(|(_, u)| !pods.contains_key(u));
-        let since = last_fetch.map(|t| t.elapsed());
-        let due = since.is_none_or(|e| e >= resync || (missing && e >= Duration::from_secs(1)));
-        let mut changed = last_view.as_ref() != Some(&view);
+impl Agent {
+    /// Start the agent thread (blocking I/O; it locks the daemon only to publish).
+    pub fn spawn(mut self, st: Arc<Mutex<Daemon>>) -> Result<()> {
+        std::thread::Builder::new()
+            .name("k8s-agent".into())
+            .spawn(move || {
+                loop {
+                    std::thread::sleep(Duration::from_millis(self.cfg.scan_ms));
+                    let detached = lock(&st).kernel.is_none();
+                    if detached {
+                        return; // kill-switch
+                    }
+                    self.tick_with(&st);
+                }
+            })?;
+        Ok(())
+    }
+
+    /// Scan, fetch if due, and report whether anything changed.
+    fn poll(&mut self) -> Option<CgroupView> {
+        let view = cgroup::scan(&self.cfg.cgroup_root);
+        let missing = view.pods.iter().any(|(_, u)| !self.pods.contains_key(u));
+        let resync = Duration::from_secs(self.cfg.resync_secs);
+        let due = self
+            .last_fetch
+            .map(|t| t.elapsed())
+            .is_none_or(|e| e >= resync || (missing && e >= Duration::from_secs(1)));
+        let mut changed = self.last_view.as_ref() != Some(&view);
         if due {
-            last_fetch = Some(Instant::now());
-            match src.fetch() {
+            self.last_fetch = Some(Instant::now());
+            match self.src.fetch() {
                 Ok(p) => {
-                    changed |= p != pods || !ok;
-                    pods = p;
-                    ok = true;
+                    changed |= p != self.pods || !self.ok;
+                    self.pods = p;
+                    self.ok = true;
                 }
                 Err(e) => {
                     // Keep the last known metadata; unseen pods stay identity-unknown.
-                    errors += 1;
-                    changed |= ok;
-                    ok = false;
-                    if last_warn.is_none_or(|t| t.elapsed() >= Duration::from_secs(60)) {
-                        warn!(source = %src.describe(), error = %format!("{e:#}"), "pod metadata fetch failed");
-                        last_warn = Some(Instant::now());
+                    self.errors += 1;
+                    changed |= self.ok || self.last_view.is_none();
+                    self.ok = false;
+                    if self
+                        .last_warn
+                        .is_none_or(|t| t.elapsed() >= Duration::from_secs(60))
+                    {
+                        warn!(source = %self.src.describe(), error = %format!("{e:#}"), "pod metadata fetch failed");
+                        self.last_warn = Some(Instant::now());
                     }
                 }
             }
         }
-        if changed {
-            let Ok(mut d) = st.lock() else { return };
-            if d.kernel.is_none() {
-                return; // kill-switch
-            }
-            d.workloads.view = view.clone();
-            d.workloads.pods = pods.clone();
-            d.workloads.stats.source_ok = ok;
-            d.workloads.stats.source_errors = errors;
-            if let Err(e) = d.sync_workloads(None) {
-                warn!(error = %format!("{e:#}"), "wl_class update failed");
-            }
-            last_view = Some(view);
+        changed.then_some(view)
+    }
+
+    fn store(&mut self, view: CgroupView, d: &mut Daemon) {
+        d.workloads.view = view.clone();
+        d.workloads.pods = self.pods.clone();
+        d.workloads.stats.source_ok = self.ok;
+        d.workloads.stats.source_errors = self.errors;
+        self.last_view = Some(view);
+    }
+
+    fn publish(&mut self, view: CgroupView, d: &mut Daemon) {
+        self.store(view, d);
+        if let Err(e) = d.sync_workloads(None) {
+            warn!(error = %format!("{e:#}"), "wl_class update failed");
         }
-        std::thread::sleep(Duration::from_millis(cfg.scan_ms));
+    }
+
+    /// Like `tick`, but holds the daemon lock only to publish (fetches can take seconds).
+    fn tick_with(&mut self, st: &Arc<Mutex<Daemon>>) {
+        if let Some(v) = self.poll() {
+            self.publish(v, &mut lock(st));
+        }
     }
 }
 

@@ -1600,6 +1600,7 @@ fn lsm_k8s_and_spiffe_identity_by_cgroup() {
         source: SourceKind::File,
         pods_file: pods_file.clone(),
         node_name: "node-1".into(),
+        cgroup_root: tree.base.clone(), // a subtree of the real cgroup2 mount
         ..Default::default()
     };
     let mut src = source::build(&cfg).unwrap();
@@ -1612,7 +1613,13 @@ fn lsm_k8s_and_spiffe_identity_by_cgroup() {
         d.sync_workloads(None).unwrap();
     };
     write_pods("db");
-    refresh(&mut f, &mut src);
+    // Startup order: prime (scan + fetch, no map writes), then the policy restore stages it.
+    let _agent = kavachd::workload::prime(cfg.clone(), f.d()).expect("prime");
+    assert_eq!(
+        f.d().workloads.stats.entries,
+        0,
+        "prime does not write wl_class"
+    );
     assert_eq!(f.d().workloads.view.roots.len(), 1);
     assert_eq!(f.d().workloads.view.pods.len(), 2);
 

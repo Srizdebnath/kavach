@@ -127,9 +127,20 @@ async fn main() -> Result<()> {
         }
     });
 
+    let mut k8s_agent = None;
     {
         let mut st = state.lock().expect("fresh state");
         st.prewarm_tx = Some(prewarm_tx.clone());
+        // k8s / SPIFFE node agent first, so the restored policy is staged with pod identities.
+        let k8s = st.cfg.k8s.clone();
+        if k8s.enabled {
+            match kavachd::workload::prime(k8s, &mut st) {
+                Ok(a) => k8s_agent = Some(a),
+                Err(e) => {
+                    error!(error = %format!("{e:#}"), "k8s identity agent not started: k8s / spiffe selectors match nothing")
+                }
+            }
+        }
         if let Err(e) = st.restore() {
             error!(error = %format!("{e:#}"), "could not restore persisted policy");
         }
@@ -174,12 +185,11 @@ async fn main() -> Result<()> {
         move || kavachd::scan::scanner(st.clone(), scan_dirs.clone(), kick.clone())
     });
 
-    // k8s / SPIFFE identity node agent (`[k8s] enabled = true`).
-    let k8s = state.lock().expect("fresh state").cfg.k8s.clone();
-    if k8s.enabled
-        && let Err(e) = kavachd::workload::spawn(k8s, state.clone())
+    // k8s / SPIFFE identity node agent (`[k8s] enabled = true`), primed above.
+    if let Some(a) = k8s_agent.take()
+        && let Err(e) = a.spawn(state.clone())
     {
-        error!(error = %format!("{e:#}"), "k8s identity agent not started: k8s / spiffe selectors match nothing");
+        error!(error = %format!("{e:#}"), "k8s identity agent thread did not start");
     }
 
     // Housekeeping: blocklist expiry + FQDN refresh.
