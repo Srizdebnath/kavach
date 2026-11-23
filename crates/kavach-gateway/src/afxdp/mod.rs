@@ -639,8 +639,16 @@ impl Drop for Backend {
     }
 }
 
-/// Placeholder consumer until the v0.4 L7 proxy lands: counts redirected frames and consumes
-/// them. Frames delivered to it do **not** reach the kernel stack.
+/// The backend's consumer: counts redirected frames and consumes (drops) them. Frames
+/// delivered to it do **not** reach the kernel stack.
+///
+/// Dropping is deliberate. AF_XDP has no way to re-inject a received frame into the local
+/// stack (`Transmit` sends it out of the NIC), and re-injecting through a TAP device would
+/// re-enter the stack *after* XDP/TC, with a different ifindex and without the flow state TC
+/// keeps, i.e. bypass policy. Consuming fails closed for exactly the ports the operator
+/// selected, and nothing else. Punted L7 flows do not use this path: they are redirected at
+/// `connect()` to the gateway listener (cgroup connect hooks), where the kernel stack still
+/// terminates TCP.
 #[derive(Debug, Clone, Default)]
 pub struct CountingSink {
     /// Shared counters: `(frames, bytes)`.
