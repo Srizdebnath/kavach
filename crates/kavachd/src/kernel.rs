@@ -61,6 +61,18 @@ pub const LSM_HOOKS: &[(&str, &str)] = &[
     ("kavach_inode_free", "inode_free_security"),
 ];
 
+/// Whether the running kernel has `hook`. `file_truncate` is 6.2+; on 6.1 ftruncate(2) and
+/// `O_TRUNC` opens call `security_path_truncate`, which `kavach_truncate` already covers.
+pub fn lsm_hook_available(hook: &str) -> bool {
+    use aya::util::KernelVersion;
+    match hook {
+        "file_truncate" => {
+            KernelVersion::current().map_or(true, |v| v >= KernelVersion::new(6, 2, 0))
+        }
+        _ => true,
+    }
+}
+
 /// `addr_sets` key payload after the LPM prefix length.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -78,6 +90,9 @@ pub struct Kernel {
     sync_inner: Option<MapData>,
     pub xdp: Vec<(String, String)>,
     pub tc: Vec<String>,
+    /// Legacy (netlink/clsact, kernel < 6.6) TC filters. They cannot be pinned, and dropping the
+    /// link detaches the filter, so they are owned here for the lifetime of the `Kernel`.
+    nl_links: Vec<aya::programs::tc::SchedClassifierLink>,
     pub lsm: bool,
 }
 
@@ -117,6 +132,7 @@ impl Kernel {
             sync_inner,
             xdp: vec![],
             tc: vec![],
+            nl_links: vec![],
             lsm: false,
         })
     }
@@ -200,23 +216,31 @@ impl Kernel {
                 .with_context(|| format!("attaching {name} to {iface}"))?;
             if let Some(pin) = pin {
                 let link = prog.take_link(id)?;
-                match FdLink::try_from(link) {
-                    Ok(fd) => {
-                        // Attach-before-detach: the new link is live, now drop the old one.
-                        if pin.exists() {
-                            std::fs::remove_file(&pin)?;
-                        }
-                        fd.pin(&pin)?;
+                // Check by reference: converting a netlink link into an FdLink fails *and drops
+                // it*, which detaches the filter that was just attached.
+                if <&FdLink>::try_from(&link).is_ok() {
+                    let fd = FdLink::try_from(link)?;
+                    // Attach-before-detach: the new link is live, now drop the old one.
+                    if pin.exists() {
+                        std::fs::remove_file(&pin)?;
                     }
-                    Err(_) => warn!(
+                    fd.pin(&pin)?;
+                } else {
+                    warn!(
                         iface,
                         name, "TC attached via netlink (kernel < 6.6): not pinnable"
-                    ),
+                    );
+                    self.nl_links.push(link);
                 }
             }
         }
         self.tc.push(iface.to_owned());
         Ok(())
+    }
+
+    /// Number of TC programs attached through the legacy netlink/clsact path (kernel < 6.6).
+    pub fn tc_netlink_links(&self) -> usize {
+        self.nl_links.len()
     }
 
     /// Load and attach every BPF-LSM program.
@@ -227,6 +251,13 @@ impl Kernel {
         }
         let btf = btf()?;
         for (name, hook) in LSM_HOOKS {
+            if !lsm_hook_available(hook) {
+                warn!(
+                    name,
+                    hook, "LSM hook not in this kernel: skipped (covered by path_truncate)"
+                );
+                continue;
+            }
             let pin = self.link_pin(name);
             let prog: &mut Lsm = self
                 .bpf

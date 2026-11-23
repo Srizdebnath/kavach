@@ -571,6 +571,14 @@ fn lsm_identity_egress_end_to_end() {
     let mut f = Fixture::new();
     let mut rb = f.k().take_events().unwrap();
     f.k().attach_lsm().expect("attach LSM");
+    eprintln!(
+        "lsm file_truncate hook: {}",
+        if kernel::lsm_hook_available("file_truncate") {
+            "attached"
+        } else {
+            "absent (< 6.2): path_truncate covers ftruncate/O_TRUNC"
+        }
+    );
 
     // Classify THIS test binary via the real path: task scan → Exec event → hash → exe_class.
     f.k().scan_tasks().unwrap();
@@ -1074,6 +1082,19 @@ fn netns_veth_real_traffic_xdp_and_tc() {
     f.k().attach_tc(&n.host_if).expect("attach TC to veth");
     enable_xdp(&mut f, KV_XDP_F_BLOCKLIST, 1, 1);
     eprintln!("xdp mode on veth: {mode}");
+    // tcx on >= 6.6, the legacy clsact/netlink fallback before (kernel matrix: 6.1).
+    let tcx = aya::util::KernelVersion::current()
+        .map_or(true, |v| v >= aya::util::KernelVersion::new(6, 6, 0));
+    let legacy = f.k().tc_netlink_links();
+    eprintln!(
+        "tc attach on veth: {}",
+        if legacy > 0 {
+            "netlink/clsact (legacy)"
+        } else {
+            "tcx"
+        }
+    );
+    assert_eq!(legacy, if tcx { 0 } else { 2 }, "TC attach mechanism");
 
     let open = TcpListenerGuard::bind("10.203.7.1:47081");
     let closed = TcpListenerGuard::bind("10.203.7.1:47080");

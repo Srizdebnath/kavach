@@ -1,0 +1,129 @@
+name: kernels
+# Privileged eBPF suite (crates/kavachd/tests/bpf.rs) on every supported kernel line, booted
+# under virtme-ng from prebuilt Ubuntu mainline kernels (nothing is compiled). The runner's own
+# kernel is covered by ci.yml; this job covers 6.1 (legacy clsact TC, no file_truncate hook),
+# 6.6 (first tcx kernel), 6.12 and the newest stable release. See scripts/kernel-matrix.sh.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 4 * * 1" # weekly: picks up new point releases and a new "latest"
+  workflow_dispatch:
+    inputs:
+      kernels:
+        description: "space-separated extra kernels (series like 6.8, or tags like v6.1.158)"
+        required: false
+        default: ""
+permissions:
+  contents: read
+concurrency:
+  group: kernels-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
+  VIRTME_NG_VERSION: "1.42"
+
+jobs:
+  build:
+    name: build test binary
+    runs-on: ubuntu-24.04
+    outputs:
+      kernels: ${{ steps.list.outputs.kernels }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: ./scripts/ci-deps.sh
+      - run: cargo xtask build-bpf
+      - name: build the bpf test binary once (every kernel runs this same binary)
+        run: |
+          bin=$(./scripts/kernel-matrix.sh build)
+          mkdir -p dist
+          cp "$bin" dist/bpf-tests
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bpf-tests
+          path: dist/bpf-tests
+          retention-days: 3
+      - name: kernel list
+        id: list
+        env:
+          EXTRA: ${{ inputs.kernels }}
+        run: |
+          python3 -c 'import json,os; print("kernels=" + json.dumps(["6.1","6.6","6.12","latest"] + os.environ.get("EXTRA","").split()))' >> "$GITHUB_OUTPUT"
+
+  kernel:
+    name: kernel ${{ matrix.kernel }}
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        kernel: ${{ fromJSON(needs.build.outputs.kernels) }}
+    env:
+      KERNEL: ${{ matrix.kernel }}
+      KAVACH_KERNEL_CACHE: ${{ github.workspace }}/.kernels
+      KAVACH_RESULTS: ${{ github.workspace }}/kernel-matrix
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: bpf-tests
+          path: dist
+      - run: chmod +x dist/bpf-tests
+
+      - name: install virtme-ng + qemu
+        run: |
+          echo 'debconf debconf/frontend select Noninteractive' | sudo debconf-set-selections
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            qemu-system-x86 udev iproute2 iputils-ping busybox-static coreutils kmod \
+            python3-requests python3-argcomplete file rsync zstd virtiofsd \
+            e2fsprogs dmsetup curl
+          # Ubuntu's Rust coreutils `env` can refuse to exec the guest init over virtiofs.
+          if [ -x /usr/bin/gnuenv ]; then sudo ln -sf gnuenv /usr/bin/env; fi
+          pipx install "virtme-ng==${VIRTME_NG_VERSION}"
+          vng --version
+
+      - name: enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm || echo "::warning::no /dev/kvm: the guest will run under TCG (slow)"
+
+      - name: resolve kernel version
+        id: resolve
+        run: |
+          v=$(./scripts/kernel-matrix.sh resolve "$KERNEL")
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "$KERNEL -> $v"
+
+      - name: cache kernel
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.KAVACH_KERNEL_CACHE }}/${{ steps.resolve.outputs.version }}
+          key: kernel-${{ steps.resolve.outputs.version }}-amd64-v1
+
+      - name: fetch kernel
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: ./scripts/kernel-matrix.sh fetch "$VERSION"
+
+      - name: run suite on ${{ steps.resolve.outputs.version }}
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: ./scripts/kernel-matrix.sh run "$VERSION" dist/bpf-tests
+
+      - name: upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-logs-${{ matrix.kernel }}
+          path: ${{ env.KAVACH_RESULTS }}
+          if-no-files-found: ignore
+          retention-days: 14
