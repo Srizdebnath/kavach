@@ -16,7 +16,7 @@ use kavach_common::abi::*;
 use kavach_common::addr::to_mapped;
 use kavach_core::{FlowQuery, Miss, Snapshot};
 use kavach_policy::bundle;
-use kavach_policy::compile::{CompiledPolicy, Severity};
+use kavach_policy::compile::{CompiledGateway, CompiledPolicy, Severity};
 use kavach_policy::kernel::{Clocks, Facts, OfflineTables};
 use kavach_policy::{SigningKey, VerifyingKey};
 use sha2::{Digest, Sha256};
@@ -90,7 +90,13 @@ enum Cmd {
     /// Diff a kavach.toml against the active policy.
     Diff { policy: PathBuf },
     /// Explain the verdict for a flow (same engine as the kernel: kavach-core).
+    ///
+    /// When the flow is punted to a gateway policy, `--tool` / `--jsonrpc` also evaluate an
+    /// MCP / A2A call against it (same engine as the gateway: kavach-gateway).
     Explain(ExplainArgs),
+    /// L7 gateway policies (`[gateway.<name>]` in kavach.toml).
+    #[command(subcommand)]
+    Gateway(GatewayCmd),
     /// Verify the hash-chained audit log.
     Audit {
         #[arg(default_value = "/var/log/kavach/audit.log")]
@@ -107,6 +113,26 @@ enum Cmd {
         /// Root of all Kavach pins (every ABI version lives below it).
         #[arg(long, default_value = "/sys/fs/bpf/kavach")]
         pin_root: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum GatewayCmd {
+    /// List gateway policies and the punt rules that use them.
+    List {
+        /// Read a local kavach.toml instead of the daemon's active policy.
+        #[arg(long)]
+        policy: Option<PathBuf>,
+    },
+    /// Decide every JSON-RPC frame in a file (one per line; `-` = stdin) with one policy.
+    Test {
+        /// Gateway policy name.
+        name: String,
+        /// File of JSON-RPC frames, one per line (blank lines and `#` comments are skipped).
+        frames: PathBuf,
+        /// Read a local kavach.toml instead of the daemon's active policy.
+        #[arg(long)]
+        policy: Option<PathBuf>,
     },
 }
 
@@ -167,6 +193,12 @@ struct ExplainArgs {
     /// Explain against a local kavach.toml instead of the daemon's active policy.
     #[arg(long)]
     policy: Option<PathBuf>,
+    /// L7: an MCP `tools/call` of this tool, decided by the punt rule's gateway policy.
+    #[arg(long, conflicts_with = "jsonrpc")]
+    tool: Option<String>,
+    /// L7: one JSON-RPC frame (or `@file`), decided by the punt rule's gateway policy.
+    #[arg(long)]
+    jsonrpc: Option<String>,
 }
 
 fn main() {
@@ -424,10 +456,11 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::Compile { policy } => {
             let p = load_policy_file(&policy)?;
             println!(
-                "ok: {} rules, {} selectors, {} address sets, source sha256 {}",
+                "ok: {} rules, {} selectors, {} address sets, {} gateway policies, source sha256 {}",
                 p.rules.len(),
                 p.selectors.len(),
                 p.sets.len(),
+                p.gateways.len(),
                 hex::encode(p.source_sha256)
             );
         }
@@ -544,6 +577,31 @@ fn run(cli: Cli) -> Result<()> {
             }
         }
         Cmd::Explain(a) => explain(sock, a)?,
+        Cmd::Gateway(GatewayCmd::List { policy }) => {
+            let p = policy_source(sock, policy.as_deref())?.0;
+            for l in gateway_list_lines(&p) {
+                println!("{l}");
+            }
+        }
+        Cmd::Gateway(GatewayCmd::Test {
+            name,
+            frames,
+            policy,
+        }) => {
+            let p = policy_source(sock, policy.as_deref())?.0;
+            let g = p
+                .gateway(&name)
+                .ok_or_else(|| anyhow!("no gateway policy {name:?}"))?;
+            let text = if frames.as_os_str() == "-" {
+                std::io::read_to_string(std::io::stdin())?
+            } else {
+                std::fs::read_to_string(&frames)
+                    .with_context(|| format!("reading {}", frames.display()))?
+            };
+            for l in gateway_test_lines(g, &text, cli.json) {
+                println!("{l}");
+            }
+        }
         Cmd::Audit { log } => {
             let f =
                 std::fs::File::open(&log).with_context(|| format!("opening {}", log.display()))?;
@@ -601,12 +659,156 @@ fn write_secret(path: &Path, contents: &str) -> Result<()> {
     Ok(())
 }
 
-fn explain(sock: &Path, a: ExplainArgs) -> Result<()> {
-    let (policy, generation) = match &a.policy {
-        Some(p) => (load_policy_file(p)?, 2),
+/// A local kavach.toml (compiled, generation 2) or the daemon's active policy.
+fn policy_source(sock: &Path, local: Option<&Path>) -> Result<(CompiledPolicy, u32)> {
+    match local {
+        Some(p) => Ok((load_policy_file(p)?, 2)),
         None => active_policy(sock)?
-            .ok_or_else(|| anyhow!("no active policy (use --policy kavach.toml)"))?,
+            .ok_or_else(|| anyhow!("no active policy (use --policy kavach.toml)")),
+    }
+}
+
+fn explain(sock: &Path, a: ExplainArgs) -> Result<()> {
+    let (policy, generation) = policy_source(sock, a.policy.as_deref())?;
+    for l in explain_lines(&policy, generation, &a)? {
+        println!("{l}");
+    }
+    Ok(())
+}
+
+/// What `--tool` / `--jsonrpc` ask the gateway to decide.
+enum L7Input {
+    Tool(String),
+    Frame(Vec<u8>),
+}
+
+impl L7Input {
+    fn from_args(a: &ExplainArgs) -> Result<Option<Self>> {
+        Ok(match (&a.tool, &a.jsonrpc) {
+            (Some(t), _) => Some(Self::Tool(t.clone())),
+            (None, Some(f)) => Some(Self::Frame(match f.strip_prefix('@') {
+                Some(path) => std::fs::read(path).with_context(|| format!("reading {path}"))?,
+                None => f.clone().into_bytes(),
+            })),
+            (None, None) => None,
+        })
+    }
+}
+
+fn describe_l7(a: &kavach_gateway::Action) -> String {
+    use kavach_gateway::Action as A;
+    match a {
+        A::ToolCall { tool } => format!("tools/call {tool}"),
+        A::ResourceRead { uri } => format!("resources/read {uri}"),
+        A::AgentMessage => "message/send (A2A delegation)".into(),
+        A::Control => "control (handshake / discovery)".into(),
+        A::Other { method } => format!("method {method}"),
+    }
+}
+
+fn decision_word(d: kavach_gateway::Decision) -> &'static str {
+    match d {
+        kavach_gateway::Decision::Allow => "allow",
+        kavach_gateway::Decision::Deny => "deny",
+    }
+}
+
+/// Classify and decide one frame with a gateway policy: (decision, call, reason).
+fn gateway_decide(g: &CompiledGateway, frame: &[u8]) -> (&'static str, String, String) {
+    match kavach_gateway::classify(frame) {
+        Ok(action) => {
+            let (d, why) = g.to_tool_policy().explain(&action);
+            (decision_word(d), describe_l7(&action), why)
+        }
+        Err(e) => (
+            "deny",
+            "unparseable frame".into(),
+            format!("{e:?}: not one JSON-RPC 2.0 request; unparseable frames fail closed"),
+        ),
+    }
+}
+
+fn gateway_explain_lines(g: &CompiledGateway, input: &L7Input) -> Vec<String> {
+    let (d, call, why) = match input {
+        L7Input::Tool(t) => {
+            let action = kavach_gateway::Action::ToolCall { tool: t.clone() };
+            let (d, why) = g.to_tool_policy().explain(&action);
+            (decision_word(d), describe_l7(&action), why)
+        }
+        L7Input::Frame(f) => gateway_decide(g, f),
     };
+    vec![
+        format!("  call:    {call}"),
+        format!("l7 verdict: {d}  ({why})"),
+    ]
+}
+
+fn tls_word(g: &CompiledGateway) -> &'static str {
+    match g.tls {
+        kavach_policy::schema::GatewayTls::Deny => "deny",
+        kavach_policy::schema::GatewayTls::Allow => "allow",
+    }
+}
+
+fn gateway_list_lines(p: &CompiledPolicy) -> Vec<String> {
+    if p.gateways.is_empty() {
+        return vec!["no gateway policies".into()];
+    }
+    let mut out = Vec::new();
+    for g in &p.gateways {
+        let mut rules: Vec<&str> = p
+            .rules
+            .iter()
+            .filter(|r| p.rule_gateway(r).is_some_and(|rg| rg.name == g.name))
+            .map(|r| r.name.as_str())
+            .collect();
+        rules.dedup();
+        out.push(format!(
+            "{}  tls={}  agent_messages={}  other={}  rules: {}",
+            g.name,
+            tls_word(g),
+            g.allow_agent_messages,
+            g.allow_other,
+            if rules.is_empty() {
+                "-".into()
+            } else {
+                rules.join(", ")
+            }
+        ));
+        for (k, v) in [
+            ("allow_tools", &g.allow_tools),
+            ("deny_tools", &g.deny_tools),
+            ("allow_resources", &g.allow_resources),
+        ] {
+            if !v.is_empty() {
+                out.push(format!("  {k:<16} {}", v.join(" ")));
+            }
+        }
+    }
+    out
+}
+
+fn gateway_test_lines(g: &CompiledGateway, text: &str, json: bool) -> Vec<String> {
+    text.lines()
+        .enumerate()
+        .filter(|(_, l)| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
+        .map(|(i, l)| {
+            let (d, call, why) = gateway_decide(g, l.as_bytes());
+            if json {
+                serde_json::json!({
+                    "line": i + 1, "decision": d, "call": call, "reason": why,
+                })
+                .to_string()
+            } else {
+                format!("{:>4}  {d:<5}  {call:<40}  {why}", i + 1)
+            }
+        })
+        .collect()
+}
+
+fn explain_lines(policy: &CompiledPolicy, generation: u32, a: &ExplainArgs) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    let l7 = L7Input::from_args(a)?;
     let sha = match a.binary.as_deref() {
         None => None,
         Some(s) if s.starts_with("sha256:") => Some(
@@ -633,7 +835,7 @@ fn explain(sock: &Path, a: ExplainArgs) -> Result<()> {
         "icmpv6" => KV_PROTO_ICMPV6,
         other => bail!("unknown proto {other}"),
     };
-    let tables = OfflineTables::new(&policy, &facts, &[], generation & 1);
+    let tables = OfflineTables::new(policy, &facts, &[], generation & 1);
     let clocks = Clocks {
         unix_ns: now_unix() * 1_000_000_000,
         boot_ns: 1,
@@ -653,8 +855,11 @@ fn explain(sock: &Path, a: ExplainArgs) -> Result<()> {
     let remote = to_mapped(a.to);
     let bypass = table.hdr.flags & KV_POL_F_NO_LOOPBACK_BYPASS == 0;
     if !a.ingress && bypass && kavach_common::addr::is_loopback(remote) {
-        println!("verdict: allow (loopback bypass)");
-        return Ok(());
+        out.push("verdict: allow (loopback bypass)".into());
+        if l7.is_some() {
+            out.push("l7: not evaluated (the flow is not punted)".into());
+        }
+        return Ok(out);
     }
     let q = FlowQuery {
         dir,
@@ -663,7 +868,7 @@ fn explain(sock: &Path, a: ExplainArgs) -> Result<()> {
         port: a.port,
         proto,
     };
-    println!(
+    out.push(format!(
         "identity: selectors matched = {:#b} {}",
         mask,
         (0..policy.selectors.len())
@@ -671,7 +876,7 @@ fn explain(sock: &Path, a: ExplainArgs) -> Result<()> {
             .map(|i| format!("#{i}"))
             .collect::<Vec<_>>()
             .join(" ")
-    );
+    ));
     let mut lines = Vec::new();
     let d = kavach_core::evaluate_traced(&tables, &snap, &q, 1, |i, m| {
         let r = &policy.rules[i];
@@ -686,12 +891,10 @@ fn explain(sock: &Path, a: ExplainArgs) -> Result<()> {
         };
         lines.push(format!("  [{i:>3}] {:<28} {why}", r.name));
     });
-    for l in lines {
-        println!("{l}");
-    }
+    out.extend(lines);
     let verdict = format!("{:?}", d.verdict).to_lowercase();
     match d.rule_index {
-        Some(i) => println!(
+        Some(i) => out.push(format!(
             "verdict: {verdict}  (rule {:?}{})",
             policy.rules[i].name,
             if d.punted {
@@ -699,18 +902,187 @@ fn explain(sock: &Path, a: ExplainArgs) -> Result<()> {
             } else {
                 ""
             }
-        ),
-        None => println!(
+        )),
+        None => out.push(format!(
             "verdict: {verdict}  (default {})",
             if a.ingress { "ingress" } else { "egress" }
-        ),
+        )),
     }
-    Ok(())
+    let rule = d
+        .rule_index
+        .map(|i| &policy.rules[i])
+        .filter(|r| r.verdict == Verdict::Punt as u8);
+    match (rule, &l7) {
+        (None, Some(_)) => out.push("l7: not evaluated (the flow is not punted)".into()),
+        (None, None) => {}
+        (Some(r), l7) => match policy.rule_gateway(r) {
+            None => out.push(format!(
+                "gateway: none (rule {:?} names no gateway policy; its fail mode decides)",
+                r.name
+            )),
+            Some(g) => {
+                out.push(format!("gateway: {}  (tls = {})", g.name, tls_word(g)));
+                match l7 {
+                    Some(input) => out.extend(gateway_explain_lines(g, input)),
+                    None => out.push(
+                        "  pass --tool <name> or --jsonrpc '<frame>' to evaluate a call".into(),
+                    ),
+                }
+            }
+        },
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::kill_switch_offline;
+    use super::*;
+
+    const POLICY: &str = r#"
+version = 1
+[defaults]
+egress = "drop"
+[gateway.github-agent]
+allow_tools     = ["github.*"]
+deny_tools      = ["github.delete_*"]
+allow_resources = ["repo://acme/"]
+[[rule]]
+id   = "dns"
+allow = { to = "1.1.1.1", port = 53, proto = "udp" }
+[[rule]]
+id   = "mcp"
+punt = { to = "203.0.113.0/24", port = 443, proto = "tcp", gateway = "github-agent" }
+"#;
+
+    fn args(to: &str, port: u16) -> ExplainArgs {
+        ExplainArgs {
+            to: to.parse().unwrap(),
+            port,
+            proto: "tcp".into(),
+            ingress: false,
+            binary: None,
+            uid: None,
+            user: None,
+            cgroup: None,
+            policy: None,
+            tool: None,
+            jsonrpc: None,
+        }
+    }
+
+    fn explained(a: &ExplainArgs) -> String {
+        let p = kavach_policy::compile(POLICY, 0).unwrap().policy;
+        explain_lines(&p, 2, a).unwrap().join("\n")
+    }
+
+    #[test]
+    fn explain_evaluates_tool_calls_on_punted_flows() {
+        let mut a = args("203.0.113.9", 443);
+        a.tool = Some("github.delete_repo".into());
+        let out = explained(&a);
+        assert!(
+            out.contains("verdict: drop  (rule \"mcp\", punt resolved by fail mode)"),
+            "{out}"
+        );
+        assert!(out.contains("gateway: github-agent  (tls = deny)"), "{out}");
+        assert!(
+            out.contains("  call:    tools/call github.delete_repo"),
+            "{out}"
+        );
+        assert!(
+            out.contains("l7 verdict: deny  (deny_tools pattern \"github.delete_*\")"),
+            "{out}"
+        );
+
+        a.tool = Some("github.create_issue".into());
+        assert!(explained(&a).contains("l7 verdict: allow  (allow_tools pattern \"github.*\")"));
+
+        a.tool = None;
+        a.jsonrpc = Some(
+            r#"{"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"repo://acme/x"}}"#
+                .into(),
+        );
+        let out = explained(&a);
+        assert!(
+            out.contains("call:    resources/read repo://acme/x"),
+            "{out}"
+        );
+        assert!(out.contains("l7 verdict: allow  (allow_resources prefix \"repo://acme/\")"));
+
+        a.jsonrpc = Some("[]".into());
+        assert!(explained(&a).contains("l7 verdict: deny  (Batch:"));
+
+        a.jsonrpc = None;
+        assert!(explained(&a).contains("pass --tool <name>"));
+    }
+
+    #[test]
+    fn explain_skips_l7_for_flows_that_are_not_punted() {
+        let mut a = args("1.1.1.1", 53);
+        a.proto = "udp".into();
+        a.tool = Some("github.x".into());
+        let out = explained(&a);
+        assert!(out.contains("verdict: allow  (rule \"dns\")"), "{out}");
+        assert!(
+            out.contains("l7: not evaluated (the flow is not punted)"),
+            "{out}"
+        );
+        assert!(!out.contains("gateway:"), "{out}");
+    }
+
+    #[test]
+    fn explain_reads_frames_from_a_file() {
+        let t = tempfile::tempdir().unwrap();
+        let f = t.path().join("frame.json");
+        std::fs::write(
+            &f,
+            r#"{"jsonrpc":"2.0","id":1,"method":"message/send","params":{}}"#,
+        )
+        .unwrap();
+        let mut a = args("203.0.113.9", 443);
+        a.jsonrpc = Some(format!("@{}", f.display()));
+        let out = explained(&a);
+        assert!(
+            out.contains("l7 verdict: deny  (allow_agent_messages = false)"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn gateway_test_and_list_output() {
+        let p = kavach_policy::compile(POLICY, 0).unwrap().policy;
+        let g = p.gateway("github-agent").unwrap();
+        let frames = r#"
+# allowed
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"github.get_issue"}}
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"shell.exec"}}
+{"jsonrpc":"2.0","id":3,"method":"tools/list"}
+not json
+"#;
+        let out = gateway_test_lines(g, frames, false);
+        assert_eq!(out.len(), 4, "{out:?}");
+        assert!(
+            out[0].starts_with("   3  allow  tools/call github.get_issue"),
+            "{out:?}"
+        );
+        assert!(
+            out[1].contains("deny   tools/call shell.exec")
+                && out[1].ends_with("no allow_tools pattern matches")
+        );
+        assert!(out[2].contains("allow  control"));
+        assert!(out[3].contains("deny   unparseable frame"));
+        let j: serde_json::Value =
+            serde_json::from_str(&gateway_test_lines(g, frames, true)[1]).unwrap();
+        assert_eq!(j["decision"], "deny");
+        assert_eq!(j["line"], 4);
+
+        let l = gateway_list_lines(&p).join("\n");
+        assert!(
+            l.contains("github-agent  tls=deny  agent_messages=false  other=false  rules: mcp"),
+            "{l}"
+        );
+        assert!(l.contains("  deny_tools       github.delete_*"), "{l}");
+    }
 
     #[test]
     fn offline_kill_switch_removes_every_abi_version() {

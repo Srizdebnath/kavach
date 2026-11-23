@@ -11,8 +11,9 @@ repository.workspace = true
 [dependencies]
 kavach-common = { workspace = true, features = ["std"] }
 kavach-core = { workspace = true }
-kavach-policy = { workspace = true }
+kavach-policy = { workspace = true, features = ["gateway"] }
 kavach-api = { workspace = true }
+kavach-gateway = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 serde_json = { workspace = true }

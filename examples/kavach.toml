@@ -35,3 +35,24 @@ ttl   = "7d"
 id        = "ssh-from-lan"
 direction = "ingress"
 allow     = { from = ["10.0.0.0/8", "192.168.0.0/16"], port = 22, proto = "tcp" }
+
+# L7 gateway policy (v0.4 preview) for an AI agent's MCP traffic. A `punt` rule hands the flow
+# to the gateway, which decides each JSON-RPC frame with the named policy. Until the gateway
+# proxy runs on the host, punted flows resolve through the rule's fail mode.
+#
+#   kavachctl explain --policy kavach.toml --to 203.0.113.10 --port 443 --user agent \
+#       --tool github.delete_repo
+#   kavachctl gateway test github-agent frames.jsonl --policy kavach.toml
+#
+# [gateway.github-agent]
+# allow_tools          = ["github.*", "search"]   # exact names, or a prefix ending in `*`
+# deny_tools           = ["github.delete_*"]      # checked first
+# allow_resources      = ["repo://acme/"]         # URI prefixes for resources/read
+# allow_agent_messages = false                    # A2A message/send, message/stream
+# allow_other          = false                    # any other JSON-RPC method
+# tls                  = "deny"                   # TLS the gateway cannot read: deny | allow
+#
+# [[rule]]
+# id   = "agent-to-github-mcp"
+# who  = { user = "agent" }
+# punt = { to = "203.0.113.10", port = 443, proto = "tcp", gateway = "github-agent" }
