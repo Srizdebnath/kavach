@@ -13,6 +13,7 @@ libfuzzer-sys = "0.4"
 kavach-parsers = { path = "../crates/kavach-parsers" }
 kavach-policy = { path = "../crates/kavach-policy" }
 kavach-api = { path = "../crates/kavach-api" }
+kavach-gateway = { path = "../crates/kavach-gateway" }
 serde_json = "1"
 
 [workspace]
@@ -55,6 +56,13 @@ bench = false
 [[bin]]
 name = "quic_initial"
 path = "fuzz_targets/quic_initial.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "gateway_framing"
+path = "fuzz_targets/gateway_framing.rs"
 test = false
 doc = false
 bench = false

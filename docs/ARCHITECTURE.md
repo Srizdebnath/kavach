@@ -31,7 +31,8 @@ kavach/
 ```
 
 Planned (v0.4/v0.5): `kernel/kavach-ko` (Rust-for-Linux kfunc), `crates/kavach-parsers`
-(TLS/JA4/DNS), the `crates/kavach-gateway` L7 proxy, `shims/{freebsd,macos}`.
+(TLS/JA4/DNS), the kernel redirect into the `crates/kavach-gateway` L7 proxy (§9b),
+`shims/{freebsd,macos}`.
 
 ## 2. Crate dependency graph
 
@@ -352,6 +353,51 @@ XDP: parse → blocklist → GCRA → [flag] xsk_ports[(proto,dport)]? → xsk_a
   the BPF gating (`BPF_PROG_TEST_RUN`) and real redirection plus watchdog fallback over a veth
   pair. No AF_XDP crate is used: the maintained ones wrap libxdp/libbpf C builds.
 
+## 9b. Agent-gateway proxy
+
+`kavach_gateway::proxy` is the L7 consumer for punted flows. It is a tokio TCP listener
+(`[gateway.proxy]`, default `127.0.0.1:15001`), runnable inside kavachd via
+`kavach_gateway::run(config, resolver, policies, events)` or standalone as the
+`kavach-gateway` binary (explicit-proxy mode, one static upstream).
+
+* **Original destination.** `OrigDst::lookup(peer, local) -> OrigInfo { dst, rule_id, gateway,
+  cgroup_id, pid }`; kavachd implements it over the redirect map. An unknown flow, or one
+  whose destination is the listener itself, is closed (fail closed).
+* **Sniffing** (first bytes, under `header_timeout_ms`): `0x16` → TLS ClientHello (SNI via
+  `kavach-parsers`; the policy's `tls = "deny"` closes, `"allow"` relays uninspected), an upper-case
+  method token → HTTP/1.1, `{`/`[` → newline-delimited JSON-RPC, anything else → closed.
+* **Per-frame decision.** Every client→server JSON-RPC message (HTTP request body, WebSocket
+  text message, NDJSON line) goes through `classify` + `ToolPolicy::decide`, with the policy
+  looked up by gateway name *per frame*, so `PolicyStore::replace` applies to open connections
+  at their next frame. Objects with a repeated key are refused (serde keeps the last copy; an
+  upstream might keep the first). JSON-RPC responses from the agent (sampling, elicitation)
+  are allowed. A denied request is answered by the gateway with
+  `{"error":{"code":-32001,"message":"denied by kavach policy <gateway>"}}` and the same id,
+  in the protocol's framing (HTTP 200 JSON body, a WebSocket text frame or an NDJSON line,
+  spliced in only at a server message boundary); it is never forwarded. Malformed frames,
+  batches and oversized frames get a parse / invalid-request error and the connection closes.
+  Each decision is a `DecisionEvent` (gateway, rule id, pid, cgroup, method, tool/URI,
+  verdict, reason) handed to an `EventSink` that must not block (`ChannelSink` drops and
+  counts when full).
+* **HTTP strictness (anti-smuggling).** CRLF only, no obs-fold, no whitespace before a colon,
+  exactly one `Host`, at most one `Content-Length` (digits only), `Transfer-Encoding` only as
+  one `chunked` and never with `Content-Length`, no chunk extensions or trailers in requests,
+  no `CONNECT`/`TRACE`, HTTP/1.1 only, and no pipelining (bytes after a complete request are a
+  400). Bodies are buffered up to `max_frame` (checked against `Content-Length` before
+  reading), inspected, and re-framed with a gateway-computed `Content-Length`; hop-by-hop
+  fields and `Sec-WebSocket-Extensions` are stripped, so the upstream only sees inspected
+  bytes and no compressed WebSocket frames. Responses are parsed as strictly (CL+TE or an
+  unrequested `101` is a 502), streamed (SSE included: chunked bodies are re-chunked as they
+  arrive), and extra bytes after a response close the connection.
+* **Bounds.** `max_connections` (excess connections wait in the backlog), `header_timeout_ms`,
+  `idle_timeout_ms` per direction, `connect_timeout_ms`, `max_frame` (≤ 1 MiB) for every
+  buffered frame and `max_header_bytes` / `max_headers`. Each direction reads only as fast as
+  the other side accepts writes; injected replies queue in a 4-slot channel.
+* **Code.** `proxy/http.rs` (head parser, chunked codec), `proxy/ws.rs` (frame parser,
+  reassembly, server-side boundary tracker), `proxy/jsonrpc.rs` (inspection, error bodies),
+  `proxy/conn.rs` (sniffing and the relays), `proxy/mod.rs` (config, traits, policy store).
+  The pure parsers are fuzzed by `fuzz/fuzz_targets/gateway_framing.rs`.
+
 ## 10. Failure semantics
 
 | Event | Behaviour |
@@ -364,6 +410,8 @@ XDP: parse → blocklist → GCRA → [flag] xsk_ports[(proto,dport)]? → xsk_a
 | `kavachctl kill-switch --yes` (root) | Detach all links, unpin everything, remove the pin dir |
 | AF_XDP consumer stalls (backend enabled) | Watchdog unsets the queue's socket within `watchdog_ms`; selected ports fall back to the stack |
 | Gateway process frozen / crashed | `xsk_alive` deadline lapses / kernel drops the closed socket: XDP passes |
+| Gateway: unknown original destination / no policy for the gateway | Connection closed / every frame denied |
+| Gateway: malformed, batched, oversized or smuggled frame | JSON-RPC or HTTP error, connection closed, nothing forwarded |
 
 ## 11. Security posture
 

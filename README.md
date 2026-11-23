@@ -514,7 +514,7 @@ scripts/priv-test.sh     # real-kernel suite (sudo)
 | v0.1 | XDP blocklist + per-source rate limiting | ✅ kernel-tested |
 | v0.2 | Identity-aware egress via BPF-LSM: binary hash/path, uid, cgroup; tamper revocation | ✅ kernel-tested |
 | v0.3 | `kavach.toml` policy-as-code, `kavachctl`, signed bundles, A/B hot-swap, audit log, `top`, anomaly detection | ✅ kernel-tested |
-| v0.4 | Agent gateway (MCP / A2A), k8s/SPIFFE identity, `kavach.ko` kfunc; AF_XDP RX backend | 🧪 policy core + AF_XDP backend (kernel-tested); proxy pending |
+| v0.4 | Agent gateway (MCP / A2A), k8s/SPIFFE identity, `kavach.ko` kfunc; AF_XDP RX backend | 🧪 policy core + AF_XDP backend (kernel-tested); L7 proxy (loopback-tested); kernel redirect pending |
 | v0.5 | FreeBSD pfil shim, macOS Network Extension | planned |
 
 Honest limits today: kavachd must run in the host PID namespace for identity rules; k8s-label and SPIFFE selectors are rejected by the compiler until the v0.4

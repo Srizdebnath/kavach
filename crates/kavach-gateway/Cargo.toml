@@ -12,11 +12,14 @@ repository.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 kavach-common = { workspace = true }
+kavach-parsers = { workspace = true }
+tokio = { workspace = true }
 libc = "0.2"
 tracing = { workspace = true }
-
-[dev-dependencies]
+# for the kavach-gateway binary
+anyhow = { workspace = true }
 toml = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 [lints]
 workspace = true
