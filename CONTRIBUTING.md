@@ -75,7 +75,7 @@ Change **both** `bpf/include/kavach_eval.h` and `kavach-core`. The differential 
    ```sh
    cargo install cargo-fuzz
    cd fuzz && cargo +nightly fuzz run <name>   # existing: tls_client_hello, dns_message,
-                                               #   policy_compile, bundle_verify, control_request
+                                               #   policy_compile, bundle_verify, control_request, quic_initial
    ```
    Commit any crash input that you fixed as a regression test.
 
