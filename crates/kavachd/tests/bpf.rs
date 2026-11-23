@@ -453,7 +453,28 @@ fn hot_swap_reevaluates_cached_flows() {
 #[test]
 #[ignore = "needs root: scripts/priv-test.sh"]
 fn differential_tc_ingress_vs_core() {
-    let mut f = Fixture::new();
+    differential_tc_ingress(&mut Fixture::new());
+}
+
+/// The same 400 flows with kavach.ko loaded (v0.4): the verdicts must not change. Skipped when
+/// the module is not loaded (`make -C kernel/kavach-ko && insmod kernel/kavach-ko/kavach.ko`).
+#[test]
+#[ignore = "needs root + kavach.ko: scripts/priv-test.sh"]
+fn differential_tc_ingress_vs_core_with_kavach_ko() {
+    match kernel::evaluator() {
+        kernel::Evaluator::Builtin => {
+            eprintln!("skipping: kavach.ko not loaded");
+            return;
+        }
+        kernel::Evaluator::ModuleUnbound => eprintln!(
+            "kavach.ko loaded; the aya loader cannot bind module kfuncs, so this checks that the \
+             module's presence leaves loading and verdicts unchanged"
+        ),
+    }
+    differential_tc_ingress(&mut Fixture::new());
+}
+
+fn differential_tc_ingress(f: &mut Fixture) {
     let p = f.apply_toml(INGRESS_POLICY);
     let generation = f.d().generation;
     let table = p.to_kernel(

@@ -47,6 +47,33 @@ pub fn in_initial_pid_ns() -> bool {
         .unwrap_or(false)
 }
 
+/// Module BTF that `kavach.ko` (kernel/kavach-ko) exposes once loaded.
+pub const KAVACH_KO_BTF: &str = "/sys/kernel/btf/kavach";
+
+/// Which policy evaluator the eBPF programs run.
+///
+/// `bpf/include/kavach_eval.h` calls the `kavach_evaluate` kfunc when the loader resolved it
+/// (`bpf_ksym_exists`) and the built-in C mirror otherwise; both implement `kavach-core`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Evaluator {
+    /// `kavach.ko` is not loaded: the built-in C evaluator.
+    Builtin,
+    /// `kavach.ko` is loaded, but aya resolves kfuncs against vmlinux BTF only (it never passes
+    /// a module BTF in `fd_array`), so the weak `kavach_evaluate` stays unresolved and the
+    /// built-in C evaluator runs. Same verdicts; the module is unused until the loader can bind
+    /// module kfuncs.
+    ModuleUnbound,
+}
+
+/// Detect `kavach.ko` and report which evaluator the loaded programs use.
+pub fn evaluator() -> Evaluator {
+    if Path::new(KAVACH_KO_BTF).exists() {
+        Evaluator::ModuleUnbound
+    } else {
+        Evaluator::Builtin
+    }
+}
+
 #[cfg(test)]
 mod abi_tests {
     #[test]
@@ -134,6 +161,13 @@ impl Kernel {
                 return Err(e).context("loading eBPF object");
             }
         };
+        match evaluator() {
+            Evaluator::Builtin => info!("policy evaluator: built-in (kavach.ko not loaded)"),
+            Evaluator::ModuleUnbound => info!(
+                "policy evaluator: built-in; kavach.ko is loaded but the eBPF loader cannot bind \
+                 module kfuncs yet, so kavach_evaluate is unused (verdicts are identical)"
+            ),
+        }
         let sync_inner = bpf.take_map("sync_inner").and_then(|m| match m {
             aya::maps::Map::Array(d) => Some(d),
             _ => None,
