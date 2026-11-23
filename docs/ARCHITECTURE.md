@@ -74,7 +74,7 @@ entry look current.
 
 ## 4. BPF maps
 
-All maps except `sync_*` are pinned `LIBBPF_PIN_BY_NAME` under `/sys/fs/bpf/kavach/v1`
+All maps except `sync_*` are pinned `LIBBPF_PIN_BY_NAME` under `/sys/fs/bpf/kavach/v<ABI_VERSION>` (currently `v2`)
 (versioned so an incompatible layout never re-adopts old pins).
 
 | Map | Type | Key → Value | Writer | Reader |
