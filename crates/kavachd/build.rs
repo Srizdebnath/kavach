@@ -13,6 +13,7 @@ fn main() {
         "xdp_filter.c",
         "tc_flow.c",
         "lsm_egress.c",
+        "gw_redirect.c",
         "include/kavach_bpf.h",
         "include/kavach_eval.h",
         "include/kavach_abi.h",

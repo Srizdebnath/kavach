@@ -394,7 +394,11 @@ pub struct Rule {
     pub fail: u8,
     /// 0 = no TTL; else `CLOCK_BOOTTIME` ns after which the rule no longer matches.
     pub not_after_ns: u64,
-    pub _reserved: [u64; 2],
+    /// Punt rules: index of the gateway that decides (0 = the default gateway). The kernel only
+    /// carries it into [`PuntRecord::gateway`]; the names live in the compiled policy.
+    pub gateway: u16,
+    pub _pad: [u8; 6],
+    pub _reserved: u64,
 }
 
 /// One whole policy slot (`policy_slots[slot]`): looked up once per evaluation, then indexed.
@@ -420,6 +424,109 @@ pub struct AddrKey {
     pub prefixlen: u32,
     pub slot: u32,
     pub addr: [u8; 16],
+}
+
+// ---------------------------------------------------------------------------------------------
+// L7 gateway redirect (the punt data path)
+// ---------------------------------------------------------------------------------------------
+
+/// Entries in the per-CPU `gw_stats` array (indices `KV_GW_STAT_*`).
+pub const KV_GW_STAT_MAX: u32 = 8;
+/// A punted TCP connect was redirected to the gateway listener.
+pub const KV_GW_STAT_REDIRECT: u32 = 0;
+/// Punt while the gateway was off or its liveness deadline had lapsed: rule fail mode applied.
+pub const KV_GW_STAT_DEAD: u32 = 1;
+/// Punt that cannot be redirected (not TCP, or an `IPV6_V6ONLY` socket with no IPv6
+/// listener): rule fail mode applied.
+pub const KV_GW_STAT_UNREDIRECTABLE: u32 = 2;
+/// Punt by the gateway itself (its upstream leg): allowed and never redirected (no loops).
+pub const KV_GW_STAT_EXEMPT: u32 = 3;
+/// `orig_dst` insert failed: the gateway will not find this connection (and must refuse it).
+pub const KV_GW_STAT_ORIG_FAIL: u32 = 4;
+/// `orig_dst` entry removed because the client socket closed.
+pub const KV_GW_STAT_ORIG_CLOSED: u32 = 5;
+/// The connect hook found a punt record that does not describe this connect: ignored.
+pub const KV_GW_STAT_STALE: u32 = 6;
+
+/// [`GatewayCfg::flags`]: an IPv4 listener is configured (`listen4`).
+pub const KV_GW_F_V4: u32 = 1 << 0;
+/// [`GatewayCfg::flags`]: an IPv6 listener is configured (`listen6`). Without it IPv6 sockets
+/// are redirected to the IPv4-mapped `listen4`, which `IPV6_V6ONLY` sockets cannot reach (those
+/// punts resolve through the fail mode instead).
+pub const KV_GW_F_V6: u32 = 1 << 1;
+
+/// `gw_cfg[0]` (kavachd-owned): where punted connections go, which process is the gateway, and
+/// until when the gateway is known to be alive. 48 bytes.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
+pub struct GatewayCfg {
+    /// `CLOCK_BOOTTIME` ns until which punts are redirected. 0 or in the past = no gateway:
+    /// punts resolve through the rule's fail mode exactly as before v0.4.
+    pub alive_until_ns: u64,
+    /// cgroup id of the gateway's processes (exact match; 0 = none).
+    pub exempt_cgroup: u64,
+    /// IPv4 listener address, network order.
+    pub listen4: u32,
+    /// Network order.
+    pub listen4_port: u16,
+    /// Network order.
+    pub listen6_port: u16,
+    /// IPv6 listener address (with `KV_GW_F_V6`).
+    pub listen6: [u32; 4],
+    /// Process (tgid) that is the gateway, e.g. kavachd hosting the proxy (0 = none).
+    pub exempt_tgid: u32,
+    /// `KV_GW_F_*`.
+    pub flags: u32,
+}
+
+/// [`PuntRecord::flags`]: the LSM decided to redirect this connect; the connect hook has not
+/// rewritten it yet.
+pub const KV_PUNT_F_PENDING: u8 = 1 << 0;
+/// The connect was rewritten to the gateway listener (`target`).
+pub const KV_PUNT_F_REDIRECTED: u8 = 1 << 1;
+/// kavachd recorded the gateway's connection-level verdict in [`PuntRecord::verdict`].
+pub const KV_PUNT_F_DECIDED: u8 = 1 << 2;
+
+/// One punted connection. Value of `sk_punt` (SK_STORAGE on the client socket: written by the
+/// LSM, consumed by the connect hook) and of `orig_dst` (keyed by [`OrigKey`]: written by the
+/// sockops program once the client's port is bound, deleted when the client socket closes).
+/// Addresses are 16-byte IPv4-mapped, ports network order. 72 bytes.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
+pub struct PuntRecord {
+    pub cgroup_id: u64,
+    /// Original destination.
+    pub dst: [u32; 4],
+    /// Gateway listener the connect was rewritten to.
+    pub target: [u32; 4],
+    pub rule_id: u32,
+    pub pid: u32,
+    pub uid: u32,
+    /// Policy generation that punted.
+    pub generation: u32,
+    /// Original destination port.
+    pub dport: u16,
+    pub target_port: u16,
+    /// [`Rule::gateway`] of the punting rule.
+    pub gateway: u16,
+    /// Client socket family (`KV_AF_*`).
+    pub family: u8,
+    /// `KV_PUNT_F_*`.
+    pub flags: u8,
+    /// Gateway write-back ([`Verdict`]); valid with `KV_PUNT_F_DECIDED`.
+    pub verdict: u8,
+    pub _pad: [u8; 7],
+}
+
+/// `orig_dst` key: the redirected connection as the gateway sees it on accept (`client` =
+/// peer, `gateway` = its own local address). IPv4-mapped, ports network order. 36 bytes.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Pod, Zeroable)]
+pub struct OrigKey {
+    pub client: [u32; 4],
+    pub gateway: [u32; 4],
+    pub client_port: u16,
+    pub gateway_port: u16,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -491,6 +598,10 @@ assert_size!(Rule, 48);
 assert_size!(Policy, 64 + 48 * KV_MAX_RULES as usize);
 assert_size!(AddrKey, 24);
 assert_size!(Event, 104);
+assert_size!(GatewayCfg, 48);
+assert_size!(PuntRecord, 72);
+assert_size!(OrigKey, 36);
+const _: () = assert!(core::mem::offset_of!(Rule, gateway) == 32);
 const _: () = assert!(core::mem::offset_of!(FlowKey, src) == 8);
 const _: () = assert!(core::mem::offset_of!(Event, key) == 16);
 const _: () = assert!(core::mem::offset_of!(Event, comm) == 88);
@@ -515,4 +626,7 @@ pub const LAYOUT: &[(&str, usize)] = &[
     ("kv_policy", core::mem::size_of::<Policy>()),
     ("kv_addr_key", core::mem::size_of::<AddrKey>()),
     ("kv_event", core::mem::size_of::<Event>()),
+    ("kv_gateway_cfg", core::mem::size_of::<GatewayCfg>()),
+    ("kv_punt_record", core::mem::size_of::<PuntRecord>()),
+    ("kv_orig_key", core::mem::size_of::<OrigKey>()),
 ];

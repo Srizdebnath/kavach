@@ -173,6 +173,75 @@
 #define KV_REPORT_UNTRUSTED_FS 2
 
 /**
+ * Entries in the per-CPU `gw_stats` array (indices `KV_GW_STAT_*`).
+ */
+#define KV_GW_STAT_MAX 8
+
+/**
+ * A punted TCP connect was redirected to the gateway listener.
+ */
+#define KV_GW_STAT_REDIRECT 0
+
+/**
+ * Punt while the gateway was off or its liveness deadline had lapsed: rule fail mode applied.
+ */
+#define KV_GW_STAT_DEAD 1
+
+/**
+ * Punt that cannot be redirected (not TCP, or an `IPV6_V6ONLY` socket with no IPv6
+ * listener): rule fail mode applied.
+ */
+#define KV_GW_STAT_UNREDIRECTABLE 2
+
+/**
+ * Punt by the gateway itself (its upstream leg): allowed and never redirected (no loops).
+ */
+#define KV_GW_STAT_EXEMPT 3
+
+/**
+ * `orig_dst` insert failed: the gateway will not find this connection (and must refuse it).
+ */
+#define KV_GW_STAT_ORIG_FAIL 4
+
+/**
+ * `orig_dst` entry removed because the client socket closed.
+ */
+#define KV_GW_STAT_ORIG_CLOSED 5
+
+/**
+ * The connect hook found a punt record that does not describe this connect: ignored.
+ */
+#define KV_GW_STAT_STALE 6
+
+/**
+ * [`GatewayCfg::flags`]: an IPv4 listener is configured (`listen4`).
+ */
+#define KV_GW_F_V4 (1 << 0)
+
+/**
+ * [`GatewayCfg::flags`]: an IPv6 listener is configured (`listen6`). Without it IPv6 sockets
+ * are redirected to the IPv4-mapped `listen4`, which `IPV6_V6ONLY` sockets cannot reach (those
+ * punts resolve through the fail mode instead).
+ */
+#define KV_GW_F_V6 (1 << 1)
+
+/**
+ * [`PuntRecord::flags`]: the LSM decided to redirect this connect; the connect hook has not
+ * rewritten it yet.
+ */
+#define KV_PUNT_F_PENDING (1 << 0)
+
+/**
+ * The connect was rewritten to the gateway listener (`target`).
+ */
+#define KV_PUNT_F_REDIRECTED (1 << 1)
+
+/**
+ * kavachd recorded the gateway's connection-level verdict in [`PuntRecord::verdict`].
+ */
+#define KV_PUNT_F_DECIDED (1 << 2)
+
+/**
  * Final decision for a packet, connection or flow.
  */
 enum kv_verdict
@@ -531,7 +600,13 @@ struct kv_rule {
    * 0 = no TTL; else `CLOCK_BOOTTIME` ns after which the rule no longer matches.
    */
   __u64 not_after_ns;
-  __u64 _reserved[2];
+  /**
+   * Punt rules: index of the gateway that decides (0 = the default gateway). The kernel only
+   * carries it into [`PuntRecord::gateway`]; the names live in the compiled policy.
+   */
+  __u16 gateway;
+  __u8 _pad[6];
+  __u64 _reserved;
 };
 
 /**
@@ -592,6 +667,104 @@ struct kv_event {
   __u8 comm[16];
 };
 
+/**
+ * `gw_cfg[0]` (kavachd-owned): where punted connections go, which process is the gateway, and
+ * until when the gateway is known to be alive. 48 bytes.
+ */
+struct kv_gateway_cfg {
+  /**
+   * `CLOCK_BOOTTIME` ns until which punts are redirected. 0 or in the past = no gateway:
+   * punts resolve through the rule's fail mode exactly as before v0.4.
+   */
+  __u64 alive_until_ns;
+  /**
+   * cgroup id of the gateway's processes (exact match; 0 = none).
+   */
+  __u64 exempt_cgroup;
+  /**
+   * IPv4 listener address, network order.
+   */
+  __u32 listen4;
+  /**
+   * Network order.
+   */
+  __u16 listen4_port;
+  /**
+   * Network order.
+   */
+  __u16 listen6_port;
+  /**
+   * IPv6 listener address (with `KV_GW_F_V6`).
+   */
+  __u32 listen6[4];
+  /**
+   * Process (tgid) that is the gateway, e.g. kavachd hosting the proxy (0 = none).
+   */
+  __u32 exempt_tgid;
+  /**
+   * `KV_GW_F_*`.
+   */
+  __u32 flags;
+};
+
+/**
+ * One punted connection. Value of `sk_punt` (SK_STORAGE on the client socket: written by the
+ * LSM, consumed by the connect hook) and of `orig_dst` (keyed by [`OrigKey`]: written by the
+ * sockops program once the client's port is bound, deleted when the client socket closes).
+ * Addresses are 16-byte IPv4-mapped, ports network order. 72 bytes.
+ */
+struct kv_punt_record {
+  __u64 cgroup_id;
+  /**
+   * Original destination.
+   */
+  __u32 dst[4];
+  /**
+   * Gateway listener the connect was rewritten to.
+   */
+  __u32 target[4];
+  __u32 rule_id;
+  __u32 pid;
+  __u32 uid;
+  /**
+   * Policy generation that punted.
+   */
+  __u32 generation;
+  /**
+   * Original destination port.
+   */
+  __u16 dport;
+  __u16 target_port;
+  /**
+   * [`Rule::gateway`] of the punting rule.
+   */
+  __u16 gateway;
+  /**
+   * Client socket family (`KV_AF_*`).
+   */
+  __u8 family;
+  /**
+   * `KV_PUNT_F_*`.
+   */
+  __u8 flags;
+  /**
+   * Gateway write-back ([`Verdict`]); valid with `KV_PUNT_F_DECIDED`.
+   */
+  __u8 verdict;
+  __u8 _pad[7];
+};
+
+/**
+ * `orig_dst` key: the redirected connection as the gateway sees it on accept (`client` =
+ * peer, `gateway` = its own local address). IPv4-mapped, ports network order. 36 bytes.
+ */
+struct kv_orig_key {
+  __u32 client[4];
+  __u32 gateway[4];
+  __u16 client_port;
+  __u16 gateway_port;
+};
+
 
 /* Layout must match crates/kavach-common (checked at compile time). */
 _Static_assert(sizeof(struct kv_flow_key) == 40, "ABI drift: kv_flow_key");
@@ -611,6 +784,9 @@ _Static_assert(sizeof(struct kv_rule) == 48, "ABI drift: kv_rule");
 _Static_assert(sizeof(struct kv_policy) == 49216, "ABI drift: kv_policy");
 _Static_assert(sizeof(struct kv_addr_key) == 24, "ABI drift: kv_addr_key");
 _Static_assert(sizeof(struct kv_event) == 104, "ABI drift: kv_event");
+_Static_assert(sizeof(struct kv_gateway_cfg) == 48, "ABI drift: kv_gateway_cfg");
+_Static_assert(sizeof(struct kv_punt_record) == 72, "ABI drift: kv_punt_record");
+_Static_assert(sizeof(struct kv_orig_key) == 36, "ABI drift: kv_orig_key");
 _Static_assert(__builtin_offsetof(struct kv_flow_key, src) == 8, "ABI drift");
 _Static_assert(__builtin_offsetof(struct kv_event, key) == 16, "ABI drift");
 _Static_assert(__builtin_offsetof(struct kv_event, comm) == 88, "ABI drift");

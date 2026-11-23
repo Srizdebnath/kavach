@@ -17,11 +17,11 @@ use kavach_common::addr::{from_mapped, mapped_prefix, mask_addr, to_mapped};
 use tracing::{info, warn};
 
 /// Bump whenever a map layout changes: pins live under `/sys/fs/bpf/kavach/v<ABI_VERSION>`.
-pub const ABI_VERSION: u32 = 2;
+pub const ABI_VERSION: u32 = 3;
 
 /// Fingerprint of every shared struct size (`kavach_common::abi::LAYOUT`) that `ABI_VERSION`
 /// was last bumped for; the test below fails when the layout changes without a bump.
-pub const ABI_LAYOUT_FINGERPRINT: u64 = 14051614165168947846;
+pub const ABI_LAYOUT_FINGERPRINT: u64 = 1359382574871012577;
 
 /// FNV-1a over (name, size) of every ABI type.
 pub fn layout_fingerprint() -> u64 {

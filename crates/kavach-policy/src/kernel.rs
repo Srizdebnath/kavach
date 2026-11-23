@@ -89,7 +89,8 @@ impl CompiledPolicy {
                 verdict: r.verdict,
                 fail: r.fail,
                 not_after_ns: clocks.boot_deadline(r.not_after_unix),
-                _reserved: [0; 2],
+                // `gateway` (punt rules): index of the deciding gateway, 0 = default.
+                ..Rule::default()
             };
         }
         p
