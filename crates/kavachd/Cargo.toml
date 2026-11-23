@@ -29,6 +29,8 @@ ipnet = { workspace = true }
 postcard = { workspace = true }
 nix = { version = "0.30", features = ["sched", "time", "user", "fs", "socket", "inotify"] }
 bytemuck = { workspace = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pki-types = { version = "1", features = ["std"] }
 
 [dev-dependencies]
 tempfile = "3"

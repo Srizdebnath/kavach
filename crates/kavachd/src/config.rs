@@ -41,6 +41,8 @@ pub struct Config {
     pub anomaly: crate::anomaly::AnomalyConfig,
     /// L7 gateway (v0.4 preview).
     pub gateway: GatewayConfig,
+    /// `[k8s]`: k8s-label / SPIFFE identity node agent (off by default).
+    pub k8s: crate::workload::K8sConfig,
 }
 
 /// `[gateway]`.
@@ -90,6 +92,7 @@ impl Default for Config {
             .to_vec(),
             anomaly: Default::default(),
             gateway: GatewayConfig::default(),
+            k8s: Default::default(),
         }
     }
 }
@@ -150,6 +153,7 @@ impl Config {
             Ok(s) => {
                 let c: Self = toml::from_str(&s)?;
                 c.anomaly.validate().map_err(anyhow::Error::msg)?;
+                c.k8s.validate().map_err(anyhow::Error::msg)?;
                 Ok(c)
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {

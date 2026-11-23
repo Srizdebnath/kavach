@@ -174,6 +174,14 @@ async fn main() -> Result<()> {
         move || kavachd::scan::scanner(st.clone(), scan_dirs.clone(), kick.clone())
     });
 
+    // k8s / SPIFFE identity node agent (`[k8s] enabled = true`).
+    let k8s = state.lock().expect("fresh state").cfg.k8s.clone();
+    if k8s.enabled
+        && let Err(e) = kavachd::workload::spawn(k8s, state.clone())
+    {
+        error!(error = %format!("{e:#}"), "k8s identity agent not started: k8s / spiffe selectors match nothing");
+    }
+
     // Housekeeping: blocklist expiry + FQDN refresh.
     supervise("housekeeping", state.clone(), {
         let st = state.clone();

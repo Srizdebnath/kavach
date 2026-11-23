@@ -8,3 +8,4 @@ pub mod events;
 pub mod kernel;
 pub mod scan;
 pub mod supervise;
+pub mod workload;
