@@ -51,3 +51,10 @@ path = "fuzz_targets/control_request.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "quic_initial"
+path = "fuzz_targets/quic_initial.rs"
+test = false
+doc = false
+bench = false

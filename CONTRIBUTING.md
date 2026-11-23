@@ -43,5 +43,5 @@ requirement IDs from `docs/SRS.md` where relevant. `cargo fmt` and clippy must b
 ```sh
 cargo install cargo-fuzz
 cd fuzz && cargo +nightly fuzz run tls_client_hello   # also: dns_message, policy_compile,
-                                                      #       bundle_verify, control_request
+                                                      #       bundle_verify, control_request, quic_initial
 ```

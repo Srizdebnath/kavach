@@ -1,6 +1,7 @@
 //! # kavach-parsers
 //!
-//! Parsers for attacker-controlled bytes (SRS FR-PAR-*, SR-6). Every parser here is:
+//! Parsers for attacker-controlled bytes (SRS FR-PAR-*, SR-6): TLS ClientHello (SNI, ALPN, JA4),
+//! QUIC v1/v2 Initial packets (feature `quic`, on by default) and DNS. Every parser here is:
 //!
 //! * `#![no_std]` and allocation-free, so it can run in kavachd, the L7 gateway and later in
 //!   `kavach.ko`;
@@ -14,6 +15,8 @@
 
 pub mod dns;
 pub mod ja4;
+#[cfg(feature = "quic")]
+pub mod quic;
 pub mod tls;
 
 mod cursor;
