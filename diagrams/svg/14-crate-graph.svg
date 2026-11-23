@@ -1,0 +1,159 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 610" width="960" height="610" role="img" aria-labelledby="title desc">
+<title id="title">Crate and source dependency graph</title>
+<desc id="desc">Arrows point from a crate to what it links. The ABI has one source of truth: kavach-common.</desc>
+<style>
+text{font-family:system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif;}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace;}
+.h1{font-size:20px;font-weight:700}
+.h2{font-size:13.5px;font-weight:650}
+.b{font-size:12.5px}
+.s{font-size:11.5px}
+.xs{font-size:10.5px}
+.bold{font-weight:650}
+.cap{font-size:10.5px;font-weight:700;letter-spacing:.08em}
+.dash{stroke-dasharray:5 4}
+.bg{fill:#ffffff;stroke:#d0d7de}
+.bgf{fill:#ffffff}
+.t{fill:#1f2328}
+.m{fill:#59636e}
+.ln{stroke:#6e7781;fill:none}
+.fln{fill:#6e7781}
+.band{fill:none;stroke:#d0d7de}
+.b-k{fill:#fff1e0;stroke:#c2620a}
+.c-k{fill:#8a4600}
+.s-k{stroke:#c2620a;fill:none}
+.f-k{fill:#c2620a}
+.b-u{fill:#e8f1ff;stroke:#2f6fde}
+.c-u{fill:#174ea6}
+.s-u{stroke:#2f6fde;fill:none}
+.f-u{fill:#2f6fde}
+.b-p{fill:#f2ebff;stroke:#7c4ddb}
+.c-p{fill:#5a32a3}
+.s-p{stroke:#7c4ddb;fill:none}
+.f-p{fill:#7c4ddb}
+.b-g{fill:#e6f6ec;stroke:#1f8f4e}
+.c-g{fill:#116329}
+.s-g{stroke:#1f8f4e;fill:none}
+.f-g{fill:#1f8f4e}
+.b-r{fill:#ffebee;stroke:#cf222e}
+.c-r{fill:#a40e26}
+.s-r{stroke:#cf222e;fill:none}
+.f-r{fill:#cf222e}
+.b-n{fill:#f6f8fa;stroke:#8c959f}
+.c-n{fill:#424a53}
+.s-n{stroke:#8c959f;fill:none}
+.f-n{fill:#8c959f}
+.b-y{fill:#fff8c5;stroke:#9a6700}
+.c-y{fill:#7d4e00}
+.s-y{stroke:#9a6700;fill:none}
+.f-y{fill:#9a6700}
+@media (prefers-color-scheme: dark){
+.bg{fill:#0d1117;stroke:#30363d}
+.bgf{fill:#0d1117}
+.t{fill:#e6edf3}
+.m{fill:#9198a1}
+.ln{stroke:#8b949e;fill:none}
+.fln{fill:#8b949e}
+.band{fill:none;stroke:#30363d}
+.b-k{fill:#2a1a08;stroke:#f0883e}
+.c-k{fill:#ffa657}
+.s-k{stroke:#f0883e;fill:none}
+.f-k{fill:#f0883e}
+.b-u{fill:#0c1d36;stroke:#4493f8}
+.c-u{fill:#79c0ff}
+.s-u{stroke:#4493f8;fill:none}
+.f-u{fill:#4493f8}
+.b-p{fill:#1e1533;stroke:#a371f7}
+.c-p{fill:#d2a8ff}
+.s-p{stroke:#a371f7;fill:none}
+.f-p{fill:#a371f7}
+.b-g{fill:#0b2616;stroke:#3fb950}
+.c-g{fill:#7ee787}
+.s-g{stroke:#3fb950;fill:none}
+.f-g{fill:#3fb950}
+.b-r{fill:#2c1013;stroke:#f85149}
+.c-r{fill:#ff7b72}
+.s-r{stroke:#f85149;fill:none}
+.f-r{fill:#f85149}
+.b-n{fill:#161b22;stroke:#6e7681}
+.c-n{fill:#c9d1d9}
+.s-n{stroke:#6e7681;fill:none}
+.f-n{fill:#6e7681}
+.b-y{fill:#2b2208;stroke:#d29922}
+.c-y{fill:#e3b341}
+.s-y{stroke:#d29922;fill:none}
+.f-y{fill:#d29922}
+}
+</style>
+<defs>
+<marker id="ah-k" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-k"/></marker>
+<marker id="ah-u" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-u"/></marker>
+<marker id="ah-p" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-p"/></marker>
+<marker id="ah-g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-g"/></marker>
+<marker id="ah-r" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-r"/></marker>
+<marker id="ah-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-n"/></marker>
+<marker id="ah-y" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-y"/></marker>
+<marker id="ah-ln" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="fln"/></marker>
+</defs>
+<rect x="0.5" y="0.5" width="959" height="609" rx="14" class="bg"/>
+<text x="24" y="38" class="h1 t">Crate and source dependency graph</text>
+<text x="24" y="60" class="s m">Arrows point from a crate to what it links. The ABI has one source of truth: kavach-common.</text>
+<rect x="150" y="84" width="190" height="56" rx="8" class="b-u" stroke-width="1.4"/>
+<text x="245" y="107.5" class="h2 c-u" text-anchor="middle">kavachctl</text>
+<text x="245" y="123.95" class="s m" text-anchor="middle">operator CLI (bin)</text>
+<rect x="560" y="84" width="190" height="56" rx="8" class="b-u" stroke-width="1.4"/>
+<text x="655" y="107.5" class="h2 c-u" text-anchor="middle">kavachd</text>
+<text x="655" y="123.95" class="s m" text-anchor="middle">daemon (bin), tokio</text>
+<rect x="40" y="210" width="190" height="56" rx="8" class="b-u" stroke-width="1.4"/>
+<text x="135" y="233.5" class="h2 c-u" text-anchor="middle">kavach-api</text>
+<text x="135" y="249.95" class="s m" text-anchor="middle">UDS protocol + audit chain</text>
+<rect x="300" y="210" width="190" height="56" rx="8" class="b-p" stroke-width="1.4"/>
+<text x="395" y="233.5" class="h2 c-p" text-anchor="middle">kavach-policy</text>
+<text x="395" y="249.95" class="s m" text-anchor="middle">toml → IR, bundles, diff</text>
+<rect x="600" y="210" width="190" height="56" rx="8" class="b-n" stroke-width="1.4"/>
+<text x="695" y="233.5" class="h2 c-n" text-anchor="middle">aya</text>
+<text x="695" y="249.95" class="s m" text-anchor="middle">external: BPF loader</text>
+<rect x="300" y="320" width="190" height="56" rx="8" class="b-g" stroke-width="1.4"/>
+<text x="395" y="343.5" class="h2 c-g" text-anchor="middle">kavach-core</text>
+<text x="395" y="359.95" class="s m" text-anchor="middle">no_std, forbid(unsafe)</text>
+<rect x="300" y="430" width="190" height="56" rx="8" class="b-g" stroke-width="1.4"/>
+<text x="395" y="453.5" class="h2 c-g" text-anchor="middle">kavach-common</text>
+<text x="395" y="469.95" class="s m" text-anchor="middle">no_std #[repr(C)] ABI</text>
+<rect x="620" y="430" width="316" height="56" rx="8" class="b-k" stroke-width="1.4"/>
+<text x="778" y="453.5" class="h2 c-k" text-anchor="middle">bpf/kavach.bpf.c</text>
+<text x="778" y="469.95" class="s m" text-anchor="middle">unity build: xdp_filter · tc_flow · lsm_egress</text>
+<rect x="560" y="320" width="170" height="56" rx="8" class="b-n dash" stroke-width="1.4"/>
+<text x="645" y="343.5" class="h2 c-n" text-anchor="middle">kavach.ko</text>
+<text x="645" y="359.95" class="s m" text-anchor="middle">kfunc core · v0.4</text>
+<rect x="746" y="320" width="168" height="56" rx="8" class="b-n dash" stroke-width="1.4"/>
+<text x="830" y="343.5" class="h2 c-n" text-anchor="middle">BSD / macOS shims</text>
+<text x="830" y="359.95" class="s m" text-anchor="middle">v0.5 planned</text>
+<rect x="40" y="320" width="190" height="56" rx="8" class="b-g" stroke-width="1.4"/>
+<text x="135" y="343.5" class="h2 c-g" text-anchor="middle">kavach-parsers</text>
+<text x="135" y="359.95" class="s m" text-anchor="middle">no_std TLS · JA4 · DNS</text>
+<rect x="40" y="430" width="190" height="56" rx="8" class="b-u" stroke-width="1.4"/>
+<text x="135" y="453.5" class="h2 c-u" text-anchor="middle">kavach-gateway</text>
+<text x="135" y="469.95" class="s m" text-anchor="middle">MCP / A2A decisions</text>
+<path d="M245,140 L245,176 M655,140 L655,176 M135,176 L655,176" class="ln" stroke-width="1.6"/>
+<circle cx="245" cy="176" r="3" class="fln"/><circle cx="655" cy="176" r="3" class="fln"/>
+<path d="M135,176 L135,208" class="ln" stroke-width="1.6" marker-end="url(#ah-ln)"/>
+<path d="M395,176 L395,208" class="ln" stroke-width="1.6" marker-end="url(#ah-ln)"/>
+<path d="M705,140 L705,208" class="ln" stroke-width="1.6" marker-end="url(#ah-ln)"/>
+<path d="M395,266 L395,318" class="ln" stroke-width="1.6" marker-end="url(#ah-ln)"/>
+<path d="M395,376 L395,428" class="ln" stroke-width="1.6" marker-end="url(#ah-ln)"/>
+<path d="M558,348 L492,348" class="ln dash" stroke-width="1.6" marker-end="url(#ah-ln)"/>
+<path d="M830,376 L830,396 L470,396 L470,378" class="ln dash" stroke-width="1.6" marker-end="url(#ah-ln)"/>
+<path d="M492,458 L618,458" class="s-k" stroke-width="1.6" marker-end="url(#ah-k)"/>
+<rect x="516.3" y="441.5" width="77.4" height="15.5" rx="3" class="bgf"/>
+<text x="555" y="452" class="xs c-k" text-anchor="middle">xtask codegen</text>
+<rect x="513.57" y="465.5" width="82.86" height="15.5" rx="3" class="bgf"/>
+<text x="555" y="476" class="xs mono c-k" text-anchor="middle">kavach_abi.h</text>
+<path d="M750,112 L926,112 L926,428" class="s-k dash" stroke-width="1.6" marker-end="url(#ah-k)"/>
+<rect x="768.05" y="175.5" width="151.95" height="15.5" rx="3" class="bgf"/>
+<text x="917" y="186" class="xs c-k" text-anchor="end">build.rs embeds kavach.bpf.o</text>
+<rect x="24" y="506" width="912" height="84" rx="8" class="b-n" stroke-width="1.4"/>
+<text x="36" y="528.5" class="xs t">kavachctl and kavachd also link kavach-core (explain, differential test) and kavach-common directly; kavach-policy links kavach-common.</text>
+<text x="36" y="543.5" class="xs t">kavach-parsers and kavach-gateway are standalone today (fuzzed and unit-tested) and are not yet linked into kavachd.</text>
+<text x="36" y="558.5" class="xs t">The no_std crates build for a bare-metal target in CI and pass Miri, so the same core can be linked into kavach.ko and the BSD kernel.</text>
+<text x="36" y="573.5" class="xs t">codegen also appends a _Static_assert per type; CI runs codegen --check. Green = no_std, dashed = planned.</text>
+</svg>

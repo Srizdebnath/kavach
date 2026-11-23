@@ -1,0 +1,150 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 520" width="960" height="520" role="img" aria-labelledby="title desc">
+<title id="title">Control plane: a local socket, no network listener</title>
+<desc id="desc">Who can talk to kavachd, and what each caller is allowed to do (SR-1, SR-5).</desc>
+<style>
+text{font-family:system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif;}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace;}
+.h1{font-size:20px;font-weight:700}
+.h2{font-size:13.5px;font-weight:650}
+.b{font-size:12.5px}
+.s{font-size:11.5px}
+.xs{font-size:10.5px}
+.bold{font-weight:650}
+.cap{font-size:10.5px;font-weight:700;letter-spacing:.08em}
+.dash{stroke-dasharray:5 4}
+.bg{fill:#ffffff;stroke:#d0d7de}
+.bgf{fill:#ffffff}
+.t{fill:#1f2328}
+.m{fill:#59636e}
+.ln{stroke:#6e7781;fill:none}
+.fln{fill:#6e7781}
+.band{fill:none;stroke:#d0d7de}
+.b-k{fill:#fff1e0;stroke:#c2620a}
+.c-k{fill:#8a4600}
+.s-k{stroke:#c2620a;fill:none}
+.f-k{fill:#c2620a}
+.b-u{fill:#e8f1ff;stroke:#2f6fde}
+.c-u{fill:#174ea6}
+.s-u{stroke:#2f6fde;fill:none}
+.f-u{fill:#2f6fde}
+.b-p{fill:#f2ebff;stroke:#7c4ddb}
+.c-p{fill:#5a32a3}
+.s-p{stroke:#7c4ddb;fill:none}
+.f-p{fill:#7c4ddb}
+.b-g{fill:#e6f6ec;stroke:#1f8f4e}
+.c-g{fill:#116329}
+.s-g{stroke:#1f8f4e;fill:none}
+.f-g{fill:#1f8f4e}
+.b-r{fill:#ffebee;stroke:#cf222e}
+.c-r{fill:#a40e26}
+.s-r{stroke:#cf222e;fill:none}
+.f-r{fill:#cf222e}
+.b-n{fill:#f6f8fa;stroke:#8c959f}
+.c-n{fill:#424a53}
+.s-n{stroke:#8c959f;fill:none}
+.f-n{fill:#8c959f}
+.b-y{fill:#fff8c5;stroke:#9a6700}
+.c-y{fill:#7d4e00}
+.s-y{stroke:#9a6700;fill:none}
+.f-y{fill:#9a6700}
+@media (prefers-color-scheme: dark){
+.bg{fill:#0d1117;stroke:#30363d}
+.bgf{fill:#0d1117}
+.t{fill:#e6edf3}
+.m{fill:#9198a1}
+.ln{stroke:#8b949e;fill:none}
+.fln{fill:#8b949e}
+.band{fill:none;stroke:#30363d}
+.b-k{fill:#2a1a08;stroke:#f0883e}
+.c-k{fill:#ffa657}
+.s-k{stroke:#f0883e;fill:none}
+.f-k{fill:#f0883e}
+.b-u{fill:#0c1d36;stroke:#4493f8}
+.c-u{fill:#79c0ff}
+.s-u{stroke:#4493f8;fill:none}
+.f-u{fill:#4493f8}
+.b-p{fill:#1e1533;stroke:#a371f7}
+.c-p{fill:#d2a8ff}
+.s-p{stroke:#a371f7;fill:none}
+.f-p{fill:#a371f7}
+.b-g{fill:#0b2616;stroke:#3fb950}
+.c-g{fill:#7ee787}
+.s-g{stroke:#3fb950;fill:none}
+.f-g{fill:#3fb950}
+.b-r{fill:#2c1013;stroke:#f85149}
+.c-r{fill:#ff7b72}
+.s-r{stroke:#f85149;fill:none}
+.f-r{fill:#f85149}
+.b-n{fill:#161b22;stroke:#6e7681}
+.c-n{fill:#c9d1d9}
+.s-n{stroke:#6e7681;fill:none}
+.f-n{fill:#6e7681}
+.b-y{fill:#2b2208;stroke:#d29922}
+.c-y{fill:#e3b341}
+.s-y{stroke:#d29922;fill:none}
+.f-y{fill:#d29922}
+}
+</style>
+<defs>
+<marker id="ah-k" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-k"/></marker>
+<marker id="ah-u" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-u"/></marker>
+<marker id="ah-p" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-p"/></marker>
+<marker id="ah-g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-g"/></marker>
+<marker id="ah-r" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-r"/></marker>
+<marker id="ah-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-n"/></marker>
+<marker id="ah-y" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-y"/></marker>
+<marker id="ah-ln" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="fln"/></marker>
+</defs>
+<rect x="0.5" y="0.5" width="959" height="519" rx="14" class="bg"/>
+<text x="24" y="38" class="h1 t">Control plane: a local socket, no network listener</text>
+<text x="24" y="60" class="s m">Who can talk to kavachd, and what each caller is allowed to do (SR-1, SR-5).</text>
+<rect x="24" y="96" width="220" height="60" rx="8" class="b-u" stroke-width="1.4"/>
+<text x="134" y="121.5" class="h2 c-u" text-anchor="middle">root shell</text>
+<text x="134" y="137.95" class="s mono t" text-anchor="middle">kavachctl … (uid 0)</text>
+<rect x="24" y="172" width="220" height="60" rx="8" class="b-u" stroke-width="1.4"/>
+<text x="134" y="197.5" class="h2 c-u" text-anchor="middle">operator</text>
+<text x="134" y="213.95" class="s m" text-anchor="middle">in control_group</text>
+<rect x="24" y="248" width="220" height="60" rx="8" class="b-n" stroke-width="1.4"/>
+<text x="134" y="273.5" class="h2 c-n" text-anchor="middle">other local user</text>
+<text x="134" y="289.95" class="s m" text-anchor="middle">uid ≠ 0, not in the group</text>
+<rect x="24" y="352" width="220" height="60" rx="8" class="b-r" stroke-width="1.4"/>
+<text x="134" y="377.5" class="h2 c-r" text-anchor="middle">remote host</text>
+<text x="134" y="393.95" class="s m" text-anchor="middle">anything on the network</text>
+<rect x="300" y="92" width="320" height="220" rx="8" class="b-k" stroke-width="1.4"/>
+<text x="460" y="116" class="h2 mono c-k" text-anchor="middle">/run/kavach/kavach.sock</text>
+<text x="460" y="136" class="xs m" text-anchor="middle">Unix socket · mode 0600 (0660 with control_group)</text>
+<rect x="320" y="152" width="280" height="70" rx="8" class="b-n" stroke-width="1.4"/>
+<text x="460" y="174.5" class="h2 c-n" text-anchor="middle">SO_PEERCRED</text>
+<text x="460" y="190.95" class="s m" text-anchor="middle">uid/gid of the peer, supplied by the</text>
+<text x="460" y="206.95" class="s m" text-anchor="middle">kernel; the client cannot forge it</text>
+<rect x="320" y="234" width="280" height="64" rx="8" class="b-n" stroke-width="1.4"/>
+<text x="460" y="253.5" class="h2 c-n" text-anchor="middle">NDJSON request / response</text>
+<text x="460" y="269.95" class="s m" text-anchor="middle">kavach-api types; the request parser</text>
+<text x="460" y="285.95" class="s m" text-anchor="middle">is fuzzed (fuzz/control_request)</text>
+<path d="M244,126 L298,126" class="ln" stroke-width="1.4" marker-end="url(#ah-ln)"/>
+<path d="M244,202 L298,202" class="ln" stroke-width="1.4" marker-end="url(#ah-ln)"/>
+<path d="M244,278 L298,270" class="ln" stroke-width="1.4" marker-end="url(#ah-ln)"/>
+<rect x="300" y="352" width="320" height="60" rx="8" class="b-r dash" stroke-width="1.4"/>
+<text x="460" y="377.5" class="h2 c-r" text-anchor="middle">no TCP / UDP listener</text>
+<text x="460" y="393.95" class="s m" text-anchor="middle">nothing to connect to, nothing to scan</text>
+<path d="M244,382 L298,382" class="s-r dash" stroke-width="1.6" marker-end="url(#ah-r)"/>
+<rect x="676" y="92" width="260" height="76" rx="8" class="b-g" stroke-width="1.4"/>
+<text x="806" y="117.5" class="h2 c-g" text-anchor="middle">Role::Root (uid 0)</text>
+<text x="806" y="133.95" class="s m" text-anchor="middle">everything an operator can do</text>
+<text x="806" y="149.95" class="s bold c-g" text-anchor="middle">+ kill-switch</text>
+<rect x="676" y="180" width="260" height="92" rx="8" class="b-u" stroke-width="1.4"/>
+<text x="806" y="205.5" class="h2 c-u" text-anchor="middle">Role::Operator (group gid)</text>
+<text x="806" y="221.95" class="s m" text-anchor="middle">status · stats · metrics · events</text>
+<text x="806" y="237.95" class="s m" text-anchor="middle">block add/del/list · ratelimit</text>
+<text x="806" y="253.95" class="s m" text-anchor="middle">apply (signed bundles only)</text>
+<rect x="676" y="284" width="260" height="50" rx="8" class="b-r" stroke-width="1.4"/>
+<text x="806" y="304.5" class="h2 c-r" text-anchor="middle">anyone else</text>
+<text x="806" y="320.95" class="s m" text-anchor="middle">connection dropped + warning logged</text>
+<path d="M600,175 L674,130" class="s-g" stroke-width="1.3" marker-end="url(#ah-g)"/>
+<path d="M600,190 L674,220" class="s-u" stroke-width="1.3" marker-end="url(#ah-u)"/>
+<path d="M600,205 L674,305" class="s-r" stroke-width="1.3" marker-end="url(#ah-r)"/>
+<rect x="24" y="432" width="912" height="68" rx="8" class="b-n" stroke-width="1.4"/>
+<text x="36" y="454" class="xs t">First gate: file permissions on the socket (connect() needs write access). Second gate: SO_PEERCRED decides the role.</text>
+<text x="36" y="469" class="xs t">apply checks the bundle signature against /etc/kavach/trusted_keys before decoding anything, so an operator cannot push an unsigned policy.</text>
+<text x="36" y="484" class="xs t">No web UI, no admin port, no remote API: management is local by construction. Metrics are served over the same socket.</text>
+</svg>

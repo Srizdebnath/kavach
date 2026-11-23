@@ -1,0 +1,187 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 640" width="960" height="640" role="img" aria-labelledby="title desc">
+<title id="title">Identity pipeline: executable → SHA-256 → exe_class</title>
+<desc id="desc">kavachd turns live kernel inodes into selector masks; the kernel revokes them on any write.</desc>
+<style>
+text{font-family:system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif;}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace;}
+.h1{font-size:20px;font-weight:700}
+.h2{font-size:13.5px;font-weight:650}
+.b{font-size:12.5px}
+.s{font-size:11.5px}
+.xs{font-size:10.5px}
+.bold{font-weight:650}
+.cap{font-size:10.5px;font-weight:700;letter-spacing:.08em}
+.dash{stroke-dasharray:5 4}
+.bg{fill:#ffffff;stroke:#d0d7de}
+.bgf{fill:#ffffff}
+.t{fill:#1f2328}
+.m{fill:#59636e}
+.ln{stroke:#6e7781;fill:none}
+.fln{fill:#6e7781}
+.band{fill:none;stroke:#d0d7de}
+.b-k{fill:#fff1e0;stroke:#c2620a}
+.c-k{fill:#8a4600}
+.s-k{stroke:#c2620a;fill:none}
+.f-k{fill:#c2620a}
+.b-u{fill:#e8f1ff;stroke:#2f6fde}
+.c-u{fill:#174ea6}
+.s-u{stroke:#2f6fde;fill:none}
+.f-u{fill:#2f6fde}
+.b-p{fill:#f2ebff;stroke:#7c4ddb}
+.c-p{fill:#5a32a3}
+.s-p{stroke:#7c4ddb;fill:none}
+.f-p{fill:#7c4ddb}
+.b-g{fill:#e6f6ec;stroke:#1f8f4e}
+.c-g{fill:#116329}
+.s-g{stroke:#1f8f4e;fill:none}
+.f-g{fill:#1f8f4e}
+.b-r{fill:#ffebee;stroke:#cf222e}
+.c-r{fill:#a40e26}
+.s-r{stroke:#cf222e;fill:none}
+.f-r{fill:#cf222e}
+.b-n{fill:#f6f8fa;stroke:#8c959f}
+.c-n{fill:#424a53}
+.s-n{stroke:#8c959f;fill:none}
+.f-n{fill:#8c959f}
+.b-y{fill:#fff8c5;stroke:#9a6700}
+.c-y{fill:#7d4e00}
+.s-y{stroke:#9a6700;fill:none}
+.f-y{fill:#9a6700}
+@media (prefers-color-scheme: dark){
+.bg{fill:#0d1117;stroke:#30363d}
+.bgf{fill:#0d1117}
+.t{fill:#e6edf3}
+.m{fill:#9198a1}
+.ln{stroke:#8b949e;fill:none}
+.fln{fill:#8b949e}
+.band{fill:none;stroke:#30363d}
+.b-k{fill:#2a1a08;stroke:#f0883e}
+.c-k{fill:#ffa657}
+.s-k{stroke:#f0883e;fill:none}
+.f-k{fill:#f0883e}
+.b-u{fill:#0c1d36;stroke:#4493f8}
+.c-u{fill:#79c0ff}
+.s-u{stroke:#4493f8;fill:none}
+.f-u{fill:#4493f8}
+.b-p{fill:#1e1533;stroke:#a371f7}
+.c-p{fill:#d2a8ff}
+.s-p{stroke:#a371f7;fill:none}
+.f-p{fill:#a371f7}
+.b-g{fill:#0b2616;stroke:#3fb950}
+.c-g{fill:#7ee787}
+.s-g{stroke:#3fb950;fill:none}
+.f-g{fill:#3fb950}
+.b-r{fill:#2c1013;stroke:#f85149}
+.c-r{fill:#ff7b72}
+.s-r{stroke:#f85149;fill:none}
+.f-r{fill:#f85149}
+.b-n{fill:#161b22;stroke:#6e7681}
+.c-n{fill:#c9d1d9}
+.s-n{stroke:#6e7681;fill:none}
+.f-n{fill:#6e7681}
+.b-y{fill:#2b2208;stroke:#d29922}
+.c-y{fill:#e3b341}
+.s-y{stroke:#d29922;fill:none}
+.f-y{fill:#d29922}
+}
+</style>
+<defs>
+<marker id="ah-k" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-k"/></marker>
+<marker id="ah-u" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-u"/></marker>
+<marker id="ah-p" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-p"/></marker>
+<marker id="ah-g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-g"/></marker>
+<marker id="ah-r" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-r"/></marker>
+<marker id="ah-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-n"/></marker>
+<marker id="ah-y" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-y"/></marker>
+<marker id="ah-ln" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="fln"/></marker>
+</defs>
+<rect x="0.5" y="0.5" width="959" height="639" rx="14" class="bg"/>
+<text x="24" y="38" class="h1 t">Identity pipeline: executable → SHA-256 → exe_class</text>
+<text x="24" y="60" class="s m">kavachd turns live kernel inodes into selector masks; the kernel revokes them on any write.</text>
+<text x="24" y="96" class="cap m">SOURCES OF KEYS</text>
+<rect x="24" y="108" width="240" height="58" rx="8" class="b-k" stroke-width="1.4"/>
+<text x="144" y="124.5" class="h2 c-k" text-anchor="middle">exec event</text>
+<text x="144" y="140.95" class="s mono t" text-anchor="middle">bprm_committed_creds</text>
+<text x="144" y="156.95" class="s m" text-anchor="middle">→ ring buffer</text>
+<rect x="24" y="178" width="240" height="58" rx="8" class="b-k" stroke-width="1.4"/>
+<text x="144" y="194.5" class="h2 c-k" text-anchor="middle">startup task iterator</text>
+<text x="144" y="210.95" class="s mono t" text-anchor="middle">iter/task</text>
+<text x="144" y="226.95" class="s m" text-anchor="middle">processes already running</text>
+<rect x="24" y="248" width="240" height="74" rx="8" class="b-u" stroke-width="1.4"/>
+<text x="144" y="264.5" class="h2 c-u" text-anchor="middle">key report (after apply)</text>
+<text x="144" y="280.95" class="s m" text-anchor="middle">kavachd opens each policy-named</text>
+<text x="144" y="296.95" class="s m" text-anchor="middle">exe O_RDONLY; LSM answers the</text>
+<text x="144" y="312.95" class="s m" text-anchor="middle">armed key_req {nonce, tid}</text>
+<rect x="24" y="334" width="240" height="74" rx="8" class="b-u" stroke-width="1.4"/>
+<text x="144" y="350.5" class="h2 c-u" text-anchor="middle">hash scanner</text>
+<text x="144" y="366.95" class="s m" text-anchor="middle">hash_scan_dirs + inotify</text>
+<text x="144" y="382.95" class="s m" text-anchor="middle">pre-classifies binaries that</text>
+<text x="144" y="398.95" class="s m" text-anchor="middle">rules name by sha256</text>
+<rect x="304" y="84" width="340" height="446" rx="8" class="b-u" stroke-width="1.4"/>
+<text x="320" y="106" class="h2 c-u">kavachd · identity broker</text>
+<text x="320" y="122" class="xs m">own priority queue for key reports; hashing runs outside the lock</text>
+<rect x="320" y="134" width="308" height="52" rx="8" class="b-n" stroke-width="1.4"/>
+<text x="474" y="155.5" class="h2 c-n" text-anchor="middle">trusted local filesystem?</text>
+<text x="474" y="171.95" class="s m" text-anchor="middle">ext4 xfs btrfs f2fs tmpfs squashfs erofs</text>
+<rect x="320" y="196" width="308" height="52" rx="8" class="b-n" stroke-width="1.4"/>
+<text x="474" y="217.5" class="h2 c-n" text-anchor="middle">backing-device walk</text>
+<text x="474" y="233.95" class="s m" text-anchor="middle">partition → disk, dm/md slaves, btrfs devs, loop</text>
+<path d="M474,186 L474,195" class="ln" stroke-width="1.2" marker-end="url(#ah-ln)"/>
+<rect x="320" y="258" width="308" height="52" rx="8" class="b-n" stroke-width="1.4"/>
+<text x="474" y="279.5" class="h2 c-n" text-anchor="middle">no open writers</text>
+<text x="474" y="295.95" class="s m" text-anchor="middle">i_writecount reported by the LSM, else refuse</text>
+<path d="M474,248 L474,257" class="ln" stroke-width="1.2" marker-end="url(#ah-ln)"/>
+<rect x="320" y="320" width="308" height="52" rx="8" class="b-n" stroke-width="1.4"/>
+<text x="474" y="341.5" class="h2 c-n" text-anchor="middle">SHA-256 of the reported fd</text>
+<text x="474" y="357.95" class="s m" text-anchor="middle">≤4 in parallel; same open, same bytes</text>
+<path d="M474,310 L474,319" class="ln" stroke-width="1.2" marker-end="url(#ah-ln)"/>
+<rect x="320" y="382" width="308" height="52" rx="8" class="b-n" stroke-width="1.4"/>
+<text x="474" y="403.5" class="h2 c-n" text-anchor="middle">match selectors → mask[slot]</text>
+<text x="474" y="419.95" class="s m" text-anchor="middle">exe path and binary = "sha256:…" rules</text>
+<path d="M474,372 L474,381" class="ln" stroke-width="1.2" marker-end="url(#ah-ln)"/>
+<rect x="320" y="444" width="308" height="52" rx="8" class="b-g" stroke-width="1.4"/>
+<text x="474" y="465.5" class="h2 c-g" text-anchor="middle">commit with BPF_EXIST</text>
+<text x="474" y="481.95" class="s m" text-anchor="middle">flag COMMITTED + nonce; cache never re-trusts</text>
+<path d="M474,434 L474,443" class="ln" stroke-width="1.2" marker-end="url(#ah-ln)"/>
+<path d="M264,137 L318,150" class="ln" stroke-width="1.2" marker-end="url(#ah-ln)"/>
+<path d="M264,207 L318,150" class="ln" stroke-width="1.2" marker-end="url(#ah-ln)"/>
+<path d="M264,285 L318,150" class="ln" stroke-width="1.2" marker-end="url(#ah-ln)"/>
+<path d="M264,371 L318,150" class="ln" stroke-width="1.2" marker-end="url(#ah-ln)"/>
+<rect x="24" y="432" width="240" height="58" rx="8" class="b-y" stroke-width="1.4"/>
+<text x="144" y="448.5" class="h2 c-y" text-anchor="middle">not trusted → exe mask 0</text>
+<text x="144" y="464.95" class="s m" text-anchor="middle">FUSE, NFS, memfd, nbd/ublk,</text>
+<text x="144" y="480.95" class="s m" text-anchor="middle">loop of a user-owned image</text>
+<path d="M320,172 L312,172 L312,461 L266,461" class="s-y dash" stroke-width="1.2"/>
+<path d="M320,230 L312,230 L312,461 L266,461" class="s-y dash" stroke-width="1.2" marker-end="url(#ah-y)"/>
+<text x="680" y="96" class="cap c-k">KERNEL</text>
+<rect x="680" y="108" width="256" height="74" rx="8" class="b-k" stroke-width="1.4"/>
+<text x="808" y="132.5" class="h2 c-k" text-anchor="middle">exe_class (HASH map)</text>
+<text x="808" y="148.95" class="s mono t" text-anchor="middle">ExeKey → {mask[2], nonce}</text>
+<text x="808" y="164.95" class="s mono t" text-anchor="middle">{inode ptr, i_ino, s_dev, i_gen}</text>
+<path d="M628,470 L656,470 L656,145 L678,145" class="s-g" stroke-width="1.6" marker-end="url(#ah-g)"/>
+<rect x="680" y="196" width="256" height="74" rx="8" class="b-k" stroke-width="1.4"/>
+<text x="808" y="220.5" class="h2 c-k" text-anchor="middle">socket_connect reads it</text>
+<text x="808" y="236.95" class="s m" text-anchor="middle">key from mm-&gt;exe_file; overlay:</text>
+<text x="808" y="252.95" class="s mono t" text-anchor="middle">find_vma(start_code)-&gt;vm_file</text>
+<path d="M808,182 L808,194" class="s-k" stroke-width="1.3" marker-end="url(#ah-k)"/>
+<rect x="680" y="290" width="256" height="92" rx="8" class="b-r" stroke-width="1.4"/>
+<text x="808" y="307.5" class="h2 c-r" text-anchor="middle">taint (FR-ID-3)</text>
+<text x="808" y="323.95" class="s mono t" text-anchor="middle">file_open(write) path_truncate</text>
+<text x="808" y="339.95" class="s mono t" text-anchor="middle">file_truncate</text>
+<text x="808" y="355.95" class="s m" text-anchor="middle">→ delete exe_class[key]; if the delete</text>
+<text x="808" y="371.95" class="s m" text-anchor="middle">fails, the modification is refused</text>
+<rect x="680" y="396" width="256" height="58" rx="8" class="b-r" stroke-width="1.4"/>
+<text x="808" y="412.5" class="h2 c-r" text-anchor="middle">inode_free_security</text>
+<text x="808" y="428.95" class="s m" text-anchor="middle">→ delete class: a recycled inode</text>
+<text x="808" y="444.95" class="s m" text-anchor="middle">address inherits nothing</text>
+<path d="M936,336 L948,336 L948,140 L938,140" class="s-r" stroke-width="1.3" marker-end="url(#ah-r)"/>
+<path d="M936,425 L952,425 L952,160 L938,160" class="s-r" stroke-width="1.3" marker-end="url(#ah-r)"/>
+<rect x="680" y="468" width="256" height="62" rx="8" class="b-n" stroke-width="1.4"/>
+<text x="808" y="486.5" class="h2 c-n" text-anchor="middle">unclassified window</text>
+<text x="808" y="502.95" class="s m" text-anchor="middle">exe mask 0 → uid/cgroup rules only;</text>
+<text x="808" y="518.95" class="s m" text-anchor="middle">unclassified = "deny" refuses egress</text>
+<rect x="24" y="548" width="912" height="72" rx="8" class="b-n" stroke-width="1.4"/>
+<text x="36" y="571.2" class="s t">Selector i owns bit i (≤ 64). For each dimension d ∈ {exe, uid, cgroup}: d_class[value].mask[slot] = selectors that value satisfies.</text>
+<text x="36" y="587.2" class="s mono t">m = (exe_mask | wild_exe) &amp; (uid_mask | wild_uid) &amp; (cgroup_mask | wild_cgroup) &amp; sel_used</text>
+<text x="36" y="603.2" class="s m">AND across dimensions, OR within a list. A dimension no selector constrains (wild = ~0) is not looked up at all.</text>
+</svg>

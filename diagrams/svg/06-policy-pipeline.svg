@@ -1,0 +1,193 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 590" width="960" height="590" role="img" aria-labelledby="title desc">
+<title id="title">Policy as code: kavach.toml → signed bundle → kernel</title>
+<desc id="desc">Compiled and signed once in CI; verified and hot-swapped on every host. The private key never reaches a host.</desc>
+<style>
+text{font-family:system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif;}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace;}
+.h1{font-size:20px;font-weight:700}
+.h2{font-size:13.5px;font-weight:650}
+.b{font-size:12.5px}
+.s{font-size:11.5px}
+.xs{font-size:10.5px}
+.bold{font-weight:650}
+.cap{font-size:10.5px;font-weight:700;letter-spacing:.08em}
+.dash{stroke-dasharray:5 4}
+.bg{fill:#ffffff;stroke:#d0d7de}
+.bgf{fill:#ffffff}
+.t{fill:#1f2328}
+.m{fill:#59636e}
+.ln{stroke:#6e7781;fill:none}
+.fln{fill:#6e7781}
+.band{fill:none;stroke:#d0d7de}
+.b-k{fill:#fff1e0;stroke:#c2620a}
+.c-k{fill:#8a4600}
+.s-k{stroke:#c2620a;fill:none}
+.f-k{fill:#c2620a}
+.b-u{fill:#e8f1ff;stroke:#2f6fde}
+.c-u{fill:#174ea6}
+.s-u{stroke:#2f6fde;fill:none}
+.f-u{fill:#2f6fde}
+.b-p{fill:#f2ebff;stroke:#7c4ddb}
+.c-p{fill:#5a32a3}
+.s-p{stroke:#7c4ddb;fill:none}
+.f-p{fill:#7c4ddb}
+.b-g{fill:#e6f6ec;stroke:#1f8f4e}
+.c-g{fill:#116329}
+.s-g{stroke:#1f8f4e;fill:none}
+.f-g{fill:#1f8f4e}
+.b-r{fill:#ffebee;stroke:#cf222e}
+.c-r{fill:#a40e26}
+.s-r{stroke:#cf222e;fill:none}
+.f-r{fill:#cf222e}
+.b-n{fill:#f6f8fa;stroke:#8c959f}
+.c-n{fill:#424a53}
+.s-n{stroke:#8c959f;fill:none}
+.f-n{fill:#8c959f}
+.b-y{fill:#fff8c5;stroke:#9a6700}
+.c-y{fill:#7d4e00}
+.s-y{stroke:#9a6700;fill:none}
+.f-y{fill:#9a6700}
+@media (prefers-color-scheme: dark){
+.bg{fill:#0d1117;stroke:#30363d}
+.bgf{fill:#0d1117}
+.t{fill:#e6edf3}
+.m{fill:#9198a1}
+.ln{stroke:#8b949e;fill:none}
+.fln{fill:#8b949e}
+.band{fill:none;stroke:#30363d}
+.b-k{fill:#2a1a08;stroke:#f0883e}
+.c-k{fill:#ffa657}
+.s-k{stroke:#f0883e;fill:none}
+.f-k{fill:#f0883e}
+.b-u{fill:#0c1d36;stroke:#4493f8}
+.c-u{fill:#79c0ff}
+.s-u{stroke:#4493f8;fill:none}
+.f-u{fill:#4493f8}
+.b-p{fill:#1e1533;stroke:#a371f7}
+.c-p{fill:#d2a8ff}
+.s-p{stroke:#a371f7;fill:none}
+.f-p{fill:#a371f7}
+.b-g{fill:#0b2616;stroke:#3fb950}
+.c-g{fill:#7ee787}
+.s-g{stroke:#3fb950;fill:none}
+.f-g{fill:#3fb950}
+.b-r{fill:#2c1013;stroke:#f85149}
+.c-r{fill:#ff7b72}
+.s-r{stroke:#f85149;fill:none}
+.f-r{fill:#f85149}
+.b-n{fill:#161b22;stroke:#6e7681}
+.c-n{fill:#c9d1d9}
+.s-n{stroke:#6e7681;fill:none}
+.f-n{fill:#6e7681}
+.b-y{fill:#2b2208;stroke:#d29922}
+.c-y{fill:#e3b341}
+.s-y{stroke:#d29922;fill:none}
+.f-y{fill:#d29922}
+}
+</style>
+<defs>
+<marker id="ah-k" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-k"/></marker>
+<marker id="ah-u" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-u"/></marker>
+<marker id="ah-p" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-p"/></marker>
+<marker id="ah-g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-g"/></marker>
+<marker id="ah-r" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-r"/></marker>
+<marker id="ah-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-n"/></marker>
+<marker id="ah-y" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-y"/></marker>
+<marker id="ah-ln" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="fln"/></marker>
+</defs>
+<rect x="0.5" y="0.5" width="959" height="589" rx="14" class="bg"/>
+<text x="24" y="38" class="h1 t">Policy as code: kavach.toml → signed bundle → kernel</text>
+<text x="24" y="60" class="s m">Compiled and signed once in CI; verified and hot-swapped on every host. The private key never reaches a host.</text>
+<rect x="24" y="76" width="912" height="236" rx="12" class="band dash" stroke-width="1.2"/>
+<text x="38" y="96" class="cap c-p">BUILD TIME · CI · KAVACH-POLICY + KAVACHCTL</text>
+<rect x="48" y="106" width="200" height="78" rx="8" class="b-p" stroke-width="1.4"/>
+<text x="148" y="124.5" class="h2 c-p" text-anchor="middle">kavach.toml</text>
+<text x="148" y="140.95" class="s m" text-anchor="middle">version, [defaults], [sets]</text>
+<text x="148" y="156.95" class="s m" text-anchor="middle">[[rule]] who + allow/deny/log</text>
+<text x="148" y="172.95" class="s m" text-anchor="middle">ttl, fail, direction</text>
+<rect x="280" y="106" width="200" height="78" rx="8" class="b-p" stroke-width="1.4"/>
+<text x="380" y="132.5" class="h2 c-p" text-anchor="middle">parse</text>
+<text x="380" y="148.95" class="s m" text-anchor="middle">serde, unknown keys rejected</text>
+<text x="380" y="164.95" class="s m" text-anchor="middle">sets: CIDRs, @refs, FQDNs</text>
+<rect x="512" y="106" width="200" height="78" rx="8" class="b-p" stroke-width="1.4"/>
+<text x="612" y="124.5" class="h2 c-p" text-anchor="middle">validate</text>
+<text x="612" y="140.95" class="s m" text-anchor="middle">duplicate ids, bad CIDRs/ports</text>
+<text x="612" y="156.95" class="s m" text-anchor="middle">≤64 selectors · ≤1024 rules</text>
+<text x="612" y="172.95" class="s m" text-anchor="middle">≤4096 set entries · require_ttl</text>
+<rect x="744" y="106" width="200" height="78" rx="8" class="b-p" stroke-width="1.4"/>
+<text x="844" y="124.5" class="h2 c-p" text-anchor="middle">shadow check</text>
+<text x="844" y="140.95" class="s m" text-anchor="middle">covered by an earlier rule →</text>
+<text x="844" y="156.95" class="s m" text-anchor="middle">error (allow_shadowed: warn)</text>
+<text x="844" y="172.95" class="s m" text-anchor="middle">contradictions are errors</text>
+<path d="M250,145 L278,145" class="s-p" stroke-width="1.6" marker-end="url(#ah-p)"/>
+<path d="M482,145 L510,145" class="s-p" stroke-width="1.6" marker-end="url(#ah-p)"/>
+<path d="M714,145 L742,145" class="s-p" stroke-width="1.6" marker-end="url(#ah-p)"/>
+<path d="M844,184 L844,214" class="s-p" stroke-width="1.6" marker-end="url(#ah-p)"/>
+<rect x="744" y="216" width="200" height="78" rx="8" class="b-p" stroke-width="1.4"/>
+<text x="844" y="234.5" class="h2 c-p" text-anchor="middle">compile → IR</text>
+<text x="844" y="250.95" class="s m" text-anchor="middle">CompiledPolicy: selectors →</text>
+<text x="844" y="266.95" class="s m" text-anchor="middle">bits, rules, sets, FQDNs,</text>
+<text x="844" y="282.95" class="s m" text-anchor="middle">source sha256</text>
+<rect x="512" y="216" width="200" height="78" rx="8" class="b-p" stroke-width="1.4"/>
+<text x="612" y="242.5" class="h2 c-p" text-anchor="middle">sign · Ed25519</text>
+<text x="612" y="258.95" class="s m" text-anchor="middle">serial (default unix time),</text>
+<text x="612" y="274.95" class="s m" text-anchor="middle">not_after, fleet, key_id</text>
+<rect x="280" y="216" width="200" height="78" rx="8" class="b-g" stroke-width="1.4"/>
+<text x="380" y="242.5" class="h2 c-g" text-anchor="middle">policy.kvb</text>
+<text x="380" y="258.95" class="s m" text-anchor="middle">KVB1 header + postcard</text>
+<text x="380" y="274.95" class="s m" text-anchor="middle">payload + 64-byte signature</text>
+<rect x="48" y="216" width="200" height="78" rx="8" class="b-n" stroke-width="1.4"/>
+<text x="148" y="234.5" class="h2 c-n" text-anchor="middle">any transport</text>
+<text x="148" y="250.95" class="s m" text-anchor="middle">CI artifact, config mgmt, scp:</text>
+<text x="148" y="266.95" class="s m" text-anchor="middle">integrity comes from the</text>
+<text x="148" y="282.95" class="s m" text-anchor="middle">signature, not the channel</text>
+<path d="M742,255 L714,255" class="s-p" stroke-width="1.6" marker-end="url(#ah-p)"/>
+<path d="M510,255 L482,255" class="s-p" stroke-width="1.6" marker-end="url(#ah-p)"/>
+<path d="M278,255 L250,255" class="s-p" stroke-width="1.6" marker-end="url(#ah-p)"/>
+<path d="M148,294 L148,368" class="ln" stroke-width="1.6" marker-end="url(#ah-ln)"/>
+<rect x="156" y="315.5" width="176.52" height="15.5" rx="3" class="bgf"/>
+<text x="159" y="326" class="xs m" xml:space="preserve" style="white-space:pre">kavachctl apply policy.kvb  →  UDS</text>
+<rect x="24" y="332" width="912" height="238" rx="12" class="band dash" stroke-width="1.2"/>
+<text x="922" y="352" class="cap c-u" text-anchor="end">RUN TIME · KAVACHD ON EVERY HOST</text>
+<rect x="48" y="370" width="200" height="78" rx="8" class="b-u" stroke-width="1.4"/>
+<text x="148" y="388.5" class="h2 c-u" text-anchor="middle">verify</text>
+<text x="148" y="404.95" class="s m" text-anchor="middle">size → key → revocation →</text>
+<text x="148" y="420.95" class="s m" text-anchor="middle">signature → fleet → serial</text>
+<text x="148" y="436.95" class="s m" text-anchor="middle">→ expiry → decode</text>
+<rect x="280" y="370" width="200" height="78" rx="8" class="b-u" stroke-width="1.4"/>
+<text x="380" y="396.5" class="h2 c-u" text-anchor="middle">diff vs active</text>
+<text x="380" y="412.95" class="s m" text-anchor="middle">rules, defaults, sets changed</text>
+<text x="380" y="428.95" class="s m" text-anchor="middle">apply --dry-run stops here</text>
+<rect x="512" y="370" width="200" height="78" rx="8" class="b-u" stroke-width="1.4"/>
+<text x="612" y="396.5" class="h2 c-u" text-anchor="middle">stage inactive slot</text>
+<text x="612" y="412.95" class="s m" text-anchor="middle">uid/cgroup/exe mask[slot],</text>
+<text x="612" y="428.95" class="s m" text-anchor="middle">addr_sets[slot], Policy table</text>
+<rect x="744" y="370" width="200" height="78" rx="8" class="b-k" stroke-width="1.4"/>
+<text x="844" y="396.5" class="h2 c-k" text-anchor="middle">flip</text>
+<text x="844" y="412.95" class="s mono t" text-anchor="middle">policy_gen += 1</text>
+<text x="844" y="428.95" class="s m" text-anchor="middle">one u32 write; slot = gen &amp; 1</text>
+<path d="M250,409 L278,409" class="s-u" stroke-width="1.6" marker-end="url(#ah-u)"/>
+<path d="M482,409 L510,409" class="s-u" stroke-width="1.6" marker-end="url(#ah-u)"/>
+<path d="M714,409 L742,409" class="s-u" stroke-width="1.6" marker-end="url(#ah-u)"/>
+<path d="M844,448 L844,476" class="s-u" stroke-width="1.6" marker-end="url(#ah-u)"/>
+<rect x="744" y="478" width="200" height="78" rx="8" class="b-k" stroke-width="1.4"/>
+<text x="844" y="504.5" class="h2 c-k" text-anchor="middle">drain</text>
+<text x="844" y="520.95" class="s m" text-anchor="middle">update sync_rcu map-of-maps</text>
+<text x="844" y="536.95" class="s m" text-anchor="middle">→ synchronize_rcu()</text>
+<rect x="512" y="478" width="200" height="78" rx="8" class="b-u" stroke-width="1.4"/>
+<text x="612" y="504.5" class="h2 c-u" text-anchor="middle">persist + audit</text>
+<text x="612" y="520.95" class="s mono t" text-anchor="middle">/var/lib/kavach/active.kvb</text>
+<text x="612" y="536.95" class="s m" text-anchor="middle">audit record policy_apply</text>
+<rect x="280" y="478" width="200" height="78" rx="8" class="b-u" stroke-width="1.4"/>
+<text x="380" y="504.5" class="h2 c-u" text-anchor="middle">prewarm identity</text>
+<text x="380" y="520.95" class="s m" text-anchor="middle">key reports classify policy-</text>
+<text x="380" y="536.95" class="s m" text-anchor="middle">named binaries (≤3 s)</text>
+<rect x="48" y="478" width="200" height="78" rx="8" class="b-g" stroke-width="1.4"/>
+<text x="148" y="496.5" class="h2 c-g" text-anchor="middle">result</text>
+<text x="148" y="512.95" class="s bold c-g" text-anchor="middle">flip + drain: 20–100 µs</text>
+<text x="148" y="528.95" class="s m" text-anchor="middle">no reload, no re-attach,</text>
+<text x="148" y="544.95" class="s m" text-anchor="middle">no dropped allowed flows</text>
+<path d="M742,517 L714,517" class="s-u" stroke-width="1.6" marker-end="url(#ah-u)"/>
+<path d="M510,517 L482,517" class="s-u" stroke-width="1.6" marker-end="url(#ah-u)"/>
+<path d="M278,517 L250,517" class="s-u" stroke-width="1.6" marker-end="url(#ah-u)"/>
+</svg>

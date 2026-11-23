@@ -1,0 +1,163 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 640" width="960" height="640" role="img" aria-labelledby="title desc">
+<title id="title">Failure semantics</title>
+<desc id="desc">What happens to enforcement when something goes wrong. The kernel side never depends on the daemon being alive.</desc>
+<style>
+text{font-family:system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif;}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace;}
+.h1{font-size:20px;font-weight:700}
+.h2{font-size:13.5px;font-weight:650}
+.b{font-size:12.5px}
+.s{font-size:11.5px}
+.xs{font-size:10.5px}
+.bold{font-weight:650}
+.cap{font-size:10.5px;font-weight:700;letter-spacing:.08em}
+.dash{stroke-dasharray:5 4}
+.bg{fill:#ffffff;stroke:#d0d7de}
+.bgf{fill:#ffffff}
+.t{fill:#1f2328}
+.m{fill:#59636e}
+.ln{stroke:#6e7781;fill:none}
+.fln{fill:#6e7781}
+.band{fill:none;stroke:#d0d7de}
+.b-k{fill:#fff1e0;stroke:#c2620a}
+.c-k{fill:#8a4600}
+.s-k{stroke:#c2620a;fill:none}
+.f-k{fill:#c2620a}
+.b-u{fill:#e8f1ff;stroke:#2f6fde}
+.c-u{fill:#174ea6}
+.s-u{stroke:#2f6fde;fill:none}
+.f-u{fill:#2f6fde}
+.b-p{fill:#f2ebff;stroke:#7c4ddb}
+.c-p{fill:#5a32a3}
+.s-p{stroke:#7c4ddb;fill:none}
+.f-p{fill:#7c4ddb}
+.b-g{fill:#e6f6ec;stroke:#1f8f4e}
+.c-g{fill:#116329}
+.s-g{stroke:#1f8f4e;fill:none}
+.f-g{fill:#1f8f4e}
+.b-r{fill:#ffebee;stroke:#cf222e}
+.c-r{fill:#a40e26}
+.s-r{stroke:#cf222e;fill:none}
+.f-r{fill:#cf222e}
+.b-n{fill:#f6f8fa;stroke:#8c959f}
+.c-n{fill:#424a53}
+.s-n{stroke:#8c959f;fill:none}
+.f-n{fill:#8c959f}
+.b-y{fill:#fff8c5;stroke:#9a6700}
+.c-y{fill:#7d4e00}
+.s-y{stroke:#9a6700;fill:none}
+.f-y{fill:#9a6700}
+@media (prefers-color-scheme: dark){
+.bg{fill:#0d1117;stroke:#30363d}
+.bgf{fill:#0d1117}
+.t{fill:#e6edf3}
+.m{fill:#9198a1}
+.ln{stroke:#8b949e;fill:none}
+.fln{fill:#8b949e}
+.band{fill:none;stroke:#30363d}
+.b-k{fill:#2a1a08;stroke:#f0883e}
+.c-k{fill:#ffa657}
+.s-k{stroke:#f0883e;fill:none}
+.f-k{fill:#f0883e}
+.b-u{fill:#0c1d36;stroke:#4493f8}
+.c-u{fill:#79c0ff}
+.s-u{stroke:#4493f8;fill:none}
+.f-u{fill:#4493f8}
+.b-p{fill:#1e1533;stroke:#a371f7}
+.c-p{fill:#d2a8ff}
+.s-p{stroke:#a371f7;fill:none}
+.f-p{fill:#a371f7}
+.b-g{fill:#0b2616;stroke:#3fb950}
+.c-g{fill:#7ee787}
+.s-g{stroke:#3fb950;fill:none}
+.f-g{fill:#3fb950}
+.b-r{fill:#2c1013;stroke:#f85149}
+.c-r{fill:#ff7b72}
+.s-r{stroke:#f85149;fill:none}
+.f-r{fill:#f85149}
+.b-n{fill:#161b22;stroke:#6e7681}
+.c-n{fill:#c9d1d9}
+.s-n{stroke:#6e7681;fill:none}
+.f-n{fill:#6e7681}
+.b-y{fill:#2b2208;stroke:#d29922}
+.c-y{fill:#e3b341}
+.s-y{stroke:#d29922;fill:none}
+.f-y{fill:#d29922}
+}
+</style>
+<defs>
+<marker id="ah-k" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-k"/></marker>
+<marker id="ah-u" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-u"/></marker>
+<marker id="ah-p" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-p"/></marker>
+<marker id="ah-g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-g"/></marker>
+<marker id="ah-r" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-r"/></marker>
+<marker id="ah-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-n"/></marker>
+<marker id="ah-y" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-y"/></marker>
+<marker id="ah-ln" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="fln"/></marker>
+</defs>
+<rect x="0.5" y="0.5" width="959" height="639" rx="14" class="bg"/>
+<text x="24" y="38" class="h1 t">Failure semantics</text>
+<text x="24" y="60" class="s m">What happens to enforcement when something goes wrong. The kernel side never depends on the daemon being alive.</text>
+<rect x="24" y="84" width="448" height="122" rx="8" class="b-n" stroke-width="1.4"/>
+<rect x="24" y="84" width="6" height="122" rx="3" class="f-g" stroke-width="1.4"/>
+<text x="44" y="112" class="h2 t">kavachd crashes or stops</text>
+<rect x="336" y="96" width="122" height="24" rx="12" class="b-g" stroke-width="1.4"/>
+<text x="397" y="111.8" class="xs bold c-g" text-anchor="middle">keeps enforcing</text>
+<text x="44" y="140" class="s m">programs, links and maps stay pinned in bpffs;</text>
+<text x="44" y="159" class="s m">the last policy keeps enforcing (verified live).</text>
+<text x="44" y="178" class="s m">systemd: KillMode=process, Restart=always 1 s</text>
+<rect x="488" y="84" width="448" height="122" rx="8" class="b-n" stroke-width="1.4"/>
+<rect x="488" y="84" width="6" height="122" rx="3" class="f-g" stroke-width="1.4"/>
+<text x="508" y="112" class="h2 t">kavachd restarts</text>
+<rect x="800" y="96" width="122" height="24" rx="12" class="b-g" stroke-width="1.4"/>
+<text x="861" y="111.8" class="xs bold c-g" text-anchor="middle">no gap</text>
+<text x="508" y="140" class="s m">re-adopts the pins, continues the generation</text>
+<text x="508" y="159" class="s m">counter, re-stages active.kvb, reconciles the</text>
+<text x="508" y="178" class="s m">exe cache (only rows whose nonce matches)</text>
+<rect x="24" y="220" width="448" height="122" rx="8" class="b-n" stroke-width="1.4"/>
+<rect x="24" y="220" width="6" height="122" rx="3" class="f-y" stroke-width="1.4"/>
+<text x="44" y="248" class="h2 t">rule says punt, no L7 consumer</text>
+<rect x="336" y="232" width="122" height="24" rx="12" class="b-y" stroke-width="1.4"/>
+<text x="397" y="247.8" class="xs bold c-y" text-anchor="middle">per-rule</text>
+<text x="44" y="276" class="s m">until the v0.4 gateway, the rule's fail mode</text>
+<text x="44" y="295" class="s m">decides: fail = "closed" → drop,</text>
+<text x="44" y="314" class="s m">fail = "open" → log (allow + event)</text>
+<rect x="488" y="220" width="448" height="122" rx="8" class="b-n" stroke-width="1.4"/>
+<rect x="488" y="220" width="6" height="122" rx="3" class="f-g" stroke-width="1.4"/>
+<text x="508" y="248" class="h2 t">bad bundle</text>
+<rect x="800" y="232" width="122" height="24" rx="12" class="b-g" stroke-width="1.4"/>
+<text x="861" y="247.8" class="xs bold c-g" text-anchor="middle">unchanged</text>
+<text x="508" y="276" class="s m">bad signature, rollback, wrong fleet, expired,</text>
+<text x="508" y="295" class="s m">revoked key: rejected before decoding;</text>
+<text x="508" y="314" class="s m">active policy untouched, audit record + error</text>
+<rect x="24" y="356" width="448" height="122" rx="8" class="b-n" stroke-width="1.4"/>
+<rect x="24" y="356" width="6" height="122" rx="3" class="f-y" stroke-width="1.4"/>
+<text x="44" y="384" class="h2 t">active bundle passes not_after</text>
+<rect x="336" y="368" width="122" height="24" rx="12" class="b-y" stroke-width="1.4"/>
+<text x="397" y="383.8" class="xs bold c-y" text-anchor="middle">keeps enforcing</text>
+<text x="44" y="412" class="s m">still enforced, flagged in status and metrics;</text>
+<text x="44" y="431" class="s m">replace it with a newer signed bundle</text>
+<rect x="488" y="356" width="448" height="122" rx="8" class="b-n" stroke-width="1.4"/>
+<rect x="488" y="356" width="6" height="122" rx="3" class="f-y" stroke-width="1.4"/>
+<text x="508" y="384" class="h2 t">binary not yet classified</text>
+<rect x="800" y="368" width="122" height="24" rx="12" class="b-y" stroke-width="1.4"/>
+<text x="861" y="383.8" class="xs bold c-y" text-anchor="middle">policy choice</text>
+<text x="508" y="412" class="s m">exe mask 0 → only uid/cgroup selectors match;</text>
+<text x="508" y="431" class="s m">unclassified = "deny" refuses its egress until</text>
+<text x="508" y="450" class="s m">kavachd has hashed it (usually milliseconds)</text>
+<rect x="24" y="492" width="448" height="122" rx="8" class="b-n" stroke-width="1.4"/>
+<rect x="24" y="492" width="6" height="122" rx="3" class="f-y" stroke-width="1.4"/>
+<text x="44" y="520" class="h2 t">BPF LSM not in the active LSM list</text>
+<rect x="336" y="504" width="122" height="24" rx="12" class="b-y" stroke-width="1.4"/>
+<text x="397" y="519.8" class="xs bold c-y" text-anchor="middle">degraded</text>
+<text x="44" y="548" class="s m">identity egress reported as off (status,</text>
+<text x="44" y="567" class="s m">kavachctl doctor); XDP and TC still enforce</text>
+<rect x="488" y="492" width="448" height="122" rx="8" class="b-n" stroke-width="1.4"/>
+<rect x="488" y="492" width="6" height="122" rx="3" class="f-r" stroke-width="1.4"/>
+<text x="508" y="520" class="h2 t">kavachctl kill-switch --yes (root)</text>
+<rect x="800" y="504" width="122" height="24" rx="12" class="b-r" stroke-width="1.4"/>
+<text x="861" y="519.8" class="xs bold c-r" text-anchor="middle">all off</text>
+<text x="508" y="548" class="s m">detach every link, unpin everything, remove</text>
+<text x="508" y="567" class="s m">the pin dir: no programs, links or pins remain</text>
+<text x="508" y="586" class="s m">(NFR-REL-2): the deliberate off switch.</text>
+</svg>

@@ -1,0 +1,170 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 800" width="960" height="800" role="img" aria-labelledby="title desc">
+<title id="title">Ingress: NIC → XDP → TC → socket</title>
+<desc id="desc">Every verdict point an inbound packet can hit, in order. ↓ continue, → verdict.</desc>
+<style>
+text{font-family:system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif;}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace;}
+.h1{font-size:20px;font-weight:700}
+.h2{font-size:13.5px;font-weight:650}
+.b{font-size:12.5px}
+.s{font-size:11.5px}
+.xs{font-size:10.5px}
+.bold{font-weight:650}
+.cap{font-size:10.5px;font-weight:700;letter-spacing:.08em}
+.dash{stroke-dasharray:5 4}
+.bg{fill:#ffffff;stroke:#d0d7de}
+.bgf{fill:#ffffff}
+.t{fill:#1f2328}
+.m{fill:#59636e}
+.ln{stroke:#6e7781;fill:none}
+.fln{fill:#6e7781}
+.band{fill:none;stroke:#d0d7de}
+.b-k{fill:#fff1e0;stroke:#c2620a}
+.c-k{fill:#8a4600}
+.s-k{stroke:#c2620a;fill:none}
+.f-k{fill:#c2620a}
+.b-u{fill:#e8f1ff;stroke:#2f6fde}
+.c-u{fill:#174ea6}
+.s-u{stroke:#2f6fde;fill:none}
+.f-u{fill:#2f6fde}
+.b-p{fill:#f2ebff;stroke:#7c4ddb}
+.c-p{fill:#5a32a3}
+.s-p{stroke:#7c4ddb;fill:none}
+.f-p{fill:#7c4ddb}
+.b-g{fill:#e6f6ec;stroke:#1f8f4e}
+.c-g{fill:#116329}
+.s-g{stroke:#1f8f4e;fill:none}
+.f-g{fill:#1f8f4e}
+.b-r{fill:#ffebee;stroke:#cf222e}
+.c-r{fill:#a40e26}
+.s-r{stroke:#cf222e;fill:none}
+.f-r{fill:#cf222e}
+.b-n{fill:#f6f8fa;stroke:#8c959f}
+.c-n{fill:#424a53}
+.s-n{stroke:#8c959f;fill:none}
+.f-n{fill:#8c959f}
+.b-y{fill:#fff8c5;stroke:#9a6700}
+.c-y{fill:#7d4e00}
+.s-y{stroke:#9a6700;fill:none}
+.f-y{fill:#9a6700}
+@media (prefers-color-scheme: dark){
+.bg{fill:#0d1117;stroke:#30363d}
+.bgf{fill:#0d1117}
+.t{fill:#e6edf3}
+.m{fill:#9198a1}
+.ln{stroke:#8b949e;fill:none}
+.fln{fill:#8b949e}
+.band{fill:none;stroke:#30363d}
+.b-k{fill:#2a1a08;stroke:#f0883e}
+.c-k{fill:#ffa657}
+.s-k{stroke:#f0883e;fill:none}
+.f-k{fill:#f0883e}
+.b-u{fill:#0c1d36;stroke:#4493f8}
+.c-u{fill:#79c0ff}
+.s-u{stroke:#4493f8;fill:none}
+.f-u{fill:#4493f8}
+.b-p{fill:#1e1533;stroke:#a371f7}
+.c-p{fill:#d2a8ff}
+.s-p{stroke:#a371f7;fill:none}
+.f-p{fill:#a371f7}
+.b-g{fill:#0b2616;stroke:#3fb950}
+.c-g{fill:#7ee787}
+.s-g{stroke:#3fb950;fill:none}
+.f-g{fill:#3fb950}
+.b-r{fill:#2c1013;stroke:#f85149}
+.c-r{fill:#ff7b72}
+.s-r{stroke:#f85149;fill:none}
+.f-r{fill:#f85149}
+.b-n{fill:#161b22;stroke:#6e7681}
+.c-n{fill:#c9d1d9}
+.s-n{stroke:#6e7681;fill:none}
+.f-n{fill:#6e7681}
+.b-y{fill:#2b2208;stroke:#d29922}
+.c-y{fill:#e3b341}
+.s-y{stroke:#d29922;fill:none}
+.f-y{fill:#d29922}
+}
+</style>
+<defs>
+<marker id="ah-k" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-k"/></marker>
+<marker id="ah-u" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-u"/></marker>
+<marker id="ah-p" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-p"/></marker>
+<marker id="ah-g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-g"/></marker>
+<marker id="ah-r" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-r"/></marker>
+<marker id="ah-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-n"/></marker>
+<marker id="ah-y" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-y"/></marker>
+<marker id="ah-ln" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="fln"/></marker>
+</defs>
+<rect x="0.5" y="0.5" width="959" height="799" rx="14" class="bg"/>
+<text x="24" y="38" class="h1 t">Ingress: NIC → XDP → TC → socket</text>
+<text x="24" y="60" class="s m">Every verdict point an inbound packet can hit, in order. ↓ continue, → verdict.</text>
+<rect x="40" y="80" width="440" height="32" rx="8" class="b-n" stroke-width="1.4"/>
+<text x="52" y="99.2" class="s t">NIC receives a frame (driver RX ring)</text>
+<rect x="24" y="126" width="912" height="196" rx="12" class="band dash" stroke-width="1.2"/>
+<text x="922" y="146" class="cap c-k" text-anchor="end">XDP · KAVACH_XDP · BEFORE AN SK_BUFF EXISTS</text>
+<rect x="40" y="156" width="440" height="34" rx="8" class="b-k" stroke-width="1.4"/>
+<text x="52" y="176.2" class="s t">parse: Eth, ≤2 VLAN tags, IPv4 + options, ≤4 IPv6 ext headers</text>
+<path d="M480,173 L518,173" class="ln" stroke-width="1.6" marker-end="url(#ah-ln)"/>
+<rect x="520" y="160" width="416" height="26" rx="13" class="b-n" stroke-width="1.4"/>
+<text x="532" y="176" class="xs t">unparseable → XDP_PASS, counted (the stack decides)</text>
+<rect x="40" y="206" width="440" height="34" rx="8" class="b-k" stroke-width="1.4"/>
+<text x="52" y="226.2" class="s t">blocklist: LPM lookup of the source (v4 mapped into v6)</text>
+<path d="M480,223 L518,223" class="s-r" stroke-width="1.6" marker-end="url(#ah-r)"/>
+<rect x="520" y="210" width="416" height="26" rx="13" class="b-r" stroke-width="1.4"/>
+<text x="532" y="226" class="xs t">live entry → XDP_DROP · per-reason stats, sampled event</text>
+<path d="M74,190 L74,204" class="ln" stroke-width="1.3" marker-end="url(#ah-ln)"/>
+<rect x="40" y="256" width="440" height="34" rx="8" class="b-k" stroke-width="1.4"/>
+<text x="52" y="276.2" class="s t">GCRA rate limit: one state per source, IPv6 per /64</text>
+<path d="M480,273 L518,273" class="s-r" stroke-width="1.6" marker-end="url(#ah-r)"/>
+<rect x="520" y="260" width="416" height="26" rx="13" class="b-r" stroke-width="1.4"/>
+<text x="532" y="276" class="xs t">over pps + burst → XDP_DROP (rate_buckets is LRU)</text>
+<path d="M74,240 L74,254" class="ln" stroke-width="1.3" marker-end="url(#ah-ln)"/>
+<path d="M74,112 L74,154" class="ln" stroke-width="1.3" marker-end="url(#ah-ln)"/>
+<path d="M74,290 L74,358" class="ln" stroke-width="1.3" marker-end="url(#ah-ln)"/>
+<rect x="74" y="327.5" width="180.93" height="15.5" rx="3" class="bgf"/>
+<text x="77" y="338" class="xs m">XDP_PASS → sk_buff, kernel stack</text>
+<rect x="24" y="340" width="912" height="384" rx="12" class="band dash" stroke-width="1.2"/>
+<text x="922" y="360" class="cap c-k" text-anchor="end">TC INGRESS · KAVACH_TC_INGRESS · FLOW_CACHE (LRU, 256K)</text>
+<rect x="40" y="372" width="440" height="34" rx="8" class="b-k" stroke-width="1.4"/>
+<text x="52" y="392.2" class="s t">flow_cache hit with REPLY flag (return traffic of our own flow)</text>
+<path d="M480,389 L518,389" class="s-g" stroke-width="1.6" marker-end="url(#ah-g)"/>
+<rect x="520" y="376" width="416" height="26" rx="13" class="b-g" stroke-width="1.4"/>
+<text x="532" y="392" class="xs t">cached verdict (re-judged at egress after a flip)</text>
+<rect x="40" y="422" width="440" height="34" rx="8" class="b-k" stroke-width="1.4"/>
+<text x="52" y="442.2" class="s t">no policy loaded</text>
+<path d="M480,439 L518,439" class="s-g" stroke-width="1.6" marker-end="url(#ah-g)"/>
+<rect x="520" y="426" width="416" height="26" rx="13" class="b-g" stroke-width="1.4"/>
+<text x="532" y="442" class="xs t">pass · observe only</text>
+<path d="M74,406 L74,420" class="ln" stroke-width="1.3" marker-end="url(#ah-ln)"/>
+<rect x="40" y="472" width="440" height="34" rx="8" class="b-k" stroke-width="1.4"/>
+<text x="52" y="492.2" class="s t">ingress-flow hit whose generation is current</text>
+<path d="M480,489 L518,489" class="ln" stroke-width="1.6" marker-end="url(#ah-ln)"/>
+<rect x="520" y="476" width="416" height="26" rx="13" class="b-n" stroke-width="1.4"/>
+<text x="532" y="492" class="xs t">cached verdict · pass or TC_ACT_SHOT</text>
+<path d="M74,456 L74,470" class="ln" stroke-width="1.3" marker-end="url(#ah-ln)"/>
+<rect x="40" y="522" width="440" height="34" rx="8" class="b-k" stroke-width="1.4"/>
+<text x="52" y="542.2" class="s t">always-pass list: ICMP errors, ICMPv6 non-echo, DHCP, fragments</text>
+<path d="M480,539 L518,539" class="s-g" stroke-width="1.6" marker-end="url(#ah-g)"/>
+<rect x="520" y="526" width="416" height="26" rx="13" class="b-g" stroke-width="1.4"/>
+<text x="532" y="542" class="xs t">pass · never dropped</text>
+<path d="M74,506 L74,520" class="ln" stroke-width="1.3" marker-end="url(#ah-ln)"/>
+<rect x="40" y="572" width="440" height="34" rx="8" class="b-k" stroke-width="1.4"/>
+<text x="52" y="592.2" class="s t">mid-stream TCP (not SYN) with no flow state</text>
+<path d="M480,589 L518,589" class="ln" stroke-width="1.6" marker-end="url(#ah-ln)"/>
+<rect x="520" y="576" width="416" height="26" rx="13" class="b-y" stroke-width="1.4"/>
+<text x="532" y="592" class="xs t">pass (stack resets it) · strict_ingress → drop</text>
+<path d="M74,556 L74,570" class="ln" stroke-width="1.3" marker-end="url(#ah-ln)"/>
+<rect x="40" y="622" width="440" height="48" rx="8" class="b-k" stroke-width="1.4"/>
+<text x="52" y="641.2" class="s t">new flow: kv_evaluate(ingress, mask 0, src, dport, proto)</text>
+<text x="52" y="657.2" class="s t">first match wins, else default[ingress]; result cached with gen</text>
+<path d="M480,646 L518,646" class="s-r" stroke-width="1.6" marker-end="url(#ah-r)"/>
+<rect x="520" y="625" width="416" height="42" rx="8" class="b-r" stroke-width="1.4"/>
+<text x="532" y="641.5" class="xs t">Drop → TC_ACT_SHOT + event</text>
+<text x="532" y="656.5" class="xs t">Log → pass + event · Allow → pass</text>
+<path d="M74,606 L74,620" class="ln" stroke-width="1.3" marker-end="url(#ah-ln)"/>
+<rect x="40" y="742" width="440" height="32" rx="8" class="b-u" stroke-width="1.4"/>
+<text x="52" y="761.2" class="s t">socket → application</text>
+<path d="M74,670 L74,740" class="ln" stroke-width="1.3" marker-end="url(#ah-ln)"/>
+<text x="520" y="760" class="xs m">loopback sources skip the scan unless loopback_bypass = false</text>
+<text x="520" y="776" class="xs m">ingress mask is 0 in v0.3: only identity-agnostic ingress rules match</text>
+</svg>
