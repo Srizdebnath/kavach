@@ -1585,7 +1585,7 @@ impl Drop for TestCgroup {
 #[test]
 #[ignore = "needs root + BPF LSM: scripts/priv-test.sh"]
 fn gateway_redirects_punted_connects_and_records_orig_dst() {
-    use kavach_gateway::orig::OrigDst;
+    use kavach_gateway::OrigDst;
     use std::io::Read;
     use std::time::{Duration, Instant};
     let lsms = std::fs::read_to_string("/sys/kernel/security/lsm").unwrap_or_default();
