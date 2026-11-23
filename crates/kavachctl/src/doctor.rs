@@ -30,6 +30,9 @@ fn version(rel: &str) -> (u32, u32) {
 }
 
 pub fn checks() -> Vec<Check> {
+    // PROC_PID_INIT_INO: the initial PID namespace's fixed inode.
+    let host_pidns = std::fs::read_link("/proc/self/ns/pid")
+        .is_ok_and(|l| l.to_string_lossy() == "pid:[4026531836]");
     let rel = kernel_release();
     let (maj, min) = version(&rel);
     let lsm = std::fs::read_to_string("/sys/kernel/security/lsm").unwrap_or_default();
@@ -73,6 +76,16 @@ pub fn checks() -> Vec<Check> {
             fix: "identity egress needs it: add `lsm=<current list>,bpf` to the kernel command \
                   line (GRUB: GRUB_CMDLINE_LINUX in /etc/default/grub, then update-grub / \
                   grub-mkconfig; systemd-boot: /etc/kernel/cmdline), then reboot",
+        },
+        Check {
+            name: "host PID namespace",
+            ok: host_pidns,
+            required: false,
+            detail: std::fs::read_link("/proc/self/ns/pid")
+                .map(|l| l.display().to_string())
+                .unwrap_or_else(|_| "unknown".into()),
+            fix: "identity egress needs kavachd in the host PID namespace: run it on the host, \
+                  or in a container with `--pid=host`",
         },
         Check {
             name: "bpffs mounted",

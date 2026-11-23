@@ -35,6 +35,18 @@ pub fn layout_fingerprint() -> u64 {
     h
 }
 
+/// Inode of the initial PID namespace (`PROC_PID_INIT_INO`, fixed by the kernel ABI).
+pub const INIT_PID_NS_INO: u64 = 0xEFFF_FFFC;
+
+/// Whether kavachd runs in the host's (initial) PID namespace. Identity egress needs it: the
+/// BPF programs report host PIDs and match the key request on the host TID, so inside a
+/// container (without `--pid=host`) no executable could ever be classified.
+pub fn in_initial_pid_ns() -> bool {
+    std::fs::read_link("/proc/self/ns/pid")
+        .map(|l| l.to_string_lossy() == format!("pid:[{INIT_PID_NS_INO}]"))
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod abi_tests {
     #[test]
@@ -336,6 +348,10 @@ impl Kernel {
             && dir.exists()
         {
             std::fs::remove_dir_all(dir).with_context(|| format!("removing {}", dir.display()))?;
+            // `/sys/fs/bpf/kavach` itself, once no other ABI version is pinned below it.
+            if let Some(parent) = dir.parent() {
+                let _ = std::fs::remove_dir(parent);
+            }
         }
         drop(self.bpf); // closes program/link fds; unpinned links detach
         Ok(())

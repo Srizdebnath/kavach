@@ -523,6 +523,9 @@ fn run(cli: Cli) -> Result<()> {
                         rep.serial, rep.generation, rep.rules, rep.swap_micros
                     );
                 }
+                for w in &rep.warnings {
+                    eprintln!("warning: {w}");
+                }
             }
         }
         Cmd::Diff { policy } => {

@@ -374,6 +374,13 @@ impl Daemon {
         report.swap_micros = self.stage(policy.clone(), v.header.serial)?;
         report.generation = self.generation;
         report.warnings.extend(self.prewarm(&policy));
+        let identity_rules = policy.rules.iter().filter(|r| r.sel != 0).count();
+        if identity_rules > 0 && !self.k()?.lsm {
+            report.warnings.push(format!(
+                "BPF-LSM is not attached: {identity_rules} identity (`who`) rule(s) cannot match; \
+                 see `kavachctl doctor`"
+            ));
+        }
         self.scan_kick.notify_one();
         self.expired = false;
         persist(&self.cfg.state_dir, bytes)?;

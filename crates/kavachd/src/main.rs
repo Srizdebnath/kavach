@@ -77,7 +77,13 @@ async fn main() -> Result<()> {
             }
         }
     }
-    if cfg.lsm {
+    if cfg.lsm && !kavachd::kernel::in_initial_pid_ns() {
+        error!(
+            "BPF-LSM not attached: kavachd is not in the host PID namespace, so it could not \
+             classify any executable and identity rules would never match. Run kavachd on the \
+             host or with `--pid=host` (XDP and TC enforcement are unaffected)"
+        );
+    } else if cfg.lsm {
         match k.attach_lsm() {
             Ok(()) => info!("BPF-LSM identity egress attached"),
             Err(e) => {

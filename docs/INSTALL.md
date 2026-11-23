@@ -240,6 +240,7 @@ want them gone.
 | `apply`: `bundle is for fleet …, this host is in fleet …` | sign with `--fleet <name>` that matches `fleet` in `kavachd.toml` |
 | XDP attached in `generic` mode | the NIC driver lacks native XDP. Correct, just slower. Force with `xdp_mode = "native"` to fail instead |
 | a binary rule does not match | `kavachctl explain --binary /path ...`. A file on FUSE/NFS/overlay-without-backing or a user-writable loop image is never given an identity (by design) |
+| `doctor`: `warn host PID namespace`, or `apply` warns identity rules cannot match | kavachd runs in a container's PID namespace. Run it on the host, or with `docker run --pid=host --privileged …` |
 | `kavachctl: permission denied` | run as root or join `control_group` |
 | logs | `journalctl -u kavachd`, raise detail with `Environment=RUST_LOG=kavachd=debug` in a drop-in |
 

@@ -37,9 +37,15 @@ provenance.
 - **Kernels before 6.6: the TC filter detached right after attaching** (legacy clsact path).
 - Kernel 6.1: LSM attach no longer fails on the missing `file_truncate` hook (6.2+);
   `path_truncate` covers truncation there.
+- **Identity rules silently never matched when kavachd ran in a container** without
+  `--pid=host` (BPF reports host PIDs). kavachd now refuses to attach the BPF LSM there with a
+  clear error, `doctor` checks the PID namespace, and `apply` warns when identity rules cannot
+  match.
+- `kavachctl apply` now prints the daemon's warnings (they were dropped before).
 - **Uninstall left enforcement attached.** Package removal stops kavachd before running the
   kill-switch, which needed the daemon. `kavachctl kill-switch --yes` now removes every pin
-  under `/sys/fs/bpf/kavach` itself when the daemon is not running.
+  under `/sys/fs/bpf/kavach` itself when the daemon is not running, and no empty pin
+  directory is left behind.
 - Upgrades across an ABI change retire the old version's programs only after the new ones enforce.
 - Identity: executables in overlay (container) filesystems are keyed by their real file; no
   first-run window for hash-named binaries in strict mode; every block-device layer under a
