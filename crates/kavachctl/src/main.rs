@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 mod doctor;
+mod top;
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::IpAddr;
@@ -58,6 +59,12 @@ enum Cmd {
         /// Only show these kinds (xdp_drop, egress, ingress, exec, exe_tainted, anomaly).
         #[arg(long)]
         kind: Vec<String>,
+    },
+    /// Live dashboard: verdict rates, top denied identities, rules hit, recent events.
+    Top {
+        /// Refresh interval (e.g. 1s, 500ms, 2).
+        #[arg(long, default_value = "1s", value_parser = top::parse_interval)]
+        interval: std::time::Duration,
     },
     /// Validate kavach.toml and print diagnostics (no key needed).
     Compile { policy: PathBuf },
@@ -369,12 +376,7 @@ fn run(cli: Cli) -> Result<()> {
                         if cli.json {
                             println!("{}", serde_json::to_string(&e)?);
                         } else {
-                            let flow = match (&e.src, &e.dst) {
-                                (Some(s), Some(d)) => format!("{s}:{} → {d}:{}", e.sport, e.dport),
-                                (None, Some(d)) => format!("→ {d}:{}", e.dport),
-                                (Some(s), None) => format!("{s}:{}", e.sport),
-                                _ => String::new(),
-                            };
+                            let flow = top::format_flow(&e);
                             let rule = e.rule.clone().unwrap_or_else(|| {
                                 if e.rule_id == 0 {
                                     "default".into()
@@ -406,6 +408,7 @@ fn run(cli: Cli) -> Result<()> {
                 }
             }
         }
+        Cmd::Top { interval } => top::run(sock, interval)?,
         Cmd::Doctor => {
             if !doctor::run() {
                 bail!("a required check failed");

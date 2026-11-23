@@ -1,0 +1,32 @@
+kavach top  kavachd 0.3.0  kernel 6.12.1  up 1h02m  │  policy serial 42  gen 2  rules 5
+attach  xdp eth0(native)  tc eth0  lsm on  │  cache hit 0/s miss 0/s  │  events 8 (lost 0, lagged 0)
+every 1.0s
+┌ programs [sort: drops] ──────────────────────────────────────────────────────────────────────────────────────────────┐
+│program     attach                                                     pass         drop         pass/s     drop/s    │
+│xdp         eth0(native)                                               300          60           100.0      20.0      │
+│tc-egress   eth0                                                       600          30           200.0      10.0      │
+│tc-ingress  eth0                                                       0            0            0.0        0.0       │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌ top denied [sort: drops] ────────────────────────────────────────────┐┌ rules hit [sort: drops] ─────────────────────┐
+│exe                                    uid    cgroup   flows   drops  ││rule                           hits    drops  │
+│curl                                   1000   7        3       3      ││deny-exfil                     3       3      │
+│[xdp] 203.0.113.9                      -      -        1       1      ││xdp blocklist                  1       1      │
+│nginx                                  33     7        3       0      ││web-out                        2       0      │
+│                                                                      ││default                        1       0      │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+└──────────────────────────────────────────────────────────────────────┘└──────────────────────────────────────────────┘
+┌ recent events (newest first) ────────────────────────────────────────────────────────────────────────────────────────┐
+│     0.000 exec        -                                                  bash pid=9 uid=0                            │
+│    12.345 xdp_drop    drop  203.0.113.9:40000 → 1.1.1.1:443              rule=xdp blocklist                          │
+│    12.345 egress      allow 10.0.0.2:40000 → 1.1.1.1:443                 nginx pid=133 uid=33 rule=default           │
+│    12.345 egress      allow 10.0.0.2:40000 → 1.1.1.1:443                 nginx pid=133 uid=33 rule=web-out           │
+│    12.345 egress      allow 10.0.0.2:40000 → 1.1.1.1:443                 nginx pid=133 uid=33 rule=web-out           │
+│    12.345 egress      drop  10.0.0.2:40000 → 1.1.1.1:443                 curl pid=1100 uid=1000 rule=deny-exfil      │
+│    12.345 egress      drop  10.0.0.2:40000 → 1.1.1.1:443                 curl pid=1100 uid=1000 rule=deny-exfil      │
+│    12.345 egress      drop  10.0.0.2:40000 → 1.1.1.1:443                 curl pid=1100 uid=1000 rule=deny-exfil      │
+│                                                                                                                      │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+q quit  p pause  tab/shift-tab switch pane  s sort pane
