@@ -76,8 +76,10 @@ jobs:
           sudo apt-get install -y ./dist/*.deb
           kavachctl --version || kavachctl --help >/dev/null
           systemctl cat kavachd >/dev/null
-          test -f /etc/kavach/kavachd.toml
+          sudo test -f /etc/kavach/kavachd.toml       # /etc/kavach is 0750 root on purpose
+          [ "$(sudo stat -c %a /etc/kavach)" = 750 ]
           sudo apt-get remove -y kavach
+          ! command -v kavachctl
       - uses: actions/upload-artifact@v4
         with:
           name: dist-${{ matrix.arch }}
