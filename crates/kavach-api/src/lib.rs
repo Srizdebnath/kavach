@@ -127,6 +127,9 @@ pub struct EventRecord {
     pub rule: Option<String>,
     pub generation: u32,
     pub ifindex: u32,
+    /// Free-form detail (e.g. the metric and baseline of an `anomaly` event).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 /// Encode one protocol line (JSON + `\n`).

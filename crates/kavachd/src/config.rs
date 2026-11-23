@@ -37,6 +37,8 @@ pub struct Config {
     /// Directories whose executables are hashed ahead of time when the policy names binaries by
     /// hash (non-recursive, watched with inotify). Empty = classify hash-named binaries on exec.
     pub hash_scan_dirs: Vec<PathBuf>,
+    /// Per-identity anomaly detection on the event stream (detection only).
+    pub anomaly: crate::anomaly::AnomalyConfig,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -76,6 +78,7 @@ impl Default for Config {
             ]
             .map(PathBuf::from)
             .to_vec(),
+            anomaly: Default::default(),
         }
     }
 }
@@ -133,7 +136,11 @@ impl Config {
 
     pub fn load(path: &std::path::Path) -> anyhow::Result<Self> {
         match std::fs::read_to_string(path) {
-            Ok(s) => Ok(toml::from_str(&s)?),
+            Ok(s) => {
+                let c: Self = toml::from_str(&s)?;
+                c.anomaly.validate().map_err(anyhow::Error::msg)?;
+                Ok(c)
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 tracing::warn!(path = %path.display(), "no config file, using defaults");
                 Ok(Self::default())
@@ -151,6 +158,21 @@ mod tests {
             toml::from_str(include_str!("../../../examples/kavachd.toml")).unwrap();
         assert_eq!(c.interfaces, ["auto"]);
         assert_eq!(c.ratelimit.unwrap().pps, 20000);
+        // The example documents the defaults verbatim.
+        assert_eq!(c.anomaly, crate::anomaly::AnomalyConfig::default());
+        assert!(c.anomaly.validate().is_ok());
+    }
+
+    #[test]
+    fn anomaly_section_is_optional_and_partial() {
+        let c: super::Config =
+            toml::from_str("[anomaly]\nenabled = false\nz_threshold = 6.0\n").unwrap();
+        assert!(!c.anomaly.enabled);
+        assert_eq!(c.anomaly.z_threshold, 6.0);
+        assert_eq!(c.anomaly.window_secs, 60);
+        let c: super::Config = toml::from_str("").unwrap();
+        assert!(c.anomaly.enabled);
+        assert!(toml::from_str::<super::Config>("[anomaly]\nbogus = 1\n").is_err());
     }
 
     #[test]

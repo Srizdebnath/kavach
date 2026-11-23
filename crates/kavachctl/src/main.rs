@@ -55,7 +55,7 @@ enum Cmd {
     },
     /// Stream kernel events.
     Events {
-        /// Only show these kinds (xdp_drop, egress, ingress, exec, exe_tainted).
+        /// Only show these kinds (xdp_drop, egress, ingress, exec, exe_tainted, anomaly).
         #[arg(long)]
         kind: Vec<String>,
     },
@@ -382,6 +382,19 @@ fn run(cli: Cli) -> Result<()> {
                                     e.rule_id.to_string()
                                 }
                             });
+                            if e.kind == "anomaly" {
+                                println!(
+                                    "{:<11} {:<5} {:<48} pid={} uid={} comm={} cgroup={}",
+                                    e.kind,
+                                    "",
+                                    e.detail.as_deref().unwrap_or(&e.reason),
+                                    e.pid,
+                                    e.uid,
+                                    e.comm,
+                                    e.cgroup_id
+                                );
+                                continue;
+                            }
                             println!(
                                 "{:<11} {:<5} {flow:<48} pid={} uid={} comm={} rule={rule} {}",
                                 e.kind, e.verdict, e.pid, e.uid, e.comm, e.reason
