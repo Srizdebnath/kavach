@@ -156,17 +156,26 @@ static __always_inline bool kv_exe_known(const struct kv_exe_key *k)
 	return c && (c->flags & KV_EXE_F_COMMITTED);
 }
 
-static __always_inline __u64 kv_current_cg_mask(__u64 cgid, __u32 slot)
+/* cgroup subtree classes OR'd over the path, plus (KV_POL_F_WORKLOAD) the workload class of the
+ * nearest classified cgroup: the task's own, else the deepest ancestor (levels run root-down). */
+static __always_inline __u64 kv_current_cg_mask(__u64 cgid, __u32 slot, bool wl)
 {
 	__u64 m = kv_cgroup_mask(cgid, slot);
+	bool self_hit = false, hit = false;
+	__u64 wl_m = wl ? kv_wl_mask(cgid, slot, &self_hit) : 0;
 #pragma unroll
 	for (int level = 1; level <= KV_CGROUP_LEVELS; level++) {
 		__u64 id = bpf_get_current_ancestor_cgroup_id(level);
 		if (!id || id == cgid)
 			break;
 		m |= kv_cgroup_mask(id, slot);
+		if (wl && !self_hit) {
+			__u64 a = kv_wl_mask(id, slot, &hit);
+			if (hit)
+				wl_m = a;
+		}
 	}
-	return m;
+	return m | wl_m;
 }
 
 /* --- sockaddr ------------------------------------------------------------------------------ */
@@ -271,7 +280,7 @@ static __always_inline int kv_egress(struct socket *sock, struct sockaddr *addr,
 	struct kv_policy *pol = s.pol;
 	__u64 exe_m = pol->hdr.wild_exe == ~0ULL ? 0 : kv_exe_mask(&id.exe, s.slot);
 	__u64 uid_m = pol->hdr.wild_uid == ~0ULL ? 0 : kv_uid_mask(id.uid, s.slot);
-	__u64 cg_m = pol->hdr.wild_cgroup == ~0ULL ? 0 : kv_current_cg_mask(id.cgroup_id, s.slot);
+	__u64 cg_m = pol->hdr.wild_cgroup == ~0ULL ? 0 : kv_current_cg_mask(id.cgroup_id, s.slot, pol->hdr.flags & KV_POL_F_WORKLOAD);
 	id.mask = kv_combine_mask(pol, exe_m, uid_m, cg_m);
 	id.generation = s.gen;
 

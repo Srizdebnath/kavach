@@ -48,6 +48,9 @@ static __always_inline __u64 kv_skb_mask(struct __sk_buff *skb, const struct kv_
 	__u64 uid_m = pol->hdr.wild_uid == ~0ULL ? 0 : kv_uid_mask(id->uid, s->slot);
 	__u64 cg_m = 0;
 	if (pol->hdr.wild_cgroup != ~0ULL) {
+		/* Same as the LSM's kv_current_cg_mask, over the socket's cgroup path. */
+		bool wl = pol->hdr.flags & KV_POL_F_WORKLOAD, self_hit = false, hit = false;
+		__u64 wl_m = wl ? kv_wl_mask(id->cgroup_id, s->slot, &self_hit) : 0;
 		cg_m = kv_cgroup_mask(id->cgroup_id, s->slot);
 #pragma unroll
 		for (int level = 1; level <= KV_CGROUP_LEVELS; level++) {
@@ -55,7 +58,13 @@ static __always_inline __u64 kv_skb_mask(struct __sk_buff *skb, const struct kv_
 			if (!a || a == id->cgroup_id)
 				break;
 			cg_m |= kv_cgroup_mask(a, s->slot);
+			if (wl && !self_hit) {
+				__u64 w = kv_wl_mask(a, s->slot, &hit);
+				if (hit)
+					wl_m = w;
+			}
 		}
+		cg_m |= wl_m;
 	}
 	__u64 m = kv_combine_mask(pol, exe_m, uid_m, cg_m);
 	id->mask = m;
