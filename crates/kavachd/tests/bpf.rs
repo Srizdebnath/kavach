@@ -1002,6 +1002,203 @@ deny = {{ to = "192.0.2.3", port = 9, proto = "tcp" }}
 }
 
 // ---------------------------------------------------------------------------------------------
+// Benchmarks (real kernel): `KAVACH_BENCH_OUT=bench.json scripts/priv-test.sh bench_report`
+// ---------------------------------------------------------------------------------------------
+
+/// Average kernel-side ns per run, as measured by BPF_PROG_TEST_RUN itself (`repeat`).
+fn ns_per_run<
+    P: TestRun<Opts<'static> = TestRunOptions<'static>, Result = aya::programs::TestRunResult>,
+>(
+    p: &P,
+    pkt: &[u8],
+    repeat: u32,
+) -> (u32, f64) {
+    let data: &'static [u8] = Box::leak(pkt.to_vec().into_boxed_slice());
+    let mut best = f64::MAX;
+    let mut rv = 0;
+    for _ in 0..5 {
+        let r = p
+            .test_run(TestRunOptions {
+                data_in: Some(data),
+                repeat,
+                ..Default::default()
+            })
+            .unwrap();
+        rv = r.return_value;
+        best = best.min(r.duration.as_nanos() as f64);
+    }
+    (rv, best)
+}
+
+fn policy_with(n: usize) -> String {
+    let mut s = String::from("version = 1\n[defaults]\negress = \"allow\"\ningress = \"allow\"\n");
+    // At most 64 distinct address sets per policy: cycle 64 /24s, keep ports unique so no rule
+    // shadows another and only rule `n-1` matches its own (cidr, port).
+    for i in 0..n {
+        s += &format!(
+            "[[rule]]\nid = \"r{i}\"\ndirection = \"ingress\"\ndeny = {{ from = \"172.16.{}.0/24\", port = {}, proto = \"tcp\" }}\n",
+            i % 64,
+            1000 + i
+        );
+    }
+    s
+}
+
+#[test]
+#[ignore = "needs root: scripts/priv-test.sh"]
+fn bench_report() {
+    let Ok(out) = std::env::var("KAVACH_BENCH_OUT") else {
+        eprintln!("skipping: set KAVACH_BENCH_OUT=<file.json>");
+        return;
+    };
+    const R: u32 = 200_000;
+    let mut f = Fixture::new();
+    let mut res = serde_json::Map::new();
+    let mut put = |k: &str, v: serde_json::Value| {
+        eprintln!("{k:<34} {v}");
+        res.insert(k.into(), v);
+    };
+
+    // --- XDP ---------------------------------------------------------------------------
+    let clean = syn([198, 51, 100, 7], 443);
+    let bad = syn([203, 0, 113, 9], 443);
+    let xdp_ns = |f: &mut Fixture, pkt: &[u8]| {
+        let prog: &mut Xdp = f
+            .k()
+            .bpf_mut()
+            .program_mut("kavach_xdp")
+            .unwrap()
+            .try_into()
+            .unwrap();
+        if prog.fd().is_err() {
+            prog.load().unwrap();
+        }
+        ns_per_run(prog, pkt, R)
+    };
+    // Shipped defaults: blocklist on, verdict events sampled 1-in-64.
+    let cfg = |flags, pps, burst| {
+        let (emission_ns, tau_ns) = kernel::gcra(pps, burst);
+        XdpConfig {
+            emission_ns,
+            tau_ns,
+            sample_rate: 64,
+            flags,
+        }
+    };
+    f.k().set_xdp_config(cfg(KV_XDP_F_BLOCKLIST, 1, 1)).unwrap();
+    let (rv, ns) = xdp_ns(&mut f, &clean);
+    assert_eq!(rv, XDP_PASS);
+    put("xdp_pass_empty_blocklist_ns", ns.into());
+    for i in 0..10_000u32 {
+        let ip = Ipv4Addr::from(0x0a00_0000 + i);
+        f.k().block_add(IpNet::from(IpAddr::V4(ip)), 0, 0).unwrap();
+    }
+    f.k()
+        .block_add("203.0.113.0/24".parse().unwrap(), 0, 0)
+        .unwrap();
+    let (rv, ns) = xdp_ns(&mut f, &bad);
+    assert_eq!(rv, XDP_DROP);
+    put("xdp_blocklist_drop_10k_entries_ns", ns.into());
+    let (rv, ns) = xdp_ns(&mut f, &clean);
+    assert_eq!(rv, XDP_PASS);
+    put("xdp_pass_10k_entries_ns", ns.into());
+    f.k()
+        .set_xdp_config(cfg(
+            KV_XDP_F_BLOCKLIST | KV_XDP_F_RATELIMIT,
+            1_000_000_000,
+            1_000_000_000,
+        ))
+        .unwrap();
+    let (rv, ns) = xdp_ns(&mut f, &clean);
+    assert_eq!(rv, XDP_PASS);
+    put("xdp_pass_blocklist_and_ratelimit_ns", ns.into());
+
+    // --- policy hot swap ---------------------------------------------------------------
+    for n in [10usize, 100, 1000] {
+        let src = policy_with(n);
+        let p = Arc::new(kavach_policy::compile(&src, 0).expect("policy").policy);
+        let mut best = u128::MAX;
+        for _ in 0..5 {
+            let serial = f.d().serial + 1;
+            let t = std::time::Instant::now();
+            f.d().stage(p.clone(), serial).expect("stage");
+            best = best.min(t.elapsed().as_micros());
+        }
+        put(&format!("apply_{n}_rules_us"), (best as u64).into());
+    }
+
+    // --- TC with a 1000-rule policy ----------------------------------------------------
+    let tc_ns = |f: &mut Fixture, name: &str, pkt: &[u8]| {
+        let prog: &mut SchedClassifier = f
+            .k()
+            .bpf_mut()
+            .program_mut(name)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        if prog.fd().is_err() {
+            prog.load().unwrap();
+        }
+        ns_per_run(prog, pkt, R)
+    };
+    // last rule matches: worst-case linear position for the first packet, then cached
+    let hit = syn([172, 16, (999 % 64) as u8, 1], 1999);
+    let (rv, ns) = tc_ns(&mut f, "kavach_tc_ingress", &hit);
+    assert_eq!(rv, TC_SHOT);
+    put("tc_ingress_1000_rules_cached_flow_ns", ns.into());
+    let (rv, ns) = tc_ns(&mut f, "kavach_tc_egress", &clean);
+    assert_eq!(rv, TC_OK);
+    put("tc_egress_ns", ns.into());
+
+    // --- LSM: real connect() syscalls, without and with the LSM ------------------------
+    let connect_ns = || {
+        let sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let n = 200_000u32;
+        let mut best = f64::MAX;
+        for _ in 0..5 {
+            let t = std::time::Instant::now();
+            for i in 0..n {
+                sock.connect(("127.0.0.1", 9 + (i & 1) as u16)).unwrap();
+            }
+            best = best.min(t.elapsed().as_nanos() as f64 / n as f64);
+        }
+        best
+    };
+    let base = connect_ns();
+    put("connect_syscall_no_lsm_ns", base.into());
+    let lsms = std::fs::read_to_string("/sys/kernel/security/lsm").unwrap_or_default();
+    if lsms.contains("bpf") {
+        f.k().attach_lsm().expect("attach LSM");
+        let with = connect_ns();
+        put("connect_syscall_lsm_1000_rules_ns", with.into());
+        put("lsm_connect_overhead_ns", (with - base).max(0.0).into());
+    }
+
+    // --- verifier: instructions processed per program (deterministic size gate) --------
+    let mut v = serde_json::Map::new();
+    for (name, prog) in f.k().bpf_mut().programs() {
+        if let Ok(info) = prog.info()
+            && let Some(n) = info.verified_instruction_count()
+        {
+            v.insert(name.to_owned(), n.into());
+        }
+    }
+    put("verified_insns", v.into());
+    let uname = std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default();
+    put("kernel", uname.trim().into());
+    let cpu = std::fs::read_to_string("/proc/cpuinfo")
+        .unwrap_or_default()
+        .lines()
+        .find(|l| l.starts_with("model name"))
+        .and_then(|l| l.split(':').nth(1))
+        .unwrap_or("?")
+        .trim()
+        .to_owned();
+    put("cpu", cpu.into());
+    std::fs::write(&out, serde_json::to_string_pretty(&res).unwrap()).unwrap();
+}
+
+// ---------------------------------------------------------------------------------------------
 // Real traffic: network namespace + veth pair (T31)
 // ---------------------------------------------------------------------------------------------
 

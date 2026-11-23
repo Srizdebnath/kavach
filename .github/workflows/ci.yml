@@ -39,6 +39,18 @@ jobs:
       - run: cargo test --workspace
       - name: verifier + BPF_PROG_TEST_RUN suite (real kernel, root)
         run: ./scripts/priv-test.sh
+      - name: perf gate (kernel-measured ns/packet + verifier instruction budget)
+        run: |
+          bin=$(cargo test -p kavachd --test bpf --no-run --message-format=json 2>/dev/null \
+            | grep -o '"executable":"[^"]*/bpf-[0-9a-f]*"' | tail -1 | cut -d'"' -f4)
+          sudo env KAVACH_BENCH_OUT="$PWD/bench.json" "$bin" --ignored --test-threads=1 bench_report
+          ./scripts/perf-gate.py bench.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench
+          path: bench.json
+          if-no-files-found: ignore
 
   miri:
     runs-on: ubuntu-24.04

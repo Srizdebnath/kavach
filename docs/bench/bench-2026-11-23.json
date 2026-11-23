@@ -1,0 +1,28 @@
+{
+  "apply_1000_rules_us": 742,
+  "apply_100_rules_us": 930,
+  "apply_10_rules_us": 378,
+  "connect_syscall_lsm_1000_rules_ns": 600.854345,
+  "connect_syscall_no_lsm_ns": 527.965375,
+  "cpu": "11th Gen Intel(R) Core(TM) i3-1115G4 @ 3.00GHz",
+  "kernel": "7.1.9-arch1-2",
+  "lsm_connect_overhead_ns": 72.88896999999997,
+  "tc_egress_ns": 82.0,
+  "tc_ingress_1000_rules_cached_flow_ns": 79.0,
+  "verified_insns": {
+    "kavach_connect": 3515,
+    "kavach_exec": 365,
+    "kavach_file_open": 515,
+    "kavach_file_truncate": 133,
+    "kavach_inode_free": 49,
+    "kavach_sendmsg": 3530,
+    "kavach_tc_egress": 6601,
+    "kavach_tc_ingress": 5078,
+    "kavach_truncate": 140,
+    "kavach_xdp": 4528
+  },
+  "xdp_blocklist_drop_10k_entries_ns": 61.0,
+  "xdp_pass_10k_entries_ns": 66.0,
+  "xdp_pass_blocklist_and_ratelimit_ns": 108.0,
+  "xdp_pass_empty_blocklist_ns": 33.0
+}

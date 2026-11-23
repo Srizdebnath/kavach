@@ -1,0 +1,22 @@
+{
+  "_comment": "CI perf gate (scripts/perf-gate.py). Ceilings are ~5-10x the reference numbers in bench-*.json so shared CI runners don't flake; verifier counts are deterministic per kernel and gated at ~1.5x.",
+  "max": {
+    "xdp_pass_empty_blocklist_ns": 400,
+    "xdp_blocklist_drop_10k_entries_ns": 500,
+    "xdp_pass_10k_entries_ns": 500,
+    "xdp_pass_blocklist_and_ratelimit_ns": 800,
+    "tc_ingress_1000_rules_cached_flow_ns": 800,
+    "tc_egress_ns": 800,
+    "lsm_connect_overhead_ns": 1500,
+    "apply_1000_rules_us": 50000
+  },
+  "max_verified_insns": {
+    "kavach_xdp": 7000,
+    "kavach_tc_ingress": 8000,
+    "kavach_tc_egress": 10000,
+    "kavach_connect": 5500,
+    "kavach_sendmsg": 5500,
+    "kavach_exec": 1000,
+    "kavach_file_open": 1000
+  }
+}
