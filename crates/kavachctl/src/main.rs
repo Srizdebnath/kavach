@@ -97,9 +97,16 @@ enum Cmd {
         log: PathBuf,
     },
     /// Detach every program and remove all pins (root only).
+    ///
+    /// Goes through kavachd when it is running. If the daemon is not reachable (stopped,
+    /// crashed, being uninstalled), removes every Kavach pin under `--pin-root` directly:
+    /// pinned links detach once their last pin is gone.
     KillSwitch {
         #[arg(long)]
         yes: bool,
+        /// Root of all Kavach pins (every ABI version lives below it).
+        #[arg(long, default_value = "/sys/fs/bpf/kavach")]
+        pin_root: PathBuf,
     },
 }
 
@@ -544,14 +551,38 @@ fn run(cli: Cli) -> Result<()> {
                 hex::encode(chain.last)
             );
         }
-        Cmd::KillSwitch { yes } => {
+        Cmd::KillSwitch { yes, pin_root } => {
             if !yes {
                 bail!("this detaches ALL Kavach enforcement on this host; re-run with --yes");
             }
-            Conn::open(sock)?.call(&Request::KillSwitch)?;
-            println!("kill-switch engaged: all Kavach programs detached");
+            match Conn::open(sock) {
+                Ok(mut c) => {
+                    c.call(&Request::KillSwitch)?;
+                    println!("kill-switch engaged: all Kavach programs detached");
+                }
+                Err(e) => {
+                    eprintln!("kavachd not reachable ({e:#}); removing pins directly");
+                    kill_switch_offline(&pin_root)?;
+                }
+            }
         }
     }
+    Ok(())
+}
+
+/// Daemon-less kill-switch: remove the whole pin tree. Programs whose links were pinned
+/// detach as soon as the last reference (the pin) disappears.
+fn kill_switch_offline(root: &Path) -> Result<()> {
+    if !root.exists() {
+        println!("kill-switch: nothing pinned under {}", root.display());
+        return Ok(());
+    }
+    std::fs::remove_dir_all(root)
+        .with_context(|| format!("removing {} (the kill-switch needs root)", root.display()))?;
+    println!(
+        "kill-switch engaged offline: removed {}, all Kavach programs detached",
+        root.display()
+    );
     Ok(())
 }
 
@@ -672,4 +703,23 @@ fn explain(sock: &Path, a: ExplainArgs) -> Result<()> {
         ),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::kill_switch_offline;
+
+    #[test]
+    fn offline_kill_switch_removes_every_abi_version() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("kavach");
+        for v in ["v1", "v2"] {
+            std::fs::create_dir_all(root.join(v)).unwrap();
+            std::fs::write(root.join(v).join("xdp_link"), b"").unwrap();
+        }
+        kill_switch_offline(&root).unwrap();
+        assert!(!root.exists());
+        // idempotent: nothing pinned is not an error (uninstall runs it unconditionally)
+        kill_switch_offline(&root).unwrap();
+    }
 }
