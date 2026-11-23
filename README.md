@@ -316,6 +316,9 @@ sudo reboot
 
 No LSM? Set `lsm = false` in `/etc/kavach/kavachd.toml`; XDP and TC still enforce.
 
+Running kavachd in a container? It needs `--privileged --pid=host` (BPF reports host PIDs).
+Without the host PID namespace it refuses to attach the LSM and says so; `doctor` checks this.
+
 ### 5. Configure the host
 
 `/etc/kavach/kavachd.toml` (defaults shown):
@@ -453,7 +456,7 @@ scripts/priv-test.sh     # real-kernel suite (sudo)
 | v0.4 | Agent gateway (MCP / A2A), k8s/SPIFFE identity, `kavach.ko` kfunc; AF_XDP RX backend | 🧪 policy core + AF_XDP backend (kernel-tested); proxy pending |
 | v0.5 | FreeBSD pfil shim, macOS Network Extension | planned |
 
-Honest limits today: k8s-label and SPIFFE selectors are rejected by the compiler until the v0.4
+Honest limits today: kavachd must run in the host PID namespace for identity rules; k8s-label and SPIFFE selectors are rejected by the compiler until the v0.4
 node agent exists; the QUIC parser handles a ClientHello that fits in one Initial packet;
 anomaly detection sees only `drop`/`log` events; the AF_XDP backend has a counting consumer only
 (redirected ports are dropped until the v0.4 proxy lands), and zero-copy is untested on real NICs.
