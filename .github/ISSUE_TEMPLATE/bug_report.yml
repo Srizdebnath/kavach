@@ -1,0 +1,71 @@
+name: Bug report
+description: Something in Kavach does not work as documented. Not for security issues.
+title: "bug: "
+labels: [bug, triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. **Security problems** (policy bypass, fail-open, signature or
+        parser bugs) must go through private vulnerability reporting instead: Security tab,
+        then "Report a vulnerability". See SECURITY.md.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Minimal policy (`kavach.toml`, redact secrets) and the commands you ran.
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Kavach version
+      description: Output of `kavachctl --version`, or the commit you built.
+    validations:
+      required: true
+  - type: input
+    id: kernel
+    attributes:
+      label: Kernel
+      description: Output of `uname -r`.
+      placeholder: 6.8.0-45-generic
+    validations:
+      required: true
+  - type: input
+    id: distro
+    attributes:
+      label: Distribution
+      placeholder: Ubuntu 24.04, Fedora 41, Arch, ...
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: "`kavachctl doctor` output"
+      description: Run `sudo kavachctl doctor` and paste the full output.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: status
+    attributes:
+      label: "`kavachctl status` output"
+      render: text
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Daemon logs
+      description: Relevant lines from `journalctl -u kavachd`.
+      render: text
+    validations:
+      required: false
