@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/Srizdebnath/kavach/security/advisories/new
+    about: Please report security issues privately here, not as public issues.
+  - name: Questions and ideas
+    url: https://github.com/Srizdebnath/kavach/discussions
+    about: Ask usage questions and discuss designs in GitHub Discussions.
