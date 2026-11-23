@@ -3,10 +3,30 @@ name: kernels
 # under virtme-ng from prebuilt Ubuntu mainline kernels (nothing is compiled). The runner's own
 # kernel is covered by ci.yml; this job covers 6.1 (legacy clsact TC, no file_truncate hook),
 # 6.6 (first tcx kernel), 6.12 and the newest stable release. See scripts/kernel-matrix.sh.
+# Only when something that runs in, or talks to, the kernel changed (plus weekly): each run
+# boots four kernels, so docs/CLI-only changes should not spend Actions minutes on it.
 on:
   push:
     branches: [main]
+    paths:
+      - "bpf/**"
+      - "crates/kavach-common/**"
+      - "crates/kavach-core/**"
+      - "crates/kavachd/**"
+      - "crates/kavach-gateway/**"
+      - "Cargo.lock"
+      - "scripts/kernel-matrix.sh"
+      - ".github/workflows/kernels.yml"
   pull_request:
+    paths:
+      - "bpf/**"
+      - "crates/kavach-common/**"
+      - "crates/kavach-core/**"
+      - "crates/kavachd/**"
+      - "crates/kavach-gateway/**"
+      - "Cargo.lock"
+      - "scripts/kernel-matrix.sh"
+      - ".github/workflows/kernels.yml"
   schedule:
     - cron: "17 4 * * 1" # weekly: picks up new point releases and a new "latest"
   workflow_dispatch:
