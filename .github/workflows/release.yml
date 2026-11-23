@@ -66,7 +66,7 @@ jobs:
           cp examples/kavachd.toml "$d/etc/"
           cp packaging/systemd/kavachd.service "$d/systemd/"
           cp packaging/install.sh "$d/"
-          cp README.md docs/INSTALL.md docs/ARCHITECTURE.md LICENSE* "$d/doc/" 2>/dev/null || true
+          cp README.md CHANGELOG.md docs/INSTALL.md docs/ARCHITECTURE.md LICENSE* "$d/doc/" 2>/dev/null || true
           cp -r LICENSES "$d/doc/"
           cp examples/kavach.toml "$d/doc/examples/"
           tar --owner=0 --group=0 --sort=name --mtime="@$(git log -1 --format=%ct)" \
@@ -115,7 +115,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           pre=""; case "$GITHUB_REF_NAME" in *-*) pre="--prerelease";; esac
+          v=${GITHUB_REF_NAME#v}; v=${v%%-*}
           {
+            # this version's CHANGELOG section (without its heading)
+            awk -v v="$v" '/^## \[/{f = index($0, "[" v "]") > 0; next} /^\[[0-9]/{f=0} f' CHANGELOG.md
+            echo
+            echo "## Install"
+            echo
             echo "Install: see [docs/INSTALL.md](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_REF_NAME}/docs/INSTALL.md)."
             echo
             echo '```sh'
@@ -127,4 +133,4 @@ jobs:
             echo '```'
           } > notes.md
           gh release create "$GITHUB_REF_NAME" dist/* $pre --verify-tag \
-            --title "Kavach $GITHUB_REF_NAME" --notes-file notes.md --generate-notes
+            --title "Kavach $GITHUB_REF_NAME" --notes-file notes.md
