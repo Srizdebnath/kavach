@@ -40,3 +40,14 @@ min_count        = 10       # and x >= this (conn_rate, deny_rate, distinct_dsts
 min_new_ports    = 3        # floor for new_dst_ports
 cooldown_secs    = 600      # per identity and metric
 max_identities   = 1024
+
+# Optional AF_XDP RX backend for the L7 gateway (v0.4 preview). OFF unless enabled: a redirected
+# queue depends on the gateway process, so only the listed ports are redirected (everything else,
+# SSH included, stays on the kernel stack) and a watchdog detaches a queue whose consumer stalls.
+# Redirected frames bypass TC ingress policy (XDP blocklist and rate limit still apply).
+# [gateway.afxdp]
+# enabled     = false
+# iface       = "eth0"        # must be one of `interfaces` (needs the Kavach XDP program)
+# queues      = [0]           # RX queue ids, opted in one by one
+# ports       = [8443]        # 8443 = 8443/tcp; also "443/udp"
+# watchdog_ms = 250           # detach a queue whose fill ring stalls this long with frames waiting

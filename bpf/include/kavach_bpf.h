@@ -172,6 +172,46 @@ struct {
 } events SEC(".maps");
 
 /*
+ * Opt-in AF_XDP gateway backend (KV_XDP_F_AFXDP). Written by the gateway / kavachd only.
+ * xsk_sockets: RX queue id -> AF_XDP socket (the kernel drops an entry when its socket closes).
+ * xsk_ports:   xsk_port_key(proto, host-order dport) -> 1. Only these flows are redirected.
+ * xsk_alive:   RX queue id -> CLOCK_BOOTTIME ns until which redirecting is allowed. Renewed by
+ *              the gateway watchdog while the consumer makes progress, so a frozen gateway
+ *              stops receiving within one watchdog period even if it cannot unset its entry.
+ */
+struct {
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+	__uint(type, BPF_MAP_TYPE_XSKMAP);
+	__uint(max_entries, KV_XSK_MAX_QUEUES);
+	__type(key, __u32);
+	__type(value, __u32);
+} xsk_sockets SEC(".maps");
+
+struct {
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, KV_XSK_MAX_PORTS);
+	__type(key, __u32);
+	__type(value, __u32);
+} xsk_ports SEC(".maps");
+
+struct {
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, KV_XSK_MAX_QUEUES);
+	__type(key, __u32);
+	__type(value, __u64);
+} xsk_alive SEC(".maps");
+
+struct {
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, KV_XSK_STAT_MAX);
+	__type(key, __u32);
+	__type(value, __u64);
+} xsk_stats SEC(".maps");
+
+/*
  * RCU barrier: updating any element of a map-in-map from user space makes the kernel call
  * synchronize_rcu() (maybe_wait_bpf_programs), i.e. wait for every in-flight non-sleepable BPF
  * program. kavachd does this after flipping policy_gen and before reusing the old slot.

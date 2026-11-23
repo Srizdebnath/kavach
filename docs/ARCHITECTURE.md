@@ -13,7 +13,7 @@ kavach/
 │   ├── include/kavach_abi.h   # GENERATED from kavach-common (`cargo xtask codegen`) — do not edit
 │   ├── include/kavach_bpf.h   # maps, packet parser, counters, ring-buffer helpers
 │   ├── include/kavach_eval.h  # snapshot, identity masks, rule scan (mirror of kavach-core)
-│   ├── xdp_filter.c           # blocklist + GCRA rate limit
+│   ├── xdp_filter.c           # blocklist + GCRA rate limit (+ opt-in AF_XDP redirect)
 │   ├── tc_flow.c              # flow cache, reply tracking, ingress rules, re-evaluation
 │   └── lsm_egress.c           # connect/sendmsg verdicts, exec/taint tracking, task iterator
 ├── crates/
@@ -21,6 +21,7 @@ kavach/
 │   ├── kavach-core/           # no_std, forbid(unsafe): reference evaluator
 │   ├── kavach-policy/         # kavach.toml → CompiledPolicy → kernel tables; .kvb bundles; diff
 │   ├── kavach-api/            # control protocol (NDJSON over UDS) + hash-chained audit log
+│   ├── kavach-gateway/        # L7 MCP/A2A decisions (v0.4 preview) + opt-in AF_XDP RX backend
 │   ├── kavachd/               # tokio daemon, aya loader; tests/bpf.rs = privileged kernel suite
 │   └── kavachctl/             # operator CLI
 ├── examples/                  # kavach.toml (policy), kavachd.toml (host config)
@@ -30,7 +31,7 @@ kavach/
 ```
 
 Planned (v0.4/v0.5): `kernel/kavach-ko` (Rust-for-Linux kfunc), `crates/kavach-parsers`
-(TLS/JA4/DNS), `crates/kavach-gateway` (L7), `shims/{freebsd,macos}`.
+(TLS/JA4/DNS), the `crates/kavach-gateway` L7 proxy, `shims/{freebsd,macos}`.
 
 ## 2. Crate dependency graph
 
@@ -92,6 +93,10 @@ All maps except `sync_*` are pinned `LIBBPF_PIN_BY_NAME` under `/sys/fs/bpf/kava
 | `policy_gen` | ARRAY[1] | u32 generation | kavachd | LSM, TC |
 | `key_req` | ARRAY[1] | `KeyReq` (one-shot key report) | kavachd, LSM clears | LSM |
 | `events` | RINGBUF 1 MiB | `Event` | all | kavachd |
+| `xsk_sockets` | XSKMAP[64] | RX queue → AF_XDP socket | gateway watchdog (kernel removes on close) | XDP |
+| `xsk_ports` | HASH[256] | `proto << 16 \| port` (host order) → 1 | kavachd | XDP |
+| `xsk_alive` | ARRAY[64] | RX queue → u64 redirect deadline (`CLOCK_BOOTTIME`) | gateway watchdog | XDP |
+| `xsk_stats` | PERCPU_ARRAY[4] | `KV_XSK_STAT_*` → u64 | XDP | kavachd |
 | `sync_inner` / `sync_rcu` | ARRAY / ARRAY_OF_MAPS | used only to force `synchronize_rcu()` | kavachd | — |
 
 * **Δ GCRA in a shared LRU_HASH** (not per-CPU token buckets): one 16-byte state per source,
@@ -206,6 +211,9 @@ the reference semantics:
    - Parse up to 2 VLAN tags, IPv4 options and 4 IPv6 extension headers.
    - Blocklist LPM lookup (with expiry), then the GCRA check.
    - Result is `XDP_DROP` or `XDP_PASS`; unparseable frames pass and are counted.
+   - Only with `KV_XDP_F_AFXDP` (off by default): a frame that passed both checks and targets
+     a gateway-selected `(proto, dport)` may be `XDP_REDIRECT`ed to its queue's AF_XDP socket
+     (§9a). With the flag clear this step is a single bit test and the path is unchanged.
 2. **LSM egress** (`socket_connect`, and `socket_sendmsg` when it carries a destination):
    - Build the identity mask, run the egress scan, return `-EPERM` or allow.
    - Store `Identity` in `sk_ident`; emit an event on drop or log.
@@ -280,6 +288,56 @@ identity broker ──► hash outside the lock ──► exe_class (seq-pair)  
   verifies the chain, and a log that fails verification at startup is rotated aside rather than
   extended.
 
+## 9a. Opt-in AF_XDP gateway backend
+
+`[gateway.afxdp]` in kavachd.toml (`enabled = false` by default) gives the L7 gateway the frames
+of selected flows straight from the driver, without the kernel stack. It is **never** the
+default because a redirected queue depends on a user-space consumer: if that consumer stops
+returning buffers, the queue's flows stall. The design limits that blast radius:
+
+```
+XDP: parse → blocklist → GCRA → [flag] xsk_ports[(proto,dport)]? → xsk_alive[q] > now?
+                                       │ no → PASS                 │ no → PASS (stale)
+                                       └──────────── yes ──────────┴─► bpf_redirect_map(xsk_sockets, q, XDP_PASS)
+                                                                        (no socket → PASS)
+```
+
+* **Selection.** Only TCP/UDP frames with a parsed L4 header whose destination port is listed
+  in `ports` (`8443` = TCP, `"443/udp"`) are candidates. Everything else (SSH, ICMP, ARP,
+  fragments, other ports) passes as before; 22/tcp is refused by config validation.
+* **Opt-in per queue.** Only `queues = [...]` get a socket; frames arriving on other RX queues
+  find no `xsk_sockets` entry and pass (the redirect helper's fallback action is `XDP_PASS`).
+* **Watchdog.** One thread samples each queue's fill-ring producer and RX-ring indices every
+  `watchdog_ms / 4`. If frames wait on the RX ring and neither the fill producer nor the RX
+  consumer has moved for `watchdog_ms`, it unsets `xsk_sockets[q]` and zeroes `xsk_alive[q]`;
+  the selected ports of that queue fall back to the kernel stack. It re-arms the queue on the
+  next sign of progress. An empty fill ring alone is not a stall (zero-copy drivers park every
+  fill buffer in their hardware ring while idle).
+* **Dead-man deadline.** While healthy, the watchdog renews `xsk_alive[q] = now + watchdog_ms +
+  tick`. If the whole gateway process freezes (SIGSTOP, deadlock), nothing renews it and XDP
+  stops redirecting on its own within one period. A crashed or exiting process closes its
+  sockets, and the kernel removes them from the XSKMAP.
+* **Bind-mode negotiation** (per queue, logged at each step): `XDP_ZEROCOPY` (ice, i40e, ixgbe,
+  igc, mlx5, ...; confirmed via `XDP_OPTIONS`) → `XDP_COPY` with driver XDP → SKB mode (copy
+  behind generic XDP, used when kavachd attached XDP generically: `xdp_mode = "skb"` or a driver
+  without native XDP). Each attempt uses a fresh socket and UMEM. Only "mode not available"
+  errors (`EOPNOTSUPP`, `EINVAL`, ...) fall through; `EBUSY`/`ENODEV`/`EPERM` stop at once.
+  Nothing is published to the maps unless every queue bound.
+* **Startup order** (kavachd): bind + publish sockets with live deadlines → `xsk_ports` →
+  `KV_XDP_F_AFXDP` last. When the backend is disabled, kavachd's fresh `xdp_cfg` already has the
+  flag clear and it also empties `xsk_ports`, so a previous run leaves nothing behind.
+* **What redirected frames skip.** The XDP blocklist and rate limit still apply, but redirected
+  frames never reach TC (flow tracking, ingress policy) or the socket layer. Until the v0.4
+  proxy lands, kavachd's consumer is a counting sink that drops them, so only enable it for
+  ports the gateway itself terminates.
+* **Code.** `crates/kavach-gateway/src/afxdp/`: `sys.rs` (raw `libc` syscalls behind a `Sys`
+  trait), `ring.rs` (SPSC rings with acquire/release indices), `socket.rs` (UMEM of
+  `2 × ring_size` frames: half on the fill ring, half for TX; transmitting a received frame
+  swaps in a TX spare, so the fill ring can never overflow), `mod.rs` (config, negotiation,
+  watchdog, threads). Unit tests run all of it against a mocked kernel; `tests/bpf.rs` covers
+  the BPF gating (`BPF_PROG_TEST_RUN`) and real redirection plus watchdog fallback over a veth
+  pair. No AF_XDP crate is used: the maintained ones wrap libxdp/libbpf C builds.
+
 ## 10. Failure semantics
 
 | Event | Behaviour |
@@ -290,6 +348,8 @@ identity broker ──► hash outside the lock ──► exe_class (seq-pair)  
 | Punt with no consumer | Rule fail mode decides |
 | BPF LSM not active | Identity egress is reported as off; XDP/TC still work |
 | `kavachctl kill-switch --yes` (root) | Detach all links, unpin everything, remove the pin dir |
+| AF_XDP consumer stalls (backend enabled) | Watchdog unsets the queue's socket within `watchdog_ms`; selected ports fall back to the stack |
+| Gateway process frozen / crashed | `xsk_alive` deadline lapses / kernel drops the closed socket: XDP passes |
 
 ## 11. Security posture
 
@@ -299,6 +359,7 @@ identity broker ──► hash outside the lock ──► exe_class (seq-pair)  
   peers are checked with `SO_PEERCRED`. Operators get read/apply/block; the kill-switch is
   root-only.
 * **Unsafe code.** `forbid(unsafe_code)` in kavach-core, kavach-policy, kavach-api and kavachctl.
+  kavach-gateway denies it except in `afxdp::sys` and `afxdp::ring` (syscalls, mmap'd rings).
   Workspace lints require a `// SAFETY:` comment on every `unsafe` block.
 * **Keys.** Signing keys live in CI; hosts only carry public keys.
 

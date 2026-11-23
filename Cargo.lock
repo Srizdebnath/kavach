@@ -940,8 +940,12 @@ dependencies = [
 name = "kavach-gateway"
 version = "0.3.1"
 dependencies = [
+ "kavach-common",
+ "libc",
  "serde",
  "serde_json",
+ "toml",
+ "tracing",
 ]
 
 [[package]]
@@ -1005,6 +1009,7 @@ dependencies = [
  "kavach-api",
  "kavach-common",
  "kavach-core",
+ "kavach-gateway",
  "kavach-policy",
  "nix",
  "postcard",

@@ -140,7 +140,7 @@ every shared layout.*
 | `kavach-api` | Rust | NDJSON control protocol over UDS, hash-chained audit log |
 | `kavachd` | Rust (tokio + aya) | loader, identity broker, apply/A-B swap, anomaly engine, supervisor |
 | `kavachctl` | Rust | CLI: compile, sign, apply, explain, events, stats, `top` TUI, doctor |
-| `kavach-gateway` | Rust | v0.4 MCP / A2A tool-policy core (proxy not built yet) |
+| `kavach-gateway` | Rust | v0.4 MCP / A2A tool-policy core; opt-in AF_XDP RX backend (zero-copy → copy → SKB fallback, watchdog) |
 
 Deep dive: [Architecture](docs/ARCHITECTURE.md) · [Requirements (SRS)](docs/SRS.md) ·
 [Roadmap diagram](diagrams/svg/15-roadmap.svg)
@@ -197,7 +197,7 @@ Verifier cost (instructions processed, deterministic per kernel):
 
 | Program | Insns | Program | Insns |
 |---|---|---|---|
-| `kavach_xdp` | 4 528 | `kavach_connect` | 3 515 |
+| `kavach_xdp` | 7 064 (incl. AF_XDP step) | `kavach_connect` | 3 515 |
 | `kavach_tc_ingress` | 5 078 | `kavach_sendmsg` | 3 530 |
 | `kavach_tc_egress` | 6 601 | `kavach_exec` / `file_open` | 365 / 515 |
 
@@ -218,8 +218,8 @@ Latest local run (same commands as CI):
 
 | Suite | Result |
 |---|---|
-| Unit + property tests (`cargo test --workspace`) | **100 passed, 0 failed** |
-| Real-kernel suite (`scripts/priv-test.sh`, root) | **12 passed, 0 failed** |
+| Unit + property tests (`cargo test --workspace`) | **129 passed, 0 failed** |
+| Real-kernel suite (`scripts/priv-test.sh`, root) | **14 passed, 0 failed** |
 | Lint (`cargo fmt --check`, `clippy -D warnings`), `codegen --check` | clean |
 | `cargo deny` (advisories, bans, licenses, sources) | ok |
 | Miri (`kavach-common`, `kavach-core`, `kavach-parsers`) | runs in CI |
@@ -240,6 +240,8 @@ The real-kernel suite loads the actual BPF objects through the verifier and driv
 | `lsm_strict_mode_refuses_unclassified_until_hashed` | strict identity mode has no first-run window |
 | `lsm_overlay_executables_use_the_real_file` | container (overlayfs) binaries keyed by their real file |
 | `netns_veth_real_traffic_xdp_and_tc` | real traffic over a veth pair in a private netns |
+| `xdp_afxdp_redirect_is_gated_by_flag_port_and_deadline` | AF_XDP redirect only for opted-in ports with a live consumer |
+| `netns_veth_afxdp_redirect_and_watchdog` | real AF_XDP socket; a hung consumer falls back to the kernel stack; SSH/ping unaffected |
 | `bench_report` | the benchmark above |
 
 Plus: install tests of the `.deb`,
@@ -441,12 +443,13 @@ scripts/priv-test.sh     # real-kernel suite (sudo)
 | v0.1 | XDP blocklist + per-source rate limiting | ✅ kernel-tested |
 | v0.2 | Identity-aware egress via BPF-LSM: binary hash/path, uid, cgroup; tamper revocation | ✅ kernel-tested |
 | v0.3 | `kavach.toml` policy-as-code, `kavachctl`, signed bundles, A/B hot-swap, audit log, `top`, anomaly detection | ✅ kernel-tested |
-| v0.4 | Agent gateway (MCP / A2A), AF_XDP backend, k8s/SPIFFE identity, `kavach.ko` kfunc | 🧪 cores + designs |
+| v0.4 | Agent gateway (MCP / A2A), k8s/SPIFFE identity, `kavach.ko` kfunc; AF_XDP RX backend | 🧪 policy core + AF_XDP backend (kernel-tested); proxy pending |
 | v0.5 | FreeBSD pfil shim, macOS Network Extension | planned |
 
 Honest limits today: k8s-label and SPIFFE selectors are rejected by the compiler until the v0.4
 node agent exists; the QUIC parser handles a ClientHello that fits in one Initial packet;
-anomaly detection sees only `drop`/`log` events.
+anomaly detection sees only `drop`/`log` events; the AF_XDP backend has a counting consumer only
+(redirected ports are dropped until the v0.4 proxy lands), and zero-copy is untested on real NICs.
 
 ## Contributing
 

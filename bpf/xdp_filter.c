@@ -4,6 +4,7 @@
  *
  * Runs at the driver hook before an sk_buff exists:
  *   parse → blocklist (LPM) → per-source token bucket → XDP_DROP | XDP_PASS
+ *   [opt-in, KV_XDP_F_AFXDP] gateway-selected (proto, dport) → XDP_REDIRECT to an AF_XDP socket
  *
  * Requirements: FR-XDP-1..8. Zero allocations, bounded work, verifier-checked.
  * Included by kavach.bpf.c (single object so maps are shared).
@@ -65,6 +66,42 @@ static __always_inline int xdp_rate_ok(const struct kv_pkt *p, const struct kv_x
 	return 1; /* heavy contention on one key: conform rather than spin */
 }
 
+static __always_inline void xsk_count(__u32 idx)
+{
+	__u64 *v = bpf_map_lookup_elem(&xsk_stats, &idx);
+	if (v)
+		*v += 1;
+}
+
+/*
+ * Opt-in AF_XDP gateway step. Returns XDP_REDIRECT only for a TCP/UDP frame (with a parsed L4
+ * header) to a gateway-selected (proto, dport) whose RX queue has a live watchdog deadline and
+ * a bound socket; every other frame gets XDP_PASS, exactly as without the backend. The
+ * redirect itself falls back to XDP_PASS (flags argument) when the queue has no socket.
+ */
+static __always_inline int xdp_gateway_redirect(struct xdp_md *ctx, const struct kv_pkt *p,
+						__u64 now)
+{
+	if (!p->l4 || (p->key.proto != IPPROTO_TCP && p->key.proto != IPPROTO_UDP))
+		return XDP_PASS;
+	__u32 pk = ((__u32)p->key.proto << 16) | bpf_ntohs(p->key.dport);
+	if (!bpf_map_lookup_elem(&xsk_ports, &pk))
+		return XDP_PASS;
+	__u32 q = ctx->rx_queue_index;
+	__u64 *alive = bpf_map_lookup_elem(&xsk_alive, &q);
+	if (!alive || READ_ONCE(*alive) <= now) {
+		xsk_count(KV_XSK_STAT_STALE);
+		return XDP_PASS;
+	}
+	long act = bpf_redirect_map(&xsk_sockets, q, XDP_PASS);
+	if (act != XDP_REDIRECT) {
+		xsk_count(KV_XSK_STAT_NO_SOCKET);
+		return XDP_PASS;
+	}
+	xsk_count(KV_XSK_STAT_REDIRECT);
+	return XDP_REDIRECT;
+}
+
 SEC("xdp")
 int kavach_xdp(struct xdp_md *ctx)
 {
@@ -101,6 +138,10 @@ int kavach_xdp(struct xdp_md *ctx)
 		xdp_emit_drop(ctx, &p, KV_STAT_XDP_DROP_RATE, 0, cfg);
 		return XDP_DROP;
 	}
+
+	/* Last step: blocklist and rate limit above still apply to gateway flows. */
+	if ((cfg->flags & KV_XDP_F_AFXDP) && xdp_gateway_redirect(ctx, &p, now) == XDP_REDIRECT)
+		return XDP_REDIRECT;
 
 	kv_count(KV_STAT_XDP_PASS);
 	return XDP_PASS;

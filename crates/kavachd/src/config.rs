@@ -39,6 +39,16 @@ pub struct Config {
     pub hash_scan_dirs: Vec<PathBuf>,
     /// Per-identity anomaly detection on the event stream (detection only).
     pub anomaly: crate::anomaly::AnomalyConfig,
+    /// L7 gateway (v0.4 preview).
+    pub gateway: GatewayConfig,
+}
+
+/// `[gateway]`.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields, default)]
+pub struct GatewayConfig {
+    /// `[gateway.afxdp]`: opt-in AF_XDP RX backend (off by default).
+    pub afxdp: kavach_gateway::afxdp::AfXdpConfig,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -79,6 +89,7 @@ impl Default for Config {
             .map(PathBuf::from)
             .to_vec(),
             anomaly: Default::default(),
+            gateway: GatewayConfig::default(),
         }
     }
 }
@@ -161,6 +172,11 @@ mod tests {
         // The example documents the defaults verbatim.
         assert_eq!(c.anomaly, crate::anomaly::AnomalyConfig::default());
         assert!(c.anomaly.validate().is_ok());
+        assert!(
+            !c.gateway.afxdp.enabled,
+            "AF_XDP backend is never on by default"
+        );
+        assert!(!super::Config::default().gateway.afxdp.enabled);
     }
 
     #[test]
@@ -173,6 +189,27 @@ mod tests {
         let c: super::Config = toml::from_str("").unwrap();
         assert!(c.anomaly.enabled);
         assert!(toml::from_str::<super::Config>("[anomaly]\nbogus = 1\n").is_err());
+    }
+
+    #[test]
+    fn gateway_afxdp_section_parses() {
+        let c: super::Config = toml::from_str(
+            r#"
+[gateway.afxdp]
+enabled = true
+iface = "eth0"
+queues = [0, 1]
+ports = [8443, "443/udp"]
+watchdog_ms = 200
+"#,
+        )
+        .unwrap();
+        let a = &c.gateway.afxdp;
+        assert!(a.enabled);
+        assert_eq!(a.queues, [0, 1]);
+        assert_eq!(a.watchdog_ms, 200);
+        a.validate().unwrap();
+        assert!(toml::from_str::<super::Config>("[gateway.afxdp]\nbogus = 1").is_err());
     }
 
     #[test]

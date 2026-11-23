@@ -13,6 +13,7 @@ kavach-common = { workspace = true, features = ["aya", "std"] }
 kavach-core = { workspace = true }
 kavach-policy = { workspace = true }
 kavach-api = { workspace = true }
+kavach-gateway = { workspace = true }
 aya = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }

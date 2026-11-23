@@ -58,9 +58,13 @@ async fn main() -> Result<()> {
     k.set_xdp_config(xdp)?;
 
     let mut xdp_failed = vec![];
+    let mut xdp_modes: Vec<(String, String)> = vec![];
     for iface in &cfg.interfaces {
         match k.attach_xdp(iface, &cfg.xdp_mode) {
-            Ok(mode) => info!(iface, mode, "XDP attached"),
+            Ok(mode) => {
+                info!(iface, mode, "XDP attached");
+                xdp_modes.push((iface.clone(), mode));
+            }
             Err(e) => {
                 error!(iface, error = %format!("{e:#}"), "XDP attach failed");
                 xdp_failed.push(iface.clone());
@@ -81,6 +85,9 @@ async fn main() -> Result<()> {
             }
         }
     }
+
+    // Opt-in AF_XDP gateway backend; lives until kavachd exits (its sockets close with it).
+    let _afxdp = start_afxdp(&mut k, &cfg, &xdp_modes);
 
     let rb = k.take_events()?;
     let xdp_mode = cfg.xdp_mode.clone();
@@ -176,6 +183,67 @@ async fn main() -> Result<()> {
         r = api => error!(result = ?r, "control API stopped"),
     }
     Ok(())
+}
+
+/// Start the AF_XDP backend when `[gateway.afxdp] enabled = true`. Order matters: sockets are
+/// bound and published (with live watchdog deadlines) first, then the port selection, and the
+/// XDP redirect flag last. When disabled, stale port selections from an earlier run are cleared
+/// (`set_xdp_config` above already cleared the flag), so the fast path is unchanged.
+fn start_afxdp(
+    k: &mut Kernel,
+    cfg: &Config,
+    xdp_modes: &[(String, String)],
+) -> Option<kavach_gateway::afxdp::Backend> {
+    use kavach_gateway::afxdp::{Backend, CountingSink, LinuxSys, XdpAttach};
+    let a = &cfg.gateway.afxdp;
+    if !a.enabled {
+        if let Err(e) = k.set_xsk_ports(&[]) {
+            warn!(error = %format!("{e:#}"), "could not clear AF_XDP port selection");
+        }
+        return None;
+    }
+    let started = (|| -> Result<Backend> {
+        a.validate().map_err(anyhow::Error::msg)?;
+        let label = xdp_modes
+            .iter()
+            .find(|(i, _)| *i == a.iface)
+            .map(|(_, m)| m.as_str())
+            .with_context(|| {
+                format!(
+                    "gateway.afxdp.iface {} has no Kavach XDP program (list it in `interfaces`)",
+                    a.iface
+                )
+            })?;
+        let maps = k.xsk_maps()?;
+        let b = Backend::start(
+            Arc::new(LinuxSys),
+            a,
+            XdpAttach::from_label(label),
+            maps,
+            |_| CountingSink::default(),
+        )?;
+        k.set_xsk_ports(&a.port_keys())?;
+        k.set_afxdp_redirect(true)?;
+        Ok(b)
+    })();
+    match started {
+        Ok(b) => {
+            let ports: Vec<String> = a.ports.iter().map(|p| p.to_string()).collect();
+            let modes: Vec<String> = b.modes().iter().map(|(q, m)| format!("{q}:{m}")).collect();
+            warn!(
+                iface = %a.iface, ?ports, ?modes, watchdog_ms = a.watchdog_ms,
+                "AF_XDP gateway backend ON: these ports now terminate in the gateway (preview \
+                 consumer counts and drops them) and bypass TC ingress policy"
+            );
+            Some(b)
+        }
+        Err(e) => {
+            let _ = k.set_afxdp_redirect(false);
+            let _ = k.set_xsk_ports(&[]);
+            error!(error = %format!("{e:#}"), "AF_XDP gateway backend not started; fast path unchanged");
+            None
+        }
+    }
 }
 
 async fn sigterm() {
