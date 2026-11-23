@@ -214,6 +214,11 @@
 #define KV_GW_STAT_STALE 6
 
 /**
+ * The punt rule names no gateway: never redirected, rule fail mode applied.
+ */
+#define KV_GW_STAT_NO_GATEWAY 7
+
+/**
  * [`GatewayCfg::flags`]: an IPv4 listener is configured (`listen4`).
  */
 #define KV_GW_F_V4 (1 << 0)
@@ -601,8 +606,8 @@ struct kv_rule {
    */
   __u64 not_after_ns;
   /**
-   * Punt rules: index of the gateway that decides (0 = the default gateway). The kernel only
-   * carries it into [`PuntRecord::gateway`]; the names live in the compiled policy.
+   * Punt rules: 1-based index of the deciding gateway in the compiled policy's `gateways`
+   * (names live there). 0 = none: the kernel never redirects the punt, its fail mode decides.
    */
   __u16 gateway;
   __u8 _pad[6];

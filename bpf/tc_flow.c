@@ -154,7 +154,7 @@ int kavach_tc_egress(struct __sk_buff *skb)
 		} else {
 			kv_evaluate(&s, KV_DIR_EGRESS, mask, p.key.dst, bpf_ntohs(p.key.dport),
 				    p.key.proto, &d);
-			if (d.punted)
+			if (d.punted && d.gateway)
 				kv_tc_gw_exempt(skb, &d);
 		}
 		v->verdict = d.verdict == KV_VERDICT_DROP ? KV_VERDICT_DROP : KV_VERDICT_ALLOW;

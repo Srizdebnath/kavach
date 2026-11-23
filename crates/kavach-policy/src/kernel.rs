@@ -89,7 +89,9 @@ impl CompiledPolicy {
                 verdict: r.verdict,
                 fail: r.fail,
                 not_after_ns: clocks.boot_deadline(r.not_after_unix),
-                // `gateway` (punt rules): index of the deciding gateway, 0 = default.
+                // 1-based into `gateways` (<= MAX_GATEWAYS); 0 = none: the kernel never
+                // redirects such a punt, its fail mode decides.
+                gateway: u16::try_from(r.gateway).unwrap_or(0),
                 ..Rule::default()
             };
         }

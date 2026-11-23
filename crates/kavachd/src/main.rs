@@ -92,11 +92,14 @@ async fn main() -> Result<()> {
         }
     }
 
+    // The active bundle's gateway policies (published by the daemon on every apply/restore);
+    // the redirect resolves gateway names from it.
+    let gateways = kavachd::gateway_policies::GatewayPolicies::new();
     // L7 gateway redirect for punted TCP connects. Lives until kavachd exits; on exit (or a
     // crash) the liveness deadline lapses and punts fall back to their fail mode. The proxy
     // resolves original destinations through `gateway.orig` (kavach_gateway::orig::OrigDst).
     let _gateway = if cfg.gateway.enabled {
-        match kavachd::gateway::start(&mut k, &cfg.gateway, std::process::id()) {
+        match kavachd::gateway::start(&mut k, &cfg.gateway, std::process::id(), gateways.clone()) {
             Ok(g) => {
                 info!(listen = %cfg.gateway.listen, listen6 = ?cfg.gateway.listen6,
                       "L7 gateway redirect attached (active while the listener is up)");
@@ -118,7 +121,11 @@ async fn main() -> Result<()> {
     let rb = k.take_events()?;
     let xdp_mode = cfg.xdp_mode.clone();
     let scan_dirs = cfg.hash_scan_dirs.clone();
-    let state = Arc::new(Mutex::new(Daemon::new(cfg, k)));
+    let state = Arc::new(Mutex::new({
+        let mut d = Daemon::new(cfg, k);
+        d.gateways = gateways; // shared with the redirect's OrigDst
+        d
+    }));
     let (tx, _) = broadcast::channel(4096);
     let (jobs_tx, jobs_rx) = mpsc::channel(8192);
     let (prewarm_tx, prewarm_rx) = mpsc::channel(4096);

@@ -1601,19 +1601,28 @@ fn gateway_redirects_punted_connects_and_records_orig_dst() {
         .expect("attach gateway programs");
     assert!(f.k().gateway_attached());
 
-    // Only TEST-NET-1 and 2001:db8::/32, port 9, are punted (fail closed).
-    f.apply_toml(
+    // Only TEST-NET-1 and 2001:db8::/32, port 9, are punted to gateway "mcp" (fail closed);
+    // port 10 is punted with no gateway named (never redirected).
+    let policy = f.apply_toml(
         r#"
 version = 1
 [defaults]
 egress = "allow"
 ingress = "allow"
+[gateway.mcp]
+allow_tools = ["search"]
 [[rule]]
 id = "punt-testnet"
-punt = { to = ["192.0.2.0/24", "2001:db8::/32"], port = 9, proto = "tcp" }
+punt = { to = ["192.0.2.0/24", "2001:db8::/32"], port = 9, proto = "tcp", gateway = "mcp" }
+fail = "closed"
+[[rule]]
+id = "punt-no-gateway"
+punt = { to = "192.0.2.0/24", port = 10, proto = "tcp" }
 fail = "closed"
 "#,
     );
+    let serial = f.d().serial;
+    f.d().gateways.publish(&policy, serial);
 
     let listen: SocketAddr = {
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1637,10 +1646,7 @@ fail = "closed"
     let gws = |f: &mut Fixture, i: u32| f.k().gw_stats().unwrap()[i as usize];
     let orig = {
         let maps = f.k().gateway_maps().unwrap();
-        kavachd::gateway::PinnedOrigDst::new(
-            maps.into_orig(),
-            Arc::new(std::sync::RwLock::new(vec![])),
-        )
+        kavachd::gateway::PinnedOrigDst::new(maps.into_orig(), f.d().gateways.clone())
     };
 
     // 1. Gateway dead: the fail mode (closed) refuses the connect.
@@ -1668,7 +1674,7 @@ fail = "closed"
         let info = orig.lookup(peer, local).expect("orig_dst record");
         assert_eq!(info.dst, want.parse::<SocketAddr>().unwrap(), "{dst}");
         assert_eq!(info.rule_id, 1);
-        assert_eq!(info.gateway, "default");
+        assert_eq!(info.gateway, "mcp");
         assert_eq!(info.pid, child.id(), "pid of the connecting process");
         assert_ne!(info.cgroup_id, 0);
         // verdict write-back lands in the entry
@@ -1717,7 +1723,14 @@ fail = "closed"
     );
     assert!(gws(&mut f, KV_GW_STAT_UNREDIRECTABLE) >= 1);
 
-    // 6. Gateway gone again: punts are refused again at once.
+    // 6. A punt rule that names no gateway is never redirected: its fail mode decides.
+    assert!(
+        !cg.run("echo hi > /dev/tcp/192.0.2.1/10"),
+        "punt without a gateway: fail closed"
+    );
+    assert!(gws(&mut f, KV_GW_STAT_NO_GATEWAY) >= 1);
+
+    // 7. Gateway gone again: punts are refused again at once.
     live(&mut f, false);
     assert!(!cg.run("echo hi > /dev/tcp/192.0.2.1/9"));
 

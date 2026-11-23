@@ -23,7 +23,7 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -34,14 +34,12 @@ use kavach_gateway::orig::{OrigDst, OrigInfo};
 use tracing::{info, warn};
 
 use crate::config::GatewayConfig;
+use crate::gateway_policies::{GatewayPolicies, GatewaySnapshot};
 
 /// How often the heartbeat checks the listener and renews the deadline.
 pub const TICK: Duration = Duration::from_secs(1);
 /// How far ahead each renewal pushes the deadline (three missed ticks = gateway dead).
 pub const HORIZON: Duration = Duration::from_secs(3);
-
-/// Gateway name for an index with no name in the active policy.
-pub const DEFAULT_GATEWAY: &str = "default";
 
 /// Pinned `orig_dst` + `gw_cfg` handles (independent of the daemon lock).
 pub struct GatewayMaps {
@@ -76,22 +74,14 @@ pub fn orig_key(peer: SocketAddr, local: SocketAddr) -> OrigKey {
     }
 }
 
-/// Name of gateway `idx`: `names[idx]` from the active policy, [`DEFAULT_GATEWAY`] for 0 (or
-/// when the policy names none), `#<idx>` for an index the policy does not name.
-pub fn gateway_name(idx: u16, names: &[String]) -> String {
-    match names.get(idx as usize) {
-        Some(n) if !n.is_empty() => n.clone(),
-        _ if idx == 0 => DEFAULT_GATEWAY.to_owned(),
-        _ => format!("#{idx}"),
-    }
-}
-
-/// Decode an `orig_dst` record.
-pub fn orig_info(r: &PuntRecord, names: &[String]) -> OrigInfo {
+/// Decode an `orig_dst` record. The gateway name comes from the active bundle's gateway
+/// policies (rule id -> `[gateway.<name>]`); empty when that rule names none in the active
+/// policy (e.g. the policy changed since the connect): the proxy must then refuse the flow.
+pub fn orig_info(r: &PuntRecord, gateways: &GatewaySnapshot) -> OrigInfo {
     OrigInfo {
         dst: SocketAddr::new(from_mapped(from_words(r.dst)), u16::from_be(r.dport)),
         rule_id: r.rule_id,
-        gateway: gateway_name(r.gateway, names),
+        gateway: gateways.rules.get(&r.rule_id).cloned().unwrap_or_default(),
         cgroup_id: r.cgroup_id,
         pid: r.pid,
     }
@@ -196,11 +186,11 @@ pub fn live_flags(v4_up: bool, v6_configured: bool, v6_up: bool) -> u32 {
 // OrigDst over the pinned map
 // ---------------------------------------------------------------------------------------------
 
-/// [`OrigDst`] backed by the pinned `orig_dst` map. Gateway names come from `names`, which
-/// kavachd keeps in sync with the active policy's gateway table (index → name).
+/// [`OrigDst`] backed by the pinned `orig_dst` map. Gateway names come from the
+/// [`GatewayPolicies`] handle kavachd publishes every applied bundle to.
 pub struct PinnedOrigDst {
     orig: Mutex<HashMap<MapData, OrigKey, PuntRecord>>,
-    names: Arc<RwLock<Vec<String>>>,
+    gateways: GatewayPolicies,
 }
 
 impl std::fmt::Debug for PinnedOrigDst {
@@ -210,13 +200,10 @@ impl std::fmt::Debug for PinnedOrigDst {
 }
 
 impl PinnedOrigDst {
-    pub fn new(
-        orig: HashMap<MapData, OrigKey, PuntRecord>,
-        names: Arc<RwLock<Vec<String>>>,
-    ) -> Self {
+    pub fn new(orig: HashMap<MapData, OrigKey, PuntRecord>, gateways: GatewayPolicies) -> Self {
         Self {
             orig: Mutex::new(orig),
-            names,
+            gateways,
         }
     }
 
@@ -263,8 +250,7 @@ fn libc_enoent() -> i32 {
 impl OrigDst for PinnedOrigDst {
     fn lookup(&self, peer: SocketAddr, local: SocketAddr) -> Option<OrigInfo> {
         let r = self.record(peer, local)?;
-        let names = self.names.read().ok()?;
-        Some(orig_info(&r, &names))
+        Some(orig_info(&r, &self.gateways.snapshot()))
     }
 }
 
@@ -348,12 +334,10 @@ impl Drop for Heartbeat {
     }
 }
 
-/// A running gateway redirect: hand [`Gateway::orig`] to the proxy; keep [`Gateway::names`] in
-/// sync with the active policy's gateway table.
+/// A running gateway redirect: hand [`Gateway::orig`] to the proxy.
 #[derive(Debug)]
 pub struct Gateway {
     pub orig: Arc<PinnedOrigDst>,
-    pub names: Arc<RwLock<Vec<String>>>,
     pub heartbeat: Heartbeat,
 }
 
@@ -365,6 +349,7 @@ pub fn start(
     k: &mut crate::kernel::Kernel,
     g: &GatewayConfig,
     exempt_tgid: u32,
+    gateways: GatewayPolicies,
 ) -> anyhow::Result<Gateway> {
     use anyhow::{Context, bail};
     g.validate().map_err(anyhow::Error::msg)?;
@@ -384,12 +369,10 @@ pub fn start(
         k.set_gateway_cfg(base)?;
         k.attach_gateway(&root)?;
         let maps = k.gateway_maps()?;
-        let names = Arc::new(RwLock::new(Vec::new()));
         let heartbeat = Heartbeat::start(maps.cfg, base, g.listen, g.listen6)
             .context("spawning the gateway heartbeat")?;
         Ok(Gateway {
-            orig: Arc::new(PinnedOrigDst::new(maps.orig, names.clone())),
-            names,
+            orig: Arc::new(PinnedOrigDst::new(maps.orig, gateways)),
             heartbeat,
         })
     })();
@@ -436,31 +419,42 @@ mod tests {
     }
 
     #[test]
-    fn records_decode_and_names_resolve() {
+    fn records_decode_and_gateways_resolve_by_rule() {
+        let src = r#"
+version = 1
+[gateway.mcp]
+allow_tools = ["search"]
+[[rule]]
+id = "mcp"
+punt = { to = "93.184.216.0/24", port = 443, proto = "tcp", gateway = "mcp" }
+"#;
+        let p = kavach_policy::compile(src, 0).unwrap().policy;
+        let h = GatewayPolicies::new();
+        h.publish(&p, 1);
+        let snap = h.snapshot();
         let r = PuntRecord {
             cgroup_id: 77,
             dst: to_words(to_mapped("93.184.216.34".parse().unwrap())),
             dport: 443u16.to_be(),
-            rule_id: 5,
+            rule_id: 1,
             pid: 1234,
             gateway: 1,
             ..Default::default()
         };
-        let names = vec![String::new(), "mcp".to_owned()];
-        let i = orig_info(&r, &names);
+        let i = orig_info(&r, &snap);
         assert_eq!(i.dst, "93.184.216.34:443".parse().unwrap());
-        assert_eq!((i.rule_id, i.cgroup_id, i.pid), (5, 77, 1234));
+        assert_eq!((i.rule_id, i.cgroup_id, i.pid), (1, 77, 1234));
         assert_eq!(i.gateway, "mcp");
-        assert_eq!(gateway_name(0, &names), "default");
-        assert_eq!(gateway_name(0, &[]), "default");
-        assert_eq!(gateway_name(9, &names), "#9");
+        // a rule the active policy does not punt to a gateway: no name, the proxy refuses
+        let stale = PuntRecord { rule_id: 9, ..r };
+        assert_eq!(orig_info(&stale, &snap).gateway, "");
         let v6 = PuntRecord {
             dst: to_words("2001:db8::1".parse::<Ipv6Addr>().unwrap().octets()),
             dport: 8443u16.to_be(),
             ..Default::default()
         };
         assert_eq!(
-            orig_info(&v6, &[]).dst,
+            orig_info(&v6, &GatewaySnapshot::default()).dst,
             "[2001:db8::1]:8443".parse().unwrap()
         );
     }

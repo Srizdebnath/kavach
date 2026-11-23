@@ -261,6 +261,11 @@ static __always_inline int kv_gw_take(struct sock *sk, const struct kv_identity 
 	}
 	if (!d->punted)
 		return 0;
+	if (!d->gateway) {
+		/* No gateway named: nobody could judge it at L7, so its fail mode decides. */
+		kv_gw_count(KV_GW_STAT_NO_GATEWAY);
+		return 0;
+	}
 
 	struct kv_gateway_cfg *g = kv_gw_live();
 	if (!g) {

@@ -394,8 +394,8 @@ pub struct Rule {
     pub fail: u8,
     /// 0 = no TTL; else `CLOCK_BOOTTIME` ns after which the rule no longer matches.
     pub not_after_ns: u64,
-    /// Punt rules: index of the gateway that decides (0 = the default gateway). The kernel only
-    /// carries it into [`PuntRecord::gateway`]; the names live in the compiled policy.
+    /// Punt rules: 1-based index of the deciding gateway in the compiled policy's `gateways`
+    /// (names live there). 0 = none: the kernel never redirects the punt, its fail mode decides.
     pub gateway: u16,
     pub _pad: [u8; 6],
     pub _reserved: u64,
@@ -447,6 +447,8 @@ pub const KV_GW_STAT_ORIG_FAIL: u32 = 4;
 pub const KV_GW_STAT_ORIG_CLOSED: u32 = 5;
 /// The connect hook found a punt record that does not describe this connect: ignored.
 pub const KV_GW_STAT_STALE: u32 = 6;
+/// The punt rule names no gateway: never redirected, rule fail mode applied.
+pub const KV_GW_STAT_NO_GATEWAY: u32 = 7;
 
 /// [`GatewayCfg::flags`]: an IPv4 listener is configured (`listen4`).
 pub const KV_GW_F_V4: u32 = 1 << 0;
