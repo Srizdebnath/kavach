@@ -86,6 +86,12 @@ pub const KV_POL_F_NO_LOOPBACK_BYPASS: u32 = 1 << 2;
 /// Refuse egress from a classifiable executable that has no committed hash yet, while the
 /// policy has executable selectors (closes the first-run window; `unclassified = "deny"`).
 pub const KV_POL_F_UNCLASSIFIED_DENY: u32 = 1 << 3;
+/// The policy has k8s / SPIFFE (workload) selectors: OR the `wl_class` mask of the task's
+/// nearest classified cgroup (itself, else its deepest listed ancestor) into the cgroup mask.
+pub const KV_POL_F_WORKLOAD: u32 = 1 << 4;
+
+/// Entries in `wl_class` (cgroup id → [`ClassVal`]; kavachd counts what does not fit).
+pub const KV_WL_MAX: u32 = 16384;
 
 /// [`FlowVal::flags`] bits.
 /// Entry is the reply direction of a locally-originated flow (always allowed).

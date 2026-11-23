@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::schema::*;
+use crate::workload::{LabelSelector, SpiffePattern, WorkloadKind, WorkloadSel};
 
 pub const MAX_SET_ENTRIES: usize = 4096;
 
@@ -159,6 +160,37 @@ pub struct CompiledPolicy {
     pub sets: Vec<AddrSet>,
     pub rules: Vec<CompiledRule>,
     pub agents: Vec<AgentSpec>,
+    /// k8s / SPIFFE parts of selectors (bundle format 3+); see [`crate::workload`].
+    pub workloads: Vec<WorkloadSel>,
+}
+
+/// Bundle format 2 payload (before `workloads`); decoded and upgraded on verify.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompiledPolicyV2 {
+    pub version: u32,
+    pub created_unix: u64,
+    pub source_sha256: [u8; 32],
+    pub defaults: CompiledDefaults,
+    pub selectors: Vec<Selector>,
+    pub sets: Vec<AddrSet>,
+    pub rules: Vec<CompiledRule>,
+    pub agents: Vec<AgentSpec>,
+}
+
+impl From<CompiledPolicyV2> for CompiledPolicy {
+    fn from(p: CompiledPolicyV2) -> Self {
+        Self {
+            version: p.version,
+            created_unix: p.created_unix,
+            source_sha256: p.source_sha256,
+            defaults: p.defaults,
+            selectors: p.selectors,
+            sets: p.sets,
+            rules: p.rules,
+            agents: p.agents,
+            workloads: Vec::new(),
+        }
+    }
 }
 
 /// Bundle format 1 payload (before `unclassified_deny`); decoded and upgraded on verify.
@@ -199,6 +231,7 @@ impl From<CompiledPolicyV1> for CompiledPolicy {
             sets: p.sets,
             rules: p.rules,
             agents: p.agents,
+            workloads: Vec::new(),
         }
     }
 }
@@ -392,7 +425,8 @@ pub fn compile_file(
         );
     }
 
-    let mut selectors: BTreeMap<Selector, usize> = BTreeMap::new();
+    let mut selectors: BTreeMap<(Selector, Option<WorkloadKind>), usize> = BTreeMap::new();
+    let mut workloads: Vec<WorkloadSel> = Vec::new();
     let mut sel_list: Vec<Selector> = Vec::new();
     let mut sets: BTreeMap<(Vec<IpNet>, Vec<String>), usize> = BTreeMap::new();
     let mut set_list: Vec<AddrSet> = Vec::new();
@@ -444,9 +478,22 @@ pub fn compile_file(
 
         // Who
         let mut sel = Selector::default();
+        let mut workload: Option<WorkloadKind> = None;
         if let Some(w) = &r.who {
             if w.k8s.is_some() || w.spiffe.is_some() {
-                d.err(rid, "k8s / spiffe selectors require the v0.4 node agent");
+                let k8s = w.k8s.as_deref().map(LabelSelector::parse).transpose();
+                let spiffe = w.spiffe.as_deref().map(SpiffePattern::parse).transpose();
+                match (k8s, spiffe) {
+                    (Ok(k8s), Ok(spiffe)) => workload = Some(WorkloadKind::Match { k8s, spiffe }),
+                    (Err(e), _) | (_, Err(e)) => d.err(rid, e),
+                }
+                if w.cgroup.is_some() {
+                    d.err(
+                        rid,
+                        "k8s / spiffe selectors already identify the pod's cgroup; they cannot \
+                         be combined with `cgroup` in one `who`",
+                    );
+                }
             }
             for b in w.binary.as_ref().map(OneOrMany::to_vec).unwrap_or_default() {
                 match parse_sha256(&b) {
@@ -493,29 +540,57 @@ pub fn compile_file(
             sel.cgroups.sort();
             sel.cgroups.dedup();
         }
-        if dir == Direction::Ingress && !sel.is_any() {
+        let any = sel.is_any() && workload.is_none();
+        if dir == Direction::Ingress && !any {
             d.err(
                 rid,
                 "ingress rules cannot use `who` yet (local service identity lands in v0.4)",
             );
         }
-        let sel_mask = if sel.is_any() {
-            0
-        } else {
+        let mut intern = |sel: &Selector, wl: Option<WorkloadKind>, d: &mut Diags| -> u64 {
             let n = sel_list.len();
-            let bit = *selectors.entry(sel.clone()).or_insert_with(|| {
-                sel_list.push(sel);
-                n
-            });
+            let bit = *selectors
+                .entry((sel.clone(), wl.clone()))
+                .or_insert_with(|| {
+                    sel_list.push(sel.clone());
+                    if let Some(kind) = wl {
+                        workloads.push(WorkloadSel {
+                            sel: n as u32,
+                            kind,
+                        });
+                    }
+                    n
+                });
             if bit >= KV_MAX_SELECTORS as usize {
                 d.err(
                     rid,
-                    format!("more than {KV_MAX_SELECTORS} distinct selectors"),
+                    format!(
+                        "more than {KV_MAX_SELECTORS} distinct selectors (each fail-closed k8s / \
+                         spiffe selector uses a second one for its unknown-identity twin)"
+                    ),
                 );
                 0
             } else {
                 1u64 << bit
             }
+        };
+        let sel_mask = if any {
+            0
+        } else {
+            intern(&sel, workload.clone(), &mut d)
+        };
+        // Fail-closed workload rules: a `drop` twin that matches pods whose identity kavachd has
+        // not resolved yet (see `crate::workload`). Log rules only observe, so they just skip.
+        let fail_mode = r.fail.unwrap_or(file.defaults.fail);
+        let unknown_mask = if workload.is_some()
+            && sel_mask != 0
+            && fail_mode == FailMode::Closed
+            && action != Action::Log
+        {
+            let of = sel_mask.trailing_zeros();
+            intern(&sel, Some(WorkloadKind::Unknown { of }), &mut d)
+        } else {
+            0
         };
 
         // Remote
@@ -592,28 +667,34 @@ pub fn compile_file(
             d.warn(rid, "port given without proto: matches both tcp and udp");
         }
 
-        let fail = match r.fail.unwrap_or(file.defaults.fail) {
+        let fail = match fail_mode {
             FailMode::Open => KV_FAIL_OPEN,
             FailMode::Closed => KV_FAIL_CLOSED,
         };
-        for (lo, hi) in ports {
-            rules.push(CompiledRule {
-                name: r.id.clone(),
-                id: idx as u32 + 1,
-                sel: sel_mask,
-                dir: match dir {
-                    Direction::Egress => KV_DIR_EGRESS,
-                    Direction::Ingress => KV_DIR_INGRESS,
-                },
-                proto,
-                port_lo: lo,
-                port_hi: hi,
-                remote_set,
-                verdict: action_verdict(action),
-                fail,
-                not_after_unix,
-            });
+        let mut push = |sel: u64, verdict: u8| {
+            for &(lo, hi) in &ports {
+                rules.push(CompiledRule {
+                    name: r.id.clone(),
+                    id: idx as u32 + 1,
+                    sel,
+                    dir: match dir {
+                        Direction::Egress => KV_DIR_EGRESS,
+                        Direction::Ingress => KV_DIR_INGRESS,
+                    },
+                    proto,
+                    port_lo: lo,
+                    port_hi: hi,
+                    remote_set,
+                    verdict,
+                    fail,
+                    not_after_unix,
+                });
+            }
+        };
+        if unknown_mask != 0 {
+            push(unknown_mask, Verdict::Drop as u8);
         }
+        push(sel_mask, action_verdict(action));
     }
 
     if rules.len() > KV_MAX_RULES as usize {
@@ -662,6 +743,7 @@ pub fn compile_file(
         sets: set_list,
         rules,
         agents: file.agents.clone(),
+        workloads,
     };
     Ok(CompileOutput {
         policy,

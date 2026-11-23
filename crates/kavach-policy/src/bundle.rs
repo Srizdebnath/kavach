@@ -20,7 +20,9 @@ use thiserror::Error;
 use crate::compile::CompiledPolicy;
 
 pub const MAGIC: &[u8; 4] = b"KVB1";
-pub const FORMAT: u16 = 2;
+pub const FORMAT: u16 = 3;
+/// Bundles signed before `CompiledPolicy::workloads` (k8s / SPIFFE selectors); still accepted.
+pub const FORMAT_V2: u16 = 2;
 /// Bundles signed before `CompiledDefaults::unclassified_deny` existed; still accepted.
 pub const FORMAT_V1: u16 = 1;
 pub const DOMAIN: &[u8] = b"kavach-bundle-v1\0";
@@ -99,7 +101,7 @@ impl BundleHeader {
         let u16le = |o: usize| u16::from_le_bytes([h[o], h[o + 1]]);
         let u64le = |o: usize| u64::from_le_bytes(h[o..o + 8].try_into().unwrap());
         let format = u16le(4);
-        if format != FORMAT && format != FORMAT_V1 {
+        if format != FORMAT && format != FORMAT_V2 && format != FORMAT_V1 {
             return Err(BundleError::Format(format));
         }
         let fleet_raw = &h[40..72];
@@ -156,6 +158,27 @@ pub fn sign(
     let payload = postcard::to_allocvec(policy).map_err(|e| BundleError::Encode(e.to_string()))?;
     sign_payload(
         FORMAT,
+        &payload,
+        policy.created_unix,
+        sk,
+        serial,
+        not_after_unix,
+        fleet,
+    )
+}
+
+/// A format-2 bundle, as v0.3 `kavachctl` signed them (compatibility tests).
+#[doc(hidden)]
+pub fn sign_v2(
+    policy: &crate::compile::CompiledPolicyV2,
+    sk: &SigningKey,
+    serial: u64,
+    not_after_unix: u64,
+    fleet: &str,
+) -> Result<Vec<u8>, BundleError> {
+    let payload = postcard::to_allocvec(policy).map_err(|e| BundleError::Encode(e.to_string()))?;
+    sign_payload(
+        FORMAT_V2,
         &payload,
         policy.created_unix,
         sk,
@@ -290,6 +313,10 @@ pub fn verify(
     let decode_err = |e: postcard::Error| BundleError::Decode(e.to_string());
     let policy: CompiledPolicy = if format == FORMAT_V1 {
         postcard::from_bytes::<crate::compile::CompiledPolicyV1>(payload)
+            .map_err(decode_err)?
+            .into()
+    } else if format == FORMAT_V2 {
+        postcard::from_bytes::<crate::compile::CompiledPolicyV2>(payload)
             .map_err(decode_err)?
             .into()
     } else {

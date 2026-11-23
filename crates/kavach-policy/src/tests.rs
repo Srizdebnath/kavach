@@ -163,12 +163,14 @@ allow = { to = "10.0.0.0/8" }
 }
 
 #[test]
-fn ingress_who_and_v04_selectors_rejected() {
+fn ingress_who_rejected() {
     let e = errors(
         "version=1\n[[rule]]\nid='i'\ndirection='ingress'\nwho={user=0}\nallow={from='1.1.1.1'}\n",
     );
     assert!(e[0].contains("v0.4"));
-    let e = errors("version=1\n[[rule]]\nid='k'\nwho={k8s='app=db'}\ndeny={}\n");
+    let e = errors(
+        "version=1\n[[rule]]\nid='i'\ndirection='ingress'\nwho={k8s='app=db'}\nallow={from='1.1.1.1'}\n",
+    );
     assert!(e[0].contains("v0.4"));
 }
 

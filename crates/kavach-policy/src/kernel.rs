@@ -47,6 +47,8 @@ impl CompiledPolicy {
                 wc |= 1 << i;
             }
         }
+        // k8s / SPIFFE selectors constrain the cgroup dimension (through `wl_class`).
+        wc &= !self.workload_bits();
         (we, wu, wc, used)
     }
 
@@ -63,6 +65,9 @@ impl CompiledPolicy {
         }
         if self.defaults.unclassified_deny {
             flags |= KV_POL_F_UNCLASSIFIED_DENY;
+        }
+        if self.workload_bits() != 0 {
+            flags |= KV_POL_F_WORKLOAD;
         }
         p.hdr = PolicyHeader {
             n_rules: self.rules.len().min(KV_MAX_RULES as usize) as u32,
@@ -104,12 +109,28 @@ impl CompiledPolicy {
             .collect()
     }
 
-    /// Mask of selectors satisfied by `facts` (host-side reference of the kernel's three-way AND).
+    /// Mask of selectors satisfied by `facts` (host-side reference of the kernel's three-way AND),
+    /// for a process outside any pod.
     pub fn selector_mask(&self, facts: &Facts<'_>) -> u64 {
+        self.selector_mask_in(facts, None)
+    }
+
+    /// [`Self::selector_mask`] for a process whose cgroup has workload state `wl` (`None` = not
+    /// a pod): workload selectors also need their k8s / SPIFFE part satisfied.
+    pub fn selector_mask_in(
+        &self,
+        facts: &Facts<'_>,
+        wl: Option<crate::workload::WorkloadState<'_>>,
+    ) -> u64 {
+        let wl_bits = self.workload_bits();
+        let wl_ok = wl.map_or(0, |st| self.workload_mask(st));
         self.selectors
             .iter()
             .enumerate()
-            .filter(|(_, s)| s.matches(facts))
+            .filter(|(i, s)| {
+                let bit = 1u64 << i;
+                s.matches(facts) && (wl_bits & bit == 0 || wl_ok & bit != 0)
+            })
             .fold(0, |m, (i, _)| m | (1 << i))
     }
 }

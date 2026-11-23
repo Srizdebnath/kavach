@@ -140,6 +140,17 @@
 #define KV_POL_F_UNCLASSIFIED_DENY (1 << 3)
 
 /**
+ * The policy has k8s / SPIFFE (workload) selectors: OR the `wl_class` mask of the task's
+ * nearest classified cgroup (itself, else its deepest listed ancestor) into the cgroup mask.
+ */
+#define KV_POL_F_WORKLOAD (1 << 4)
+
+/**
+ * Entries in `wl_class` (cgroup id → [`ClassVal`]; kavachd counts what does not fit).
+ */
+#define KV_WL_MAX 16384
+
+/**
  * [`FlowVal::flags`] bits.
  * Entry is the reply direction of a locally-originated flow (always allowed).
  */
