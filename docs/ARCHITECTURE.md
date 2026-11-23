@@ -195,13 +195,17 @@ has hashed it, typically within milliseconds of exec.
 
 * No match ⇒ `default[dir]`.
 * `Punt` (no L7 consumer before v0.4) resolves through the rule's fail mode: closed ⇒ drop,
-  open ⇒ log.
+  open ⇒ log. A punt rule may name a `[gateway.<name>]` policy. The gateway index stays in
+  user space; the kernel rule table is unchanged. kavachd publishes the active bundle's gateway
+  policies (`GatewayPolicies` in `kavachd/src/gateway_policies.rs`, keyed by name and by punt
+  rule id) for the proxy, which decides each frame with `kavach_gateway::ToolPolicy`.
 * Egress to loopback bypasses evaluation unless the policy sets `loopback_bypass = false`.
 * The scan runs once per connection (LSM) or once per new flow (TC).
 
 `kavach-core::evaluate()` is the same algorithm over the same `#[repr(C)]` tables in Rust. It is
 the reference semantics:
-* `kavachctl explain` runs it with per-rule traces.
+* `kavachctl explain` runs it with per-rule traces. For a punted flow, `--tool` / `--jsonrpc`
+  also run the gateway's `ToolPolicy` on the call and name the pattern that decided it.
 * The privileged differential test feeds 400 random flows to both the C program
   (`BPF_PROG_TEST_RUN`) and the Rust evaluator and asserts identical verdicts.
 
@@ -255,12 +259,22 @@ policies. Measured flip and drain on 7.1: 20–100 µs.
 signature = Ed25519(sk, "kavach-bundle-v1\0" ‖ header ‖ payload)     key_id = SHA-256(pk)[..8]
 ```
 
+| `version` | Payload | Written by |
+|---|---|---|
+| 1 | no `unclassified_deny` (`CompiledPolicyV1`) | releases before `unclassified`; still verified |
+| 2 | no gateway policies (`CompiledPolicyV2`) | today, for any policy without `[gateway.*]` |
+| 3 | `gateways` plus a per-rule gateway index (`CompiledPolicy`) | today, for policies with gateways |
+
+`sign()` writes the oldest format that can hold the policy, so a host on an older release keeps
+accepting every gateway-free bundle. `verify()` decodes all three formats into today's
+`CompiledPolicy`. Golden 0.3.1 bundles in `crates/kavach-policy/testdata/` must keep verifying.
+
 kavachd rejects a bundle when any of these hold:
 * The key is untrusted or revoked.
 * The signature fails.
 * The fleet differs.
 * `serial` ≤ the active serial (anti-rollback).
-* The payload fails structural decoding.
+* The payload fails structural decoding, or a rule references a gateway the payload lacks.
 
 An **expired** bundle is refused on apply. One that expires while active keeps enforcing and is
 flagged in `status` and metrics, because silently dropping protection would be worse.

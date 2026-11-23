@@ -4,6 +4,20 @@ All notable changes to Kavach. The format follows [Keep a Changelog](https://kee
 and the project uses [Semantic Versioning](https://semver.org/). Release milestones (v0.1 … v0.5
 in the README) describe *scope*; version numbers describe *releases*.
 
+## [Unreleased]
+
+### Added
+- Named L7 gateway policies in kavach.toml (`[gateway.<name>]`: `allow_tools`, `deny_tools`,
+  `allow_resources`, `allow_agent_messages`, `allow_other`, `tls`), referenced by `punt`
+  rules with `gateway = "<name>"`. They are validated (unknown or unused names, pattern
+  syntax, deny patterns shadowing allows, duplicates) and signed into the bundle.
+- Bundle format 3 carries them. Gateway-free policies are still signed as format 2, and
+  formats 1 and 2 still verify.
+- `kavachctl explain --tool <name> | --jsonrpc '<frame>'` evaluates an MCP / A2A call on a
+  punted flow and names the deciding pattern. New `kavachctl gateway list` and
+  `kavachctl gateway test <name> <frames.jsonl>`.
+- kavachd publishes the active bundle's gateway policies to a shared handle for the gateway proxy.
+
 ## [0.3.1] - 2026-11-23
 
 First release with installable, signed packages: `.deb`, `.rpm` and a static (musl) tarball

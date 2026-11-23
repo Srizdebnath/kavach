@@ -16,6 +16,9 @@ pub enum Change {
         to: usize,
     },
     Defaults,
+    GatewayAdded(String),
+    GatewayRemoved(String),
+    GatewayModified(String),
 }
 
 impl fmt::Display for Change {
@@ -26,6 +29,9 @@ impl fmt::Display for Change {
             Self::Modified(n) => write!(f, "~ rule {n}"),
             Self::Moved { name, from, to } => write!(f, "↕ rule {name} (position {from} → {to})"),
             Self::Defaults => write!(f, "~ defaults"),
+            Self::GatewayAdded(n) => write!(f, "+ gateway {n}"),
+            Self::GatewayRemoved(n) => write!(f, "- gateway {n}"),
+            Self::GatewayModified(n) => write!(f, "~ gateway {n}"),
         }
     }
 }
@@ -55,8 +61,10 @@ fn describe(p: &CompiledPolicy, r: &CompiledRule) -> String {
             .get(n as usize - 1)
             .map_or("?".into(), |s| format!("{:?}{:?}", s.cidrs, s.fqdns)),
     };
+    let gateway = p.rule_gateway(r).map_or("-", |g| g.name.as_str());
     format!(
-        "dir={} sel={sel} proto={} ports={}-{} remote={set} verdict={} fail={} ttl={}",
+        "dir={} sel={sel} proto={} ports={}-{} remote={set} verdict={} fail={} ttl={} \
+         gateway={gateway}",
         r.dir, r.proto, r.port_lo, r.port_hi, r.verdict, r.fail, r.not_after_unix
     )
 }
@@ -65,6 +73,18 @@ pub fn diff(old: &CompiledPolicy, new: &CompiledPolicy) -> Vec<Change> {
     let mut out = Vec::new();
     if old.defaults != new.defaults {
         out.push(Change::Defaults);
+    }
+    for g in &old.gateways {
+        match new.gateway(&g.name) {
+            None => out.push(Change::GatewayRemoved(g.name.clone())),
+            Some(n) if n != g => out.push(Change::GatewayModified(g.name.clone())),
+            _ => {}
+        }
+    }
+    for g in &new.gateways {
+        if old.gateway(&g.name).is_none() {
+            out.push(Change::GatewayAdded(g.name.clone()));
+        }
     }
     let (a, b) = (by_name(old), by_name(new));
     let order_a: Vec<&String> = {

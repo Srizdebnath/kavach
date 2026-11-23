@@ -135,6 +135,8 @@ pub struct Daemon {
     pub pinned: HashMap<String, File>,
     /// Wakes the hash scanner (full scan) after the active policy changed.
     pub scan_kick: Arc<tokio::sync::Notify>,
+    /// L7 gateway policies of the active bundle, for the gateway proxy (clone the handle).
+    pub gateways: crate::gateway_policies::GatewayPolicies,
 }
 
 impl Daemon {
@@ -158,6 +160,7 @@ impl Daemon {
             prewarm_pending: 0,
             pinned: HashMap::new(),
             scan_kick: Arc::new(tokio::sync::Notify::new()),
+            gateways: Default::default(),
         }
     }
 
@@ -372,6 +375,7 @@ impl Daemon {
         }
         let policy = Arc::new(v.policy);
         report.swap_micros = self.stage(policy.clone(), v.header.serial)?;
+        self.gateways.publish(&policy, v.header.serial);
         report.generation = self.generation;
         report.warnings.extend(self.prewarm(&policy));
         let identity_rules = policy.rules.iter().filter(|r| r.sel != 0).count();
@@ -392,6 +396,7 @@ impl Daemon {
                 "key_id": hex::encode(v.header.key_id),
                 "source_sha256": hex::encode(policy.source_sha256),
                 "rules": policy.rules.len(),
+                "gateways": policy.gateways.len(),
                 "changes": report.changes,
             }),
         );
@@ -521,6 +526,7 @@ impl Daemon {
         self.expired = v.expired;
         let policy = Arc::new(v.policy);
         self.stage(policy.clone(), v.header.serial)?;
+        self.gateways.publish(&policy, v.header.serial);
         for w in self.prewarm(&policy) {
             warn!("{w}");
         }

@@ -413,10 +413,71 @@ already stopped. Config, state and logs are kept.
 | `ttl` | e.g. `"30d"`: the rule stops matching at expiry without operator action |
 | `fail` | `open` or `closed` (per rule, or in `[defaults]`) |
 | `[defaults] unclassified` | `allow` or `deny` for executables whose hash is not known yet |
+| `punt` | hand the flow to the L7 gateway: `punt = { to, port, proto, gateway = "<name>" }` |
+| `[gateway.<name>]` | a named L7 (MCP / A2A) policy for punted flows; see below |
 
 The compiler rejects invalid CIDRs/ports, unknown fields, contradictions and **shadowed rules**
 (a rule that can never match because an earlier one covers it). Limits: 1 024 rules, 64 identity
 selectors, 64 address sets per policy. Full example: [`examples/kavach.toml`](examples/kavach.toml).
+
+### Gateway policies (v0.4 preview)
+
+A `punt` rule names a gateway policy. The gateway decides each JSON-RPC frame of the punted
+connection with that policy:
+
+```toml
+[gateway.github-agent]
+allow_tools          = ["github.*", "search"]  # MCP tools/call: exact name or prefix ending in `*`
+deny_tools           = ["github.delete_*"]     # checked before allow_tools
+allow_resources      = ["repo://acme/"]        # resources/read: URI prefixes
+allow_agent_messages = false                   # A2A message/send and message/stream
+allow_other          = false                   # any other JSON-RPC method
+tls                  = "deny"                  # TLS the gateway does not terminate: deny | allow
+
+[[rule]]
+id   = "agent-to-github-mcp"
+who  = { user = "agent" }
+punt = { to = "203.0.113.10", port = 443, proto = "tcp", gateway = "github-agent" }
+```
+
+| Field | Default | Meaning |
+|---|---|---|
+| `allow_tools` | `[]` | tool calls allowed when a pattern matches and no `deny_tools` pattern does |
+| `deny_tools` | `[]` | tool calls always refused |
+| `allow_resources` | `[]` | URI prefixes `resources/read` may read (a trailing `*` is accepted) |
+| `allow_agent_messages` | `false` | delegation to other agents (A2A) |
+| `allow_other` | `false` | methods not covered above |
+| `tls` | `"deny"` | `deny` refuses a stream it cannot read; `allow` lets it through uninspected |
+
+Handshake and discovery traffic (`initialize`, `ping`, `*/list`, notifications) is always
+allowed, and a frame that does not parse is denied. In patterns, `*` may only be the last
+character.
+
+The compiler treats these as errors:
+* an unknown gateway name, or `gateway` on a rule that is not `punt`;
+* bad pattern syntax;
+* an `allow_tools` pattern that a `deny_tools` pattern covers, since it can never match (only a
+  warning under `allow_shadowed`).
+
+It warns about unused gateways, an empty `allow_tools`, duplicate or redundant entries, and
+`punt` rules without a gateway. `[defaults]` cannot be `punt`.
+
+Until the gateway proxy runs, punted flows still resolve through the rule's fail mode. You can
+check a policy offline:
+
+```sh
+kavachctl explain --policy kavach.toml --to 203.0.113.10 --port 443 --user agent --tool github.delete_repo
+#   verdict: drop  (rule "agent-to-github-mcp", punt resolved by fail mode)
+#   gateway: github-agent  (tls = deny)
+#     call:    tools/call github.delete_repo
+#   l7 verdict: deny  (deny_tools pattern "github.delete_*")
+kavachctl explain ... --jsonrpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search"}}'
+kavachctl gateway test github-agent frames.jsonl --policy kavach.toml   # one frame per line
+kavachctl gateway list --policy kavach.toml
+```
+
+Gateway policies are signed inside the bundle (format 3). A policy without gateways is still
+signed as format 2, so hosts running an older release keep accepting it.
 
 ## Operating it
 

@@ -20,6 +20,11 @@ postcard = { workspace = true }
 ipnet = { workspace = true }
 getrandom = { workspace = true }
 hex = "0.4"
+# `gateway`: conversions into `kavach_gateway::ToolPolicy` (kavachd, kavachctl).
+kavach-gateway = { workspace = true, optional = true }
+
+[features]
+gateway = ["dep:kavach-gateway"]
 
 [dev-dependencies]
 proptest = { workspace = true }

@@ -120,8 +120,24 @@ pub enum Decision {
     Deny,
 }
 
+/// What the gateway does with a punted stream it cannot read because it is TLS it does not
+/// terminate (no JSON-RPC frame is visible, so no tool decision can be made).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TlsMode {
+    /// Refuse the stream (fail closed). The default.
+    #[default]
+    Deny,
+    /// Pass it through uninspected: only the L3/L4 rule that punted it applies.
+    Allow,
+}
+
 /// Per-agent tool policy: first matching pattern wins; `*` suffix is a prefix match.
-#[derive(Debug, Clone, Default, Deserialize)]
+///
+/// Named gateway policies in `kavach.toml` (`[gateway.<name>]`) compile into these; kavachd
+/// hands them to the proxy keyed by name.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ToolPolicy {
     /// Tool name patterns that are allowed.
     #[serde(default)]
@@ -138,6 +154,9 @@ pub struct ToolPolicy {
     /// Verdict for methods not covered above.
     #[serde(default)]
     pub allow_other: bool,
+    /// Opaque (non-terminated) TLS streams.
+    #[serde(default)]
+    pub tls: TlsMode,
 }
 
 fn matches(pat: &str, s: &str) -> bool {
@@ -169,6 +188,44 @@ impl ToolPolicy {
     /// Classify and decide; unparseable frames are denied (fail closed at L7).
     pub fn decide_frame(&self, frame: &[u8]) -> Decision {
         classify(frame).map_or(Decision::Deny, |a| self.decide(&a))
+    }
+
+    /// [`ToolPolicy::decide`] plus the reason, naming the pattern that decided (for
+    /// `kavachctl explain`). Always returns the same decision as `decide`.
+    pub fn explain(&self, a: &Action) -> (Decision, String) {
+        let first = |pats: &[String], s: &str| pats.iter().find(|p| matches(p, s)).cloned();
+        let flag = |ok: bool, name: &str| {
+            let d = if ok { Decision::Allow } else { Decision::Deny };
+            (d, format!("{name} = {ok}"))
+        };
+        match a {
+            Action::Control => (
+                Decision::Allow,
+                "control traffic (initialize, ping, */list, notifications) is always allowed"
+                    .into(),
+            ),
+            Action::ToolCall { tool } => {
+                if let Some(p) = first(&self.deny_tools, tool) {
+                    (Decision::Deny, format!("deny_tools pattern {p:?}"))
+                } else if let Some(p) = first(&self.allow_tools, tool) {
+                    (Decision::Allow, format!("allow_tools pattern {p:?}"))
+                } else {
+                    (Decision::Deny, "no allow_tools pattern matches".into())
+                }
+            }
+            Action::ResourceRead { uri } => {
+                match self
+                    .allow_resources
+                    .iter()
+                    .find(|p| uri.starts_with(p.as_str()))
+                {
+                    Some(p) => (Decision::Allow, format!("allow_resources prefix {p:?}")),
+                    None => (Decision::Deny, "no allow_resources prefix matches".into()),
+                }
+            }
+            Action::AgentMessage => flag(self.allow_agent_messages, "allow_agent_messages"),
+            Action::Other { .. } => flag(self.allow_other, "allow_other"),
+        }
     }
 }
 
@@ -258,5 +315,57 @@ mod tests {
             Decision::Allow
         );
         assert_eq!(d("not json"), Decision::Deny);
+    }
+
+    #[test]
+    fn explain_agrees_with_decide_and_names_the_pattern() {
+        let mut p = policy();
+        p.deny_tools.push("shell.*".into());
+        let actions = [
+            Action::Control,
+            Action::ToolCall {
+                tool: "github.create_issue".into(),
+            },
+            Action::ToolCall {
+                tool: "github.delete_repo".into(),
+            },
+            Action::ToolCall {
+                tool: "shell.exec".into(),
+            },
+            Action::ToolCall { tool: "x".into() },
+            Action::ResourceRead {
+                uri: "file:///workspace/a".into(),
+            },
+            Action::ResourceRead {
+                uri: "file:///etc/passwd".into(),
+            },
+            Action::AgentMessage,
+            Action::Other {
+                method: "sampling/createMessage".into(),
+            },
+        ];
+        for allow in [false, true] {
+            p.allow_agent_messages = allow;
+            p.allow_other = allow;
+            for a in &actions {
+                assert_eq!(p.explain(a).0, p.decide(a), "{a:?}");
+            }
+        }
+        let why = |t: &str| p.explain(&Action::ToolCall { tool: t.into() }).1;
+        assert_eq!(
+            why("github.delete_repo"),
+            r#"deny_tools pattern "github.delete_repo""#
+        );
+        assert_eq!(why("github.list"), r#"allow_tools pattern "github.*""#);
+        assert_eq!(why("shell.exec"), r#"deny_tools pattern "shell.*""#);
+    }
+
+    #[test]
+    fn tool_policy_tls_defaults_to_deny_and_rejects_unknown_keys() {
+        let p: ToolPolicy = toml::from_str("allow_tools = [\"a\"]").unwrap();
+        assert_eq!(p.tls, TlsMode::Deny);
+        let p: ToolPolicy = toml::from_str("tls = \"allow\"").unwrap();
+        assert_eq!(p.tls, TlsMode::Allow);
+        assert!(toml::from_str::<ToolPolicy>("bogus = 1").is_err());
     }
 }
