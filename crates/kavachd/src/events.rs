@@ -14,6 +14,7 @@ use tokio::io::unix::AsyncFd;
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, warn};
 
+use crate::anomaly::{Anomaly, Engine, IdentityKey, Observation};
 use crate::daemon::{self, Daemon};
 
 /// Work for the identity broker.
@@ -103,6 +104,38 @@ pub fn render(e: &Event, rule_name: Option<String>) -> EventRecord {
         rule: rule_name,
         generation: if is_flow { e.generation } else { 0 },
         ifindex: e.ifindex,
+        detail: None,
+    }
+}
+
+/// The anomaly engine's view of an egress verdict event (other kinds carry no identity).
+pub fn observation(e: &Event) -> Option<Observation> {
+    (e.kind == EventKind::EgressVerdict as u8).then(|| Observation {
+        key: IdentityKey {
+            uid: e.uid,
+            cgroup_id: e.cgroup_id,
+            comm: e.comm,
+        },
+        pid: e.pid,
+        dst: from_words(e.key.dst),
+        proto: e.key.proto,
+        dport: u16::from_be(e.key.dport),
+        denied: e.verdict == Verdict::Drop as u8,
+    })
+}
+
+/// Render a detection as an `anomaly` event for `kavachctl events`.
+pub fn render_anomaly(a: &Anomaly) -> EventRecord {
+    EventRecord {
+        ts_ns: a.ts_ns,
+        kind: "anomaly".into(),
+        reason: a.metric.name().into(),
+        pid: a.pid,
+        uid: a.uid,
+        comm: a.comm.clone(),
+        cgroup_id: a.cgroup_id,
+        detail: Some(a.summary()),
+        ..Default::default()
     }
 }
 
@@ -126,6 +159,16 @@ pub async fn reader(
 ) -> Result<()> {
     let mut fd = fd.lock().await;
     let mut audit_window = (Instant::now(), 0u32);
+    // Detection only. Lives with the reader: a restarted reader simply relearns.
+    let mut anomaly = state
+        .lock()
+        .ok()
+        .filter(|st| st.cfg.anomaly.enabled)
+        .map(|st| {
+            use std::hash::{BuildHasher, Hasher};
+            let seed = std::hash::RandomState::new().build_hasher().finish();
+            Engine::new(st.cfg.anomaly.clone(), seed)
+        });
     loop {
         let mut guard = fd.readable_mut().await?;
         let rb = guard.get_inner_mut();
@@ -182,6 +225,16 @@ pub async fn reader(
                 }
             }
             let _ = tx.send(rec);
+            if let (Some(engine), Some(o)) = (anomaly.as_mut(), observation(&e)) {
+                for a in engine.observe(e.ts_ns, &o) {
+                    warn!(anomaly = %a.summary(), comm = a.comm, uid = a.uid, "anomaly");
+                    if let Ok(mut st) = state.lock() {
+                        st.audit
+                            .record("anomaly", serde_json::to_value(&a).unwrap_or_default());
+                    }
+                    let _ = tx.send(render_anomaly(&a));
+                }
+            }
         }
         guard.clear_ready();
     }
@@ -396,4 +449,63 @@ async fn classify(
         warn!(exe, "modified while being hashed; left unclassified");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_egress_events_feed_the_anomaly_engine() {
+        let mut e = Event {
+            kind: EventKind::EgressVerdict as u8,
+            verdict: Verdict::Drop as u8,
+            uid: 1000,
+            cgroup_id: 9,
+            pid: 7,
+            ..Default::default()
+        };
+        e.key.proto = 6;
+        e.key.dport = 443u16.to_be();
+        e.comm[..4].copy_from_slice(b"curl");
+        let o = observation(&e).unwrap();
+        assert_eq!((o.dport, o.proto, o.denied), (443, 6, true));
+        assert_eq!(o.key.comm_str(), "curl");
+        e.verdict = Verdict::Log as u8;
+        assert!(!observation(&e).unwrap().denied);
+        for k in [
+            EventKind::IngressVerdict,
+            EventKind::XdpDrop,
+            EventKind::Exec,
+        ] {
+            e.kind = k as u8;
+            assert!(observation(&e).is_none());
+        }
+    }
+
+    #[test]
+    fn anomaly_renders_as_an_event() {
+        let a = Anomaly {
+            ts_ns: 5,
+            uid: 1000,
+            cgroup_id: 9,
+            comm: "curl".into(),
+            pid: 7,
+            metric: crate::anomaly::Metric::DistinctDsts,
+            value: 40.0,
+            baseline_mean: 2.0,
+            baseline_sigma: 1.4,
+            z: 27.0,
+            window_secs: 60,
+        };
+        let r = render_anomaly(&a);
+        assert_eq!(r.kind, "anomaly");
+        assert_eq!(r.reason, "distinct_dsts");
+        assert_eq!(
+            r.detail.as_deref(),
+            Some("distinct_dsts=40/60s baseline=2.0±1.4 z=27.0")
+        );
+        let json = serde_json::to_value(&a).unwrap();
+        assert_eq!(json["metric"], "distinct_dsts");
+    }
 }

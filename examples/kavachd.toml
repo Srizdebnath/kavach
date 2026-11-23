@@ -22,3 +22,21 @@ sample_rate = 64            # 1-in-N verdict events to the ring buffer (0 = off)
 [ratelimit]                 # per-source GCRA at XDP; IPv6 sources share a /64 budget
 pps   = 20000
 burst = 40000
+
+# Per-identity anomaly detection (detection only: never changes a verdict). Identity is
+# (uid, cgroup, comm). Each identity's egress drop/log events are counted per window and compared
+# with an EWMA baseline. Metrics: conn_rate, deny_rate, distinct_dsts, new_dst_ports. Detections
+# show up as `anomaly` events in `kavachctl events` and as audit records. Only events the kernel
+# already reports are used, so this adds no kernel work. Memory is capped at about 400 B per
+# identity (max 1024 identities, least recently seen evicted).
+[anomaly]
+enabled          = true
+window_secs      = 60
+learning_windows = 30       # windows before an identity can alert (30 min)
+alpha            = 0.1      # EWMA weight of the newest window
+z_threshold      = 4.0      # (x - mean) / sigma, with sigma >= sqrt(mean) and >= 1
+ratio_threshold  = 3.0      # and x >= ratio * mean
+min_count        = 10       # and x >= this (conn_rate, deny_rate, distinct_dsts)
+min_new_ports    = 3        # floor for new_dst_ports
+cooldown_secs    = 600      # per identity and metric
+max_identities   = 1024

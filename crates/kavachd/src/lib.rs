@@ -1,4 +1,5 @@
 //! kavachd internals, exposed as a library so integration tests can drive the kernel side.
+pub mod anomaly;
 pub mod api;
 pub mod backing;
 pub mod config;

@@ -261,7 +261,7 @@ flagged in `status` and metrics, because silently dropping protection would be w
 
 ```
 control API (UDS NDJSON, SO_PEERCRED roles) ──► Daemon (Mutex) ──► Kernel (aya: load/attach/pin/maps)
-ring-buffer reader ──► broadcast (events stream) + audit (≤10 drops/s) + identity jobs
+ring-buffer reader ──► broadcast (events stream) + audit (≤10 drops/s) + identity jobs + anomaly engine
 identity broker ──► hash outside the lock ──► exe_class (seq-pair)       housekeeping (30 s):
                                                                          FQDN refresh, blocklist purge
 ```
@@ -269,6 +269,13 @@ identity broker ──► hash outside the lock ──► exe_class (seq-pair)  
 * **Attach.** XDP falls back from native to generic and is replaced in place through the pinned
   link on upgrade. TC uses tcx on 6.6+ and clsact before that. Both attach the new program before
   detaching the old, so there is no window.
+* **Anomaly engine** (`anomaly.rs`, detection only). The ring-buffer reader feeds each egress
+  drop/log event to a per-identity baseline keyed by `(uid, cgroup, comm)`. For each identity it
+  keeps EWMA mean and variance per window for four metrics: connection rate, deny rate, distinct
+  destinations (HyperLogLog) and new destination ports (a Bloom filter). There is a learning
+  period first. After that, a metric that crosses its z-score, ratio and absolute floor emits an
+  `anomaly` event and an audit record, then waits out a per-metric cooldown. The identity table
+  is LRU-capped (`[anomaly]` in kavachd.toml), and verdicts are never touched.
 * **Audit.** Every change is appended to a hash-chained JSONL audit log. `kavachctl audit`
   verifies the chain, and a log that fails verification at startup is rotated aside rather than
   extended.
