@@ -187,6 +187,10 @@ static __always_inline void kv_evaluate(const struct kv_snapshot *s, __u8 dir, _
 		d->verdict = dir == KV_DIR_EGRESS ? s->pol->hdr.default_egress
 						  : s->pol->hdr.default_ingress;
 	}
+	/* An out-of-range verdict fails closed, as Verdict::from_u8(..).unwrap_or(Drop) does in
+	 * kavach-core (found by kernel/kavach-ko/selftest.py). */
+	if (d->verdict > KV_VERDICT_PUNT)
+		d->verdict = KV_VERDICT_DROP;
 }
 
 #endif /* KAVACH_EVAL_H */
