@@ -941,9 +941,11 @@ name = "kavach-gateway"
 version = "0.3.1"
 dependencies = [
  "kavach-common",
+ "kavach-parsers",
  "libc",
  "serde",
  "serde_json",
+ "tokio",
  "toml",
  "tracing",
 ]

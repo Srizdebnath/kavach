@@ -12,7 +12,9 @@
 //!    [`ToolPolicy::decide`].
 //! 4. The verdict is written back to `flow_cache` for the connection.
 //!
-//! Until v0.4 ships, punted flows resolve through the rule's fail mode.
+//! [`proxy`] is that transport: a TCP listener that relays redirected flows (HTTP/1.1, SSE,
+//! WebSocket, raw NDJSON) and enforces the decision per frame. Until kavachd redirects to it,
+//! punted flows resolve through the rule's fail mode.
 //!
 //! [`afxdp`] is an optional, opt-in RX backend: the XDP program redirects frames for
 //! gateway-selected ports straight to per-queue AF_XDP sockets, guarded by a watchdog.
@@ -23,8 +25,14 @@
 #![deny(missing_docs)]
 
 pub mod afxdp;
+pub mod proxy;
 
-use serde::Deserialize;
+pub use proxy::{
+    DecisionEvent, EventSink, Gateway, OrigDst, OrigInfo, PolicySource, PolicyStore, ProxyConfig,
+    TlsMode, run,
+};
+
+use serde::{Deserialize, Serialize};
 
 /// What a single JSON-RPC message from the agent is trying to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,7 +120,8 @@ pub fn classify(frame: &[u8]) -> Result<Action, ParseError> {
 }
 
 /// Gateway verdict for one frame.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Decision {
     /// Forward the frame.
     Allow,
