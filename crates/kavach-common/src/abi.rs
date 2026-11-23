@@ -51,6 +51,30 @@ pub const KV_FAIL_CLOSED: u8 = 1;
 /// [`XdpConfig::flags`] bits.
 pub const KV_XDP_F_BLOCKLIST: u32 = 1 << 0;
 pub const KV_XDP_F_RATELIMIT: u32 = 1 << 1;
+/// Opt-in AF_XDP gateway redirect: frames whose (proto, destination port) is in `xsk_ports`
+/// go to the AF_XDP socket of their RX queue in `xsk_sockets`, but only while that queue's
+/// `xsk_alive` deadline is in the future. Everything else passes. Never set by default.
+pub const KV_XDP_F_AFXDP: u32 = 1 << 2;
+
+/// Entries in `xsk_sockets` / `xsk_alive` (RX queue ids `0..KV_XSK_MAX_QUEUES`).
+pub const KV_XSK_MAX_QUEUES: u32 = 64;
+/// Entries in `xsk_ports` (gateway-selected `(proto, port)` pairs).
+pub const KV_XSK_MAX_PORTS: u32 = 256;
+/// Indices of the per-CPU `xsk_stats` array.
+/// Frame redirected to an AF_XDP socket.
+pub const KV_XSK_STAT_REDIRECT: u32 = 0;
+/// Port selected but the queue's watchdog deadline had lapsed: passed to the stack.
+pub const KV_XSK_STAT_STALE: u32 = 1;
+/// Port selected, deadline live, but no socket on that queue: passed to the stack.
+pub const KV_XSK_STAT_NO_SOCKET: u32 = 2;
+/// Entries in `xsk_stats`.
+pub const KV_XSK_STAT_MAX: u32 = 4;
+
+/// `xsk_ports` key: `proto << 16 | port` (port in **host** order). A plain `u32` keeps the map
+/// layout out of [`LAYOUT`] (no new struct, no ABI bump).
+pub const fn xsk_port_key(proto: u8, port: u16) -> u32 {
+    ((proto as u32) << 16) | port as u32
+}
 
 /// [`PolicyHeader::flags`] bits.
 /// Slot holds a valid, fully written policy.

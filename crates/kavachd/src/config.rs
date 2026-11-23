@@ -37,6 +37,16 @@ pub struct Config {
     /// Directories whose executables are hashed ahead of time when the policy names binaries by
     /// hash (non-recursive, watched with inotify). Empty = classify hash-named binaries on exec.
     pub hash_scan_dirs: Vec<PathBuf>,
+    /// L7 gateway (v0.4 preview).
+    pub gateway: GatewayConfig,
+}
+
+/// `[gateway]`.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields, default)]
+pub struct GatewayConfig {
+    /// `[gateway.afxdp]`: opt-in AF_XDP RX backend (off by default).
+    pub afxdp: kavach_gateway::afxdp::AfXdpConfig,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -76,6 +86,7 @@ impl Default for Config {
             ]
             .map(PathBuf::from)
             .to_vec(),
+            gateway: GatewayConfig::default(),
         }
     }
 }
@@ -151,6 +162,32 @@ mod tests {
             toml::from_str(include_str!("../../../examples/kavachd.toml")).unwrap();
         assert_eq!(c.interfaces, ["auto"]);
         assert_eq!(c.ratelimit.unwrap().pps, 20000);
+        assert!(
+            !c.gateway.afxdp.enabled,
+            "AF_XDP backend is never on by default"
+        );
+        assert!(!super::Config::default().gateway.afxdp.enabled);
+    }
+
+    #[test]
+    fn gateway_afxdp_section_parses() {
+        let c: super::Config = toml::from_str(
+            r#"
+[gateway.afxdp]
+enabled = true
+iface = "eth0"
+queues = [0, 1]
+ports = [8443, "443/udp"]
+watchdog_ms = 200
+"#,
+        )
+        .unwrap();
+        let a = &c.gateway.afxdp;
+        assert!(a.enabled);
+        assert_eq!(a.queues, [0, 1]);
+        assert_eq!(a.watchdog_ms, 200);
+        a.validate().unwrap();
+        assert!(toml::from_str::<super::Config>("[gateway.afxdp]\nbogus = 1").is_err());
     }
 
     #[test]

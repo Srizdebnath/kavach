@@ -13,8 +13,16 @@
 //! 4. The verdict is written back to `flow_cache` for the connection.
 //!
 //! Until v0.4 ships, punted flows resolve through the rule's fail mode.
-#![forbid(unsafe_code)]
+//!
+//! [`afxdp`] is an optional, opt-in RX backend: the XDP program redirects frames for
+//! gateway-selected ports straight to per-queue AF_XDP sockets, guarded by a watchdog.
+//!
+//! `unsafe` is denied crate-wide; only `afxdp::sys` (raw syscalls, mmap) and `afxdp::ring`
+//! (shared-memory ring indices) opt out, each block with a `SAFETY:` justification.
+#![deny(unsafe_code)]
 #![deny(missing_docs)]
+
+pub mod afxdp;
 
 use serde::Deserialize;
 

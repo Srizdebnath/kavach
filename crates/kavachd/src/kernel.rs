@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 use aya::maps::lpm_trie::{Key, LpmTrie};
-use aya::maps::{Array, ArrayOfMaps, HashMap, MapData, MapError, PerCpuArray, RingBuf};
+use aya::maps::{Array, ArrayOfMaps, HashMap, MapData, MapError, PerCpuArray, RingBuf, XskMap};
 use aya::programs::links::{FdLink, PinnedLink};
 use aya::programs::{Iter, Lsm, SchedClassifier, TcAttachType, Xdp, XdpMode};
 use aya::{Btf, Ebpf, EbpfLoader};
@@ -529,6 +529,110 @@ impl Kernel {
     /// Program test-run access for the BPF test-suite.
     pub fn bpf_mut(&mut self) -> &mut Ebpf {
         &mut self.bpf
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // AF_XDP gateway backend (opt-in; see kavach_gateway::afxdp)
+    // ---------------------------------------------------------------------------------------
+
+    /// Replace the gateway-selected `xsk_ports` keys (`xsk_port_key(proto, port)`).
+    pub fn set_xsk_ports(&mut self, keys: &[u32]) -> Result<()> {
+        let mut m: HashMap<_, u32, u32> = HashMap::try_from(self.map("xsk_ports")?)?;
+        let stale: Vec<u32> = m
+            .keys()
+            .filter_map(Result::ok)
+            .filter(|k| !keys.contains(k))
+            .collect();
+        for k in stale {
+            let _ = m.remove(&k);
+        }
+        for k in keys {
+            m.insert(k, &1, 0)?;
+        }
+        Ok(())
+    }
+
+    /// Current `xsk_ports` keys.
+    pub fn xsk_ports(&mut self) -> Result<Vec<u32>> {
+        let m: HashMap<_, u32, u32> = HashMap::try_from(self.map("xsk_ports")?)?;
+        Ok(m.keys().filter_map(Result::ok).collect())
+    }
+
+    /// Turn the XDP redirect step on or off (`KV_XDP_F_AFXDP`), leaving other flags alone.
+    pub fn set_afxdp_redirect(&mut self, on: bool) -> Result<()> {
+        let mut c = self.xdp_config()?;
+        if on {
+            c.flags |= KV_XDP_F_AFXDP;
+        } else {
+            c.flags &= !KV_XDP_F_AFXDP;
+        }
+        self.set_xdp_config(c)
+    }
+
+    /// `xsk_stats`, summed over CPUs (`KV_XSK_STAT_*`).
+    pub fn xsk_stats(&mut self) -> Result<Vec<u64>> {
+        let a: PerCpuArray<_, u64> = PerCpuArray::try_from(self.map("xsk_stats")?)?;
+        let mut out = Vec::with_capacity(KV_XSK_STAT_MAX as usize);
+        for i in 0..KV_XSK_STAT_MAX {
+            out.push(a.get(&i, 0)?.iter().sum());
+        }
+        Ok(out)
+    }
+
+    /// Independent handles on `xsk_sockets` / `xsk_alive` (from their pins) for the gateway
+    /// watchdog thread, which must not take the daemon lock.
+    pub fn xsk_maps(&self) -> Result<XskMaps> {
+        let dir = self
+            .pin_dir
+            .as_ref()
+            .ok_or_else(|| anyhow!("AF_XDP backend needs pinned maps"))?;
+        let open = |name: &str| {
+            MapData::from_pin(dir.join(name)).with_context(|| format!("opening pinned {name}"))
+        };
+        Ok(XskMaps {
+            sockets: XskMap::try_from(aya::maps::Map::XskMap(open("xsk_sockets")?))?,
+            alive: Array::try_from(aya::maps::Map::Array(open("xsk_alive")?))?,
+        })
+    }
+}
+
+/// `xsk_sockets` + `xsk_alive`, driven by the gateway's AF_XDP watchdog.
+pub struct XskMaps {
+    sockets: XskMap<MapData>,
+    alive: Array<MapData, u64>,
+}
+
+impl std::fmt::Debug for XskMaps {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("XskMaps")
+    }
+}
+
+fn map_io(e: MapError) -> std::io::Error {
+    match e {
+        MapError::SyscallError(s) => s.io_error,
+        other => std::io::Error::other(other.to_string()),
+    }
+}
+
+impl kavach_gateway::afxdp::RedirectMaps for XskMaps {
+    fn set_socket(&mut self, queue: u32, fd: std::os::fd::RawFd) -> std::io::Result<()> {
+        self.sockets.set(queue, fd, 0).map_err(map_io)
+    }
+
+    fn clear_socket(&mut self, queue: u32) -> std::io::Result<()> {
+        match self.sockets.unset(queue) {
+            Err(MapError::SyscallError(e))
+                if e.io_error.raw_os_error() == Some(nix::libc::ENOENT) =>
+            {
+                Ok(())
+            }
+            r => r.map_err(map_io),
+        }
+    }
+
+    fn set_alive_until(&mut self, queue: u32, until_ns: u64) -> std::io::Result<()> {
+        self.alive.set(queue, &until_ns, 0).map_err(map_io)
     }
 }
 

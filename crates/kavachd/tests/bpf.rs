@@ -1126,3 +1126,160 @@ impl TcpListenerGuard {
         }))
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Opt-in AF_XDP gateway backend
+// ---------------------------------------------------------------------------------------------
+
+fn xsk_stat(f: &mut Fixture, i: u32) -> u64 {
+    f.k().xsk_stats().unwrap()[i as usize]
+}
+
+fn udp4(src: [u8; 4], dport: u16) -> Vec<u8> {
+    v4_pkt(
+        Ipv4Addr::from(src),
+        Ipv4Addr::new(10, 9, 9, 9),
+        17,
+        40000,
+        dport,
+        0,
+        &[],
+    )
+}
+
+#[test]
+#[ignore = "needs root: scripts/priv-test.sh"]
+fn xdp_afxdp_redirect_is_gated_by_flag_port_and_deadline() {
+    use kavach_gateway::afxdp::RedirectMaps;
+    let mut f = Fixture::new();
+    let sel = xsk_port_key(KV_PROTO_UDP, 47090);
+    f.k().set_xsk_ports(&[sel]).unwrap();
+    assert_eq!(f.k().xsk_ports().unwrap(), [sel]);
+    let mut maps = f.k().xsk_maps().unwrap();
+    let far = kernel::boot_ns() + 3_600_000_000_000;
+    maps.set_alive_until(0, far).unwrap();
+
+    // Backend off (the default): selected port and live deadline change nothing.
+    enable_xdp(&mut f, KV_XDP_F_BLOCKLIST, 1, 1);
+    assert_eq!(f.xdp(&udp4([198, 51, 100, 1], 47090)), XDP_PASS);
+    assert_eq!(f.k().xsk_stats().unwrap(), [0, 0, 0, 0]);
+
+    f.k().set_afxdp_redirect(true).unwrap();
+    assert_ne!(f.k().xdp_config().unwrap().flags & KV_XDP_F_BLOCKLIST, 0);
+    // Unselected ports and protocols are never looked at.
+    assert_eq!(f.xdp(&syn([198, 51, 100, 1], 22)), XDP_PASS);
+    assert_eq!(f.xdp(&udp4([198, 51, 100, 1], 47091)), XDP_PASS);
+    assert_eq!(f.k().xsk_stats().unwrap(), [0, 0, 0, 0]);
+    // Selected, deadline live, but no socket on queue 0: the redirect falls back to PASS.
+    assert_eq!(f.xdp(&udp4([198, 51, 100, 1], 47090)), XDP_PASS);
+    assert_eq!(xsk_stat(&mut f, KV_XSK_STAT_NO_SOCKET), 1);
+    // Deadline lapsed (frozen gateway): PASS without touching the XSKMAP.
+    maps.set_alive_until(0, 0).unwrap();
+    assert_eq!(f.xdp(&udp4([198, 51, 100, 1], 47090)), XDP_PASS);
+    assert_eq!(xsk_stat(&mut f, KV_XSK_STAT_STALE), 1);
+    // The blocklist still runs first for gateway ports.
+    maps.set_alive_until(0, far).unwrap();
+    f.k()
+        .block_add("198.51.100.7/32".parse().unwrap(), 0, 1)
+        .unwrap();
+    assert_eq!(f.xdp(&udp4([198, 51, 100, 7], 47090)), XDP_DROP);
+    assert_eq!(xsk_stat(&mut f, KV_XSK_STAT_REDIRECT), 0);
+
+    f.k().set_afxdp_redirect(false).unwrap();
+    f.k().set_xsk_ports(&[]).unwrap();
+    assert!(f.k().xsk_ports().unwrap().is_empty());
+}
+
+#[test]
+#[ignore = "needs root: scripts/priv-test.sh"]
+fn netns_veth_afxdp_redirect_and_watchdog() {
+    use kavach_gateway::afxdp::{AfXdpConfig, Backend, LinuxSys, RxAction, XdpAttach};
+    use std::sync::atomic::AtomicBool;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    nix::sched::unshare(nix::sched::CloneFlags::CLONE_NEWNET).expect("unshare(CLONE_NEWNET)");
+    let mut f = Fixture::new();
+    let n = Netns::new(8);
+    let mode = f
+        .k()
+        .attach_xdp(&n.host_if, "auto")
+        .expect("attach XDP to veth");
+    enable_xdp(&mut f, KV_XDP_F_BLOCKLIST, 1, 1);
+    let cfg = AfXdpConfig {
+        enabled: true,
+        iface: n.host_if.clone(),
+        queues: vec![0],
+        ports: vec!["47090/udp".parse().unwrap()],
+        watchdog_ms: 100,
+        ring_size: 64,
+        frame_size: 4096,
+    };
+    let (tx, rx) = mpsc::channel::<Vec<u8>>();
+    let hang = Arc::new(AtomicBool::new(false));
+    let backend = Backend::start(
+        Arc::new(LinuxSys),
+        &cfg,
+        XdpAttach::from_label(&mode),
+        f.k().xsk_maps().unwrap(),
+        {
+            let hang = hang.clone();
+            move |_| {
+                let (tx, hang) = (tx.clone(), hang.clone());
+                move |_: u32, frame: &mut [u8]| {
+                    let _ = tx.send(frame.to_vec());
+                    if hang.load(Ordering::SeqCst) {
+                        std::thread::sleep(Duration::from_millis(1500));
+                    }
+                    RxAction::Consume
+                }
+            }
+        },
+    )
+    .expect("AF_XDP backend on veth");
+    eprintln!("xdp {mode}, AF_XDP modes {:?}", backend.modes());
+    f.k().set_xsk_ports(&cfg.port_keys()).unwrap();
+    f.k().set_afxdp_redirect(true).unwrap();
+
+    let stack = UdpSocket::bind("10.203.8.1:47090").unwrap();
+    stack
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .unwrap();
+    let send = |msg: &str| n.run(&format!("echo -n {msg} > /dev/udp/10.203.8.1/47090"));
+    let has = |frame: &[u8], needle: &[u8]| frame.windows(needle.len()).any(|w| w == needle);
+
+    // A selected flow lands in the gateway, not in the kernel stack.
+    assert!(send("kavach-xsk-1"));
+    let frame = rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("frame on AF_XDP");
+    assert!(has(&frame, b"kavach-xsk-1"), "{frame:02x?}");
+    let mut buf = [0u8; 64];
+    assert!(
+        stack.recv(&mut buf).is_err(),
+        "redirected datagram must not reach the stack"
+    );
+    assert!(xsk_stat(&mut f, KV_XSK_STAT_REDIRECT) >= 1);
+
+    // Everything else (the SSH stand-in included) stays on the stack.
+    let _tcp = TcpListenerGuard::bind("10.203.8.1:47081");
+    assert!(n.run("echo > /dev/tcp/10.203.8.1/47081"), "unselected TCP");
+    assert!(n.run("ping -c1 -W1 10.203.8.1"), "ICMP");
+
+    // Hang the consumer with one frame in hand and one queued: the watchdog detaches the queue
+    // and the selected port falls back to the kernel stack.
+    hang.store(true, Ordering::SeqCst);
+    assert!(send("hang-1"));
+    assert!(rx.recv_timeout(Duration::from_secs(2)).is_ok());
+    assert!(send("hang-2"));
+    std::thread::sleep(Duration::from_millis(400));
+    hang.store(false, Ordering::SeqCst);
+    assert!(send("after-detach"));
+    let got = stack
+        .recv(&mut buf)
+        .expect("detached queue passes to the stack");
+    assert_eq!(&buf[..got], b"after-detach");
+
+    drop(backend);
+    f.k().set_afxdp_redirect(false).unwrap();
+}
