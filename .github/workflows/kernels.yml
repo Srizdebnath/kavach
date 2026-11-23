@@ -32,7 +32,7 @@ jobs:
     outputs:
       kernels: ${{ steps.list.outputs.kernels }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: ./scripts/ci-deps.sh
@@ -42,7 +42,7 @@ jobs:
           bin=$(./scripts/kernel-matrix.sh build)
           mkdir -p dist
           cp "$bin" dist/bpf-tests
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: bpf-tests
           path: dist/bpf-tests
@@ -68,8 +68,8 @@ jobs:
       KAVACH_KERNEL_CACHE: ${{ github.workspace }}/.kernels
       KAVACH_RESULTS: ${{ github.workspace }}/kernel-matrix
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           name: bpf-tests
           path: dist
@@ -104,7 +104,7 @@ jobs:
           echo "$KERNEL -> $v"
 
       - name: cache kernel
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ env.KAVACH_KERNEL_CACHE }}/${{ steps.resolve.outputs.version }}
           key: kernel-${{ steps.resolve.outputs.version }}-amd64-v1
@@ -121,7 +121,7 @@ jobs:
 
       - name: upload logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: kernel-logs-${{ matrix.kernel }}
           path: ${{ env.KAVACH_RESULTS }}
