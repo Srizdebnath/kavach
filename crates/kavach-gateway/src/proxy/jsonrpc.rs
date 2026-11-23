@@ -41,9 +41,9 @@ pub enum Reason {
     Framing,
     /// A WebSocket binary message (no JSON-RPC to inspect).
     Binary,
-    /// The flow is TLS and `tls = "deny"`.
+    /// The flow is TLS and the policy has `tls = "deny"`.
     Tls,
-    /// The flow is TLS and `tls = "passthrough"` (not inspected).
+    /// The flow is TLS and the policy has `tls = "allow"` (relayed, not inspected).
     TlsPassthrough,
     /// The first bytes are no protocol the gateway speaks.
     UnknownProtocol,

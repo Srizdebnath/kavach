@@ -16,8 +16,8 @@ use tokio::time::timeout;
 use super::http::{self, ChunkedDecoder, Framing, HttpError, RequestHead};
 use super::jsonrpc::{self, Inspection, Reason};
 use super::ws::{self, Assembler, FrameTracker, Step};
-use super::{DecisionEvent, OrigInfo, Protocol, Shared, TlsMode};
-use crate::{Decision, ToolPolicy};
+use super::{DecisionEvent, OrigInfo, Protocol, Shared};
+use crate::{Decision, TlsMode, ToolPolicy};
 
 const READ_CHUNK: usize = 16 * 1024;
 /// A ClientHello fits one TLS record (≤ 16 KiB + header) in practice.
@@ -37,7 +37,7 @@ impl Ctx {
     }
 
     fn policy(&self) -> Option<Arc<ToolPolicy>> {
-        self.shared.policies.policy(&self.info.gateway)
+        self.shared.policies.policy_for(&self.info)
     }
 
     fn emit(
@@ -220,11 +220,13 @@ async fn tls(ctx: &Ctx, mut client: TcpStream, mut buf: Vec<u8>) {
             Err(_) => break None,
         }
     };
-    tracing::info!(peer = %ctx.peer, dst = %ctx.info.dst, sni = ?sni, mode = ?ctx.shared.cfg.tls, "TLS flow at gateway");
-    let pass = ctx.shared.cfg.tls == TlsMode::Passthrough && ctx.policy().is_some();
+    let policy = ctx.policy();
+    let mode = policy.as_ref().map(|p| p.tls);
+    tracing::info!(peer = %ctx.peer, dst = %ctx.info.dst, sni = ?sni, ?mode, "TLS flow at gateway");
+    let pass = mode == Some(TlsMode::Allow);
     let (decision, reason) = if pass {
         (Decision::Allow, Reason::TlsPassthrough)
-    } else if ctx.policy().is_none() {
+    } else if policy.is_none() {
         (Decision::Deny, Reason::NoPolicy)
     } else {
         (Decision::Deny, Reason::Tls)

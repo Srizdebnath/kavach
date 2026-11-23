@@ -8,9 +8,9 @@ use std::time::Duration;
 
 use kavach_gateway::proxy::{
     DecisionEvent, FnSink, Gateway, MapOrigDst, OrigDst, OrigInfo, PolicyStore, Protocol,
-    ProxyConfig, Reason, StaticOrigDst, TlsMode, ws,
+    ProxyConfig, Reason, StaticOrigDst, ws,
 };
-use kavach_gateway::{Decision, ToolPolicy};
+use kavach_gateway::{Decision, TlsMode, ToolPolicy};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -1063,16 +1063,10 @@ async fn tls_passthrough_relays_bytes() {
         let (mut r, mut w) = s.split();
         let _ = tokio::io::copy(&mut r, &mut w).await;
     });
-    let h = start_with(
-        ProxyConfig {
-            tls: TlsMode::Passthrough,
-            ..ProxyConfig::default()
-        },
-        dst,
-        Seen::default(),
-        None,
-    )
-    .await;
+    let h = start_with(ProxyConfig::default(), dst, Seen::default(), None).await;
+    let mut p = policy();
+    p.get_mut("dev").unwrap().tls = TlsMode::Allow;
+    h.policies.replace(p);
     let mut s = h.connect().await;
     let hello = client_hello("passthrough.example");
     s.write_all(&hello).await.unwrap();

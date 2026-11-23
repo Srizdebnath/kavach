@@ -29,7 +29,7 @@ pub mod proxy;
 
 pub use proxy::{
     DecisionEvent, EventSink, Gateway, OrigDst, OrigInfo, PolicySource, PolicyStore, ProxyConfig,
-    TlsMode, run,
+    run,
 };
 
 use serde::{Deserialize, Serialize};

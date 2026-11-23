@@ -7,7 +7,6 @@
 //! ```toml
 //! [proxy]                 # kavach_gateway::ProxyConfig; every field optional
 //! listen = "127.0.0.1:15001"
-//! tls = "deny"
 //!
 //! [upstream]
 //! addr = "127.0.0.1:8080"
@@ -16,6 +15,7 @@
 //! [gateways.dev]          # kavach_gateway::ToolPolicy
 //! allow_tools = ["search", "github.*"]
 //! deny_tools = ["github.delete_repo"]
+//! tls = "deny"           # or "allow": relay TLS uninspected (SNI logged)
 //! ```
 //!
 //! Decision events are printed to stdout as JSON lines; logs go to stderr (`RUST_LOG`).

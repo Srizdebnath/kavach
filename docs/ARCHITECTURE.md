@@ -364,7 +364,7 @@ XDP: parse → blocklist → GCRA → [flag] xsk_ports[(proto,dport)]? → xsk_a
   cgroup_id, pid }`; kavachd implements it over the redirect map. An unknown flow, or one
   whose destination is the listener itself, is closed (fail closed).
 * **Sniffing** (first bytes, under `header_timeout_ms`): `0x16` → TLS ClientHello (SNI via
-  `kavach-parsers`; `tls = "deny"` closes, `"passthrough"` relays uninspected), an upper-case
+  `kavach-parsers`; the policy's `tls = "deny"` closes, `"allow"` relays uninspected), an upper-case
   method token → HTTP/1.1, `{`/`[` → newline-delimited JSON-RPC, anything else → closed.
 * **Per-frame decision.** Every client→server JSON-RPC message (HTTP request body, WebSocket
   text message, NDJSON line) goes through `classify` + `ToolPolicy::decide`, with the policy

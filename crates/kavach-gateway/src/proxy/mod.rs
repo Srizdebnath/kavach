@@ -4,7 +4,8 @@
 //! connection the proxy:
 //! 1. recovers the original destination and the matching rule through [`OrigDst`] (fail closed
 //!    when it is unknown);
-//! 2. sniffs the first bytes: a TLS ClientHello ([`TlsMode`]), an HTTP/1.1 request, or a
+//! 2. sniffs the first bytes: a TLS ClientHello (the policy's
+//!    [`TlsMode`](crate::TlsMode): `allow` relays it uninspected), an HTTP/1.1 request, or a
 //!    newline-delimited JSON-RPC stream (anything else is closed);
 //! 3. connects to the original destination and relays, inspecting every client→server
 //!    JSON-RPC frame with [`classify`](crate::classify) and the gateway's
@@ -98,10 +99,12 @@ impl OrigDst for MapOrigDst {
     }
 }
 
-/// Supplies the policy for a gateway name; consulted for every frame.
+/// Supplies the policy for a flow; consulted for every frame, so a swap behind it applies to
+/// open connections at their next frame. kavachd backs it with its gateway snapshot
+/// (`policy_for_rule(info.rule_id)`); [`PolicyStore`] keys by [`OrigInfo::gateway`].
 pub trait PolicySource: Send + Sync {
-    /// The policy named `gateway`, or `None` (every frame is then denied).
-    fn policy(&self, gateway: &str) -> Option<Arc<ToolPolicy>>;
+    /// The policy for the flow described by `info`, or `None` (every frame is then denied).
+    fn policy_for(&self, info: &OrigInfo) -> Option<Arc<ToolPolicy>>;
 }
 
 /// Policies keyed by gateway name, replaced atomically as a whole.
@@ -139,13 +142,20 @@ impl PolicyStore {
     }
 }
 
-impl PolicySource for PolicyStore {
-    fn policy(&self, gateway: &str) -> Option<Arc<ToolPolicy>> {
+impl PolicyStore {
+    /// The policy named `gateway`.
+    pub fn get(&self, gateway: &str) -> Option<Arc<ToolPolicy>> {
         self.0
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .get(gateway)
             .cloned()
+    }
+}
+
+impl PolicySource for PolicyStore {
+    fn policy_for(&self, info: &OrigInfo) -> Option<Arc<ToolPolicy>> {
+        self.get(&info.gateway)
     }
 }
 
@@ -252,17 +262,6 @@ impl<F: Fn(DecisionEvent) + Send + Sync> EventSink for FnSink<F> {
     }
 }
 
-/// What to do with a flow that starts with a TLS ClientHello.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum TlsMode {
-    /// Close it: the gateway cannot inspect what it cannot decrypt.
-    #[default]
-    Deny,
-    /// Relay it uninspected (the SNI is still logged).
-    Passthrough,
-}
-
 /// `[gateway.proxy]`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -283,8 +282,6 @@ pub struct ProxyConfig {
     pub idle_timeout_ms: u64,
     /// Upstream connect timeout, in ms.
     pub connect_timeout_ms: u64,
-    /// TLS handling.
-    pub tls: TlsMode,
 }
 
 impl Default for ProxyConfig {
@@ -298,7 +295,6 @@ impl Default for ProxyConfig {
             header_timeout_ms: 10_000,
             idle_timeout_ms: 300_000,
             connect_timeout_ms: 5_000,
-            tls: TlsMode::Deny,
         }
     }
 }
