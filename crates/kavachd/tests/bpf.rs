@@ -1501,3 +1501,226 @@ fn netns_veth_afxdp_redirect_and_watchdog() {
     drop(backend);
     f.k().set_afxdp_redirect(false).unwrap();
 }
+
+// ---------------------------------------------------------------------------------------------
+// L7 gateway redirect (punt data path)
+// ---------------------------------------------------------------------------------------------
+
+/// Every redirect program passes the verifier (also on kernels without the BPF LSM).
+#[test]
+#[ignore = "needs root: scripts/priv-test.sh"]
+fn gateway_redirect_programs_load() {
+    use aya::programs::Program;
+    let mut f = Fixture::new();
+    for name in kernel::GATEWAY_PROGS {
+        match f.k().bpf_mut().program_mut(name).expect(name) {
+            Program::CgroupSockAddr(p) => p.load(),
+            Program::SockOps(p) => p.load(),
+            _ => panic!("{name}: unexpected program type"),
+        }
+        .unwrap_or_else(|e| panic!("verifier rejected {name}: {e:?}"));
+    }
+}
+
+/// A private cgroup v2 directory: the redirect is attached there only, so the rest of the host
+/// is never redirected by the test.
+struct TestCgroup {
+    dir: std::path::PathBuf,
+    mnt: Option<tempfile::TempDir>,
+}
+
+impl TestCgroup {
+    fn new() -> Self {
+        let mounts = std::fs::read_to_string("/proc/self/mounts").unwrap();
+        let (root, mnt) = match kavachd::gateway::cgroup2_root(&mounts) {
+            Some(r) => (r, None),
+            None => {
+                let t = tempfile::tempdir().unwrap();
+                let ok = std::process::Command::new("mount")
+                    .args(["-t", "cgroup2", "none"])
+                    .arg(t.path())
+                    .status()
+                    .is_ok_and(|s| s.success());
+                assert!(ok, "cgroup2 not mounted and mounting it failed");
+                (t.path().to_path_buf(), Some(t))
+            }
+        };
+        let dir = root.join(format!("kavach-test-gw-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        Self { dir, mnt }
+    }
+
+    /// Start `script` under bash inside this cgroup (it moves itself in before running it).
+    fn spawn(&self, script: &str) -> std::process::Child {
+        std::process::Command::new("bash")
+            .arg("-c")
+            .arg(format!(
+                "echo $$ > {} && exec bash -c '{script}'",
+                self.dir.join("cgroup.procs").display()
+            ))
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap()
+    }
+
+    fn run(&self, script: &str) -> bool {
+        self.spawn(script).wait().unwrap().success()
+    }
+}
+
+impl Drop for TestCgroup {
+    fn drop(&mut self) {
+        for _ in 0..50 {
+            if std::fs::remove_dir(&self.dir).is_ok() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        if let Some(m) = &self.mnt {
+            let _ = std::process::Command::new("umount").arg(m.path()).status();
+        }
+    }
+}
+
+#[test]
+#[ignore = "needs root + BPF LSM: scripts/priv-test.sh"]
+fn gateway_redirects_punted_connects_and_records_orig_dst() {
+    use kavach_gateway::orig::OrigDst;
+    use std::io::Read;
+    use std::time::{Duration, Instant};
+    let lsms = std::fs::read_to_string("/sys/kernel/security/lsm").unwrap_or_default();
+    if !lsms.contains("bpf") {
+        eprintln!("skipping: BPF LSM not active");
+        return;
+    }
+    let mut f = Fixture::new();
+    f.k().attach_lsm().expect("attach LSM");
+    let cg = TestCgroup::new();
+    f.k()
+        .attach_gateway(&cg.dir)
+        .expect("attach gateway programs");
+    assert!(f.k().gateway_attached());
+
+    // Only TEST-NET-1 and 2001:db8::/32, port 9, are punted (fail closed).
+    f.apply_toml(
+        r#"
+version = 1
+[defaults]
+egress = "allow"
+ingress = "allow"
+[[rule]]
+id = "punt-testnet"
+punt = { to = ["192.0.2.0/24", "2001:db8::/32"], port = 9, proto = "tcp" }
+fail = "closed"
+"#,
+    );
+
+    let listen: SocketAddr = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap()
+    };
+    let gcfg = kavachd::config::GatewayConfig {
+        enabled: true,
+        listen,
+        ..Default::default()
+    };
+    let mut base = kavachd::gateway::kernel_cfg(&gcfg, std::process::id(), 0);
+    let mut live = |f: &mut Fixture, on: bool| {
+        base.flags = if on { KV_GW_F_V4 } else { 0 };
+        base.alive_until_ns = if on {
+            kernel::boot_ns() + 60_000_000_000
+        } else {
+            0
+        };
+        f.k().set_gateway_cfg(base).unwrap();
+    };
+    let gws = |f: &mut Fixture, i: u32| f.k().gw_stats().unwrap()[i as usize];
+    let orig = {
+        let maps = f.k().gateway_maps().unwrap();
+        kavachd::gateway::PinnedOrigDst::new(
+            maps.into_orig(),
+            Arc::new(std::sync::RwLock::new(vec![])),
+        )
+    };
+
+    // 1. Gateway dead: the fail mode (closed) refuses the connect.
+    live(&mut f, false);
+    assert!(
+        !cg.run("echo hi > /dev/tcp/192.0.2.1/9"),
+        "fail-closed punt with no gateway must be refused"
+    );
+    assert!(gws(&mut f, KV_GW_STAT_DEAD) >= 1);
+
+    // 2. Gateway alive: v4 and v6 (a dual-stack socket goes to ::ffff:127.0.0.1) connects land
+    // on our listener, and orig_dst knows where they were going while they are open.
+    live(&mut f, true);
+    for (dst, want) in [
+        ("192.0.2.7/9", "192.0.2.7:9"),
+        ("2001:db8::7/9", "[2001:db8::7]:9"),
+    ] {
+        let gw = std::net::TcpListener::bind(listen).unwrap();
+        let mut child = cg.spawn(&format!(
+            "exec 3<>/dev/tcp/{dst}; echo hello >&3; sleep 1; exec 3>&-"
+        ));
+        let (mut s, peer) = gw.accept().expect("redirected connect accepted");
+        let local = s.local_addr().unwrap();
+        assert_eq!(local, listen);
+        let info = orig.lookup(peer, local).expect("orig_dst record");
+        assert_eq!(info.dst, want.parse::<SocketAddr>().unwrap(), "{dst}");
+        assert_eq!(info.rule_id, 1);
+        assert_eq!(info.gateway, "default");
+        assert_eq!(info.pid, child.id(), "pid of the connecting process");
+        assert_ne!(info.cgroup_id, 0);
+        // verdict write-back lands in the entry
+        assert!(orig.record_verdict(peer, local, Verdict::Allow).unwrap());
+        let r = orig.record(peer, local).unwrap();
+        assert!(r.flags & KV_PUNT_F_DECIDED != 0);
+        assert_eq!(r.verdict, Verdict::Allow as u8);
+        let mut buf = Vec::new();
+        s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let _ = s.read_to_end(&mut buf);
+        assert_eq!(buf, b"hello\n", "bytes reached the gateway");
+        assert!(
+            child.wait().unwrap().success(),
+            "redirected connect succeeded"
+        );
+        // the client closed: its entry goes with it
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while orig.lookup(peer, local).is_some() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(orig.lookup(peer, local).is_none(), "entry deleted on close");
+    }
+    assert!(gws(&mut f, KV_GW_STAT_REDIRECT) >= 2);
+    assert!(gws(&mut f, KV_GW_STAT_ORIG_CLOSED) >= 2);
+
+    // 3. A connection made straight to the gateway (not redirected) has no record.
+    let gw = std::net::TcpListener::bind(listen).unwrap();
+    let direct = TcpStream::connect(listen).unwrap();
+    let (s, peer) = gw.accept().unwrap();
+    assert!(orig.lookup(peer, s.local_addr().unwrap()).is_none());
+    drop((direct, s, gw));
+
+    // 4. The gateway's own process (this test, exempt by tgid) is neither refused nor
+    // redirected. TEST-NET-1 is unroutable, so "allowed" shows as a timeout / unreachable.
+    let before = gws(&mut f, KV_GW_STAT_EXEMPT);
+    let r = TcpStream::connect_timeout(&"192.0.2.1:9".parse().unwrap(), Duration::from_millis(200));
+    if let Err(e) = &r {
+        assert_ne!(e.raw_os_error(), Some(nix::libc::EPERM), "gateway refused");
+    }
+    assert!(gws(&mut f, KV_GW_STAT_EXEMPT) > before);
+
+    // 5. UDP punts keep the fail mode even with a live gateway.
+    assert!(
+        !cg.run("echo hi > /dev/udp/192.0.2.1/9"),
+        "UDP punt is not redirectable: fail closed"
+    );
+    assert!(gws(&mut f, KV_GW_STAT_UNREDIRECTABLE) >= 1);
+
+    // 6. Gateway gone again: punts are refused again at once.
+    live(&mut f, false);
+    assert!(!cg.run("echo hi > /dev/tcp/192.0.2.1/9"));
+
+    assert_eq!(f.k().detach_gateway(), kernel::GATEWAY_PROGS.len());
+    assert!(!f.k().gateway_attached());
+}

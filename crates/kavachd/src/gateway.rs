@@ -49,6 +49,13 @@ pub struct GatewayMaps {
     pub(crate) cfg: Array<MapData, GatewayCfg>,
 }
 
+impl GatewayMaps {
+    /// The `orig_dst` handle alone (for a [`PinnedOrigDst`] without a heartbeat).
+    pub fn into_orig(self) -> HashMap<MapData, OrigKey, PuntRecord> {
+        self.orig
+    }
+}
+
 impl std::fmt::Debug for GatewayMaps {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("GatewayMaps")
