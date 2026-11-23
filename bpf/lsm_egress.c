@@ -389,7 +389,10 @@ static __always_inline int kv_taint(struct inode *ino)
 
 	struct kv_exe_key k = {};
 	kv_inode_key(ino, &k);
-	long err = bpf_map_delete_elem(&exe_class, &k);
+	/* Compare the low 32 bits: before 6.4, bpf_map_ops returned int, so the helper's 64-bit
+	 * result is NOT sign-extended there (-ENOENT reads as 0xfffffffe and every first write to
+	 * an unclassified file would be refused). */
+	int err = (int)bpf_map_delete_elem(&exe_class, &k);
 	if (err == 0)
 		kv_emit_exe(KV_EVENT_KIND_EXE_TAINTED, &k);
 	else if (err != -ENOENT)

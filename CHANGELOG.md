@@ -23,6 +23,7 @@ provenance.
   zero-copy → copy → SKB fallback per queue, port-selective redirect, stall watchdog.
   Preview only: redirected ports are counted and dropped until the v0.4 proxy exists.
 - `interfaces = ["auto"]`: protect every interface with a default route.
+- CI kernel matrix: the root eBPF suite on 6.1 / 6.6 / 6.12 / latest under virtme-ng.
 - Real-kernel benchmark (`bench_report`) and a CI perf gate (`docs/bench/budget.json`).
 - Release pipeline, tarball `install.sh`, `docs/INSTALL.md`.
 - 23 SVG architecture and firewall-gap diagrams; README with benchmarks, test results and a setup guide.
@@ -30,6 +31,12 @@ provenance.
   templates, CODEOWNERS, Dependabot, DCO check, OpenSSF Scorecard.
 
 ### Fixed
+- **Kernels before 6.4: every first write to an unclassified file failed with EBUSY** while
+  the BPF LSM was attached. `bpf_map_delete_elem`'s `-ENOENT` is not sign-extended there,
+  so the taint hook mistook "absent" for a failure. Found by the new kernel matrix.
+- **Kernels before 6.6: the TC filter detached right after attaching** (legacy clsact path).
+- Kernel 6.1: LSM attach no longer fails on the missing `file_truncate` hook (6.2+);
+  `path_truncate` covers truncation there.
 - **Uninstall left enforcement attached.** Package removal stops kavachd before running the
   kill-switch, which needed the daemon. `kavachctl kill-switch --yes` now removes every pin
   under `/sys/fs/bpf/kavach` itself when the daemon is not running.

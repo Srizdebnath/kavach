@@ -244,6 +244,13 @@ The real-kernel suite loads the actual BPF objects through the verifier and driv
 | `netns_veth_afxdp_redirect_and_watchdog` | real AF_XDP socket; a hung consumer falls back to the kernel stack; SSH/ping unaffected |
 | `bench_report` | the benchmark above |
 
+Kernel matrix ([`kernels.yml`](.github/workflows/kernels.yml), virtme-ng, prebuilt mainline
+kernels, BPF-LSM on), all **14/14**:
+
+| 6.1.192 (TC via legacy clsact) | 6.6.162 (tcx) | 6.12.118 (tcx) | 7.1.9 (host) | 7.3.5 (tcx) |
+|---|---|---|---|---|
+| ✅ | ✅ | ✅ | ✅ | ✅ |
+
 Plus: install tests of the `.deb`,
 `.rpm` and tarball in real containers, and every release is signed with Sigstore and carries
 SLSA build provenance.
