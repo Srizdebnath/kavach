@@ -61,6 +61,9 @@ pub struct GatewayConfig {
     /// `/sys/fs/cgroup/system.slice/kavach-gateway.service`). Its connects are never redirected.
     /// kavachd itself is always exempt (it hosts the in-process proxy).
     pub exempt_cgroup: Option<PathBuf>,
+    /// `[gateway.proxy]`: limits of the in-process L7 proxy kavachd runs while `enabled`.
+    /// Its listen address is always `listen` above.
+    pub proxy: kavach_gateway::ProxyConfig,
     /// `[gateway.afxdp]`: opt-in AF_XDP RX backend (off by default).
     pub afxdp: kavach_gateway::afxdp::AfXdpConfig,
 }
@@ -78,6 +81,7 @@ impl Default for GatewayConfig {
             listen: DEFAULT_GATEWAY_LISTEN,
             listen6: None,
             exempt_cgroup: None,
+            proxy: Default::default(),
             afxdp: Default::default(),
         }
     }
@@ -105,6 +109,15 @@ impl GatewayConfig {
                     return Err(format!("gateway.listen6 = {other}: must be [::1]:<port>"));
                 }
             }
+        }
+        if self.proxy.listen != kavach_gateway::ProxyConfig::default().listen
+            && self.proxy.listen != self.listen
+        {
+            return Err(
+                "gateway.proxy.listen: set the listener once, as gateway.listen (the redirect \
+                 target and the proxy must agree)"
+                    .into(),
+            );
         }
         if let Some(cg) = &self.exempt_cgroup
             && !cg.is_absolute()
@@ -278,6 +291,15 @@ exempt_cgroup = "/sys/fs/cgroup/system.slice/kavach-gateway.service"
         assert!(bad("[gateway]\nenabled = true\nlisten = \"[::1]:15001\"").contains("IPv4"));
         assert!(bad("[gateway]\nenabled = true\nlisten6 = \"[::2]:1\"").contains("listen6"));
         assert!(bad("[gateway]\nenabled = true\nexempt_cgroup = \"x\"").contains("absolute"));
+        assert!(
+            bad("[gateway]\nenabled = true\n[gateway.proxy]\nlisten = \"127.0.0.1:9\"")
+                .contains("once")
+        );
+        let c: super::Config =
+            toml::from_str("[gateway]\nenabled = true\n[gateway.proxy]\nmax_connections = 8")
+                .unwrap();
+        assert_eq!(c.gateway.proxy.max_connections, 8);
+        c.gateway.validate().unwrap();
         // disabled: anything goes (it is not used)
         let c: super::Config = toml::from_str("[gateway]\nlisten = \"10.0.0.1:1\"").unwrap();
         c.gateway.validate().unwrap();

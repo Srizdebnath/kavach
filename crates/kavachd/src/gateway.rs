@@ -6,7 +6,7 @@
 //!   configured address. A dead or absent gateway lets the deadline lapse within
 //!   [`HORIZON`], after which punts resolve through their fail mode again (as before v0.4), so
 //!   a fail-open rule never turns into "connection refused" because the proxy is down.
-//! * [`PinnedOrigDst`] implements [`kavach_gateway::orig::OrigDst`] over the pinned `orig_dst`
+//! * [`PinnedOrigDst`] implements [`kavach_gateway::OrigDst`] over the pinned `orig_dst`
 //!   map, and records the gateway's connection-level verdict ([`PinnedOrigDst::record_verdict`]).
 //!
 //! # Verdict write-back semantics
@@ -30,7 +30,9 @@ use std::time::Duration;
 use aya::maps::{Array, HashMap, MapData, MapError};
 use kavach_common::abi::*;
 use kavach_common::addr::{from_mapped, from_words, to_mapped, to_words};
-use kavach_gateway::orig::{OrigDst, OrigInfo};
+use kavach_gateway::{
+    Decision, DecisionEvent, EventSink, OrigDst, OrigInfo, PolicySource, ToolPolicy,
+};
 use tracing::{info, warn};
 
 use crate::config::GatewayConfig;
@@ -394,6 +396,82 @@ pub fn disable(k: &mut crate::kernel::Kernel) {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// The in-process proxy
+// ---------------------------------------------------------------------------------------------
+
+/// [`PolicySource`] over the active bundle's gateway policies. A flow gets a policy only while
+/// the rule that punted it still punts to that same gateway in the active bundle; otherwise
+/// `None`, and the proxy denies every frame (fail closed at L7).
+#[derive(Debug, Clone)]
+pub struct BundlePolicies(pub GatewayPolicies);
+
+impl PolicySource for BundlePolicies {
+    fn policy_for(&self, info: &OrigInfo) -> Option<Arc<ToolPolicy>> {
+        let snap = self.0.snapshot();
+        if snap.rules.get(&info.rule_id) != Some(&info.gateway) {
+            return None;
+        }
+        snap.policy(&info.gateway).cloned().map(Arc::new)
+    }
+}
+
+/// Run the L7 proxy on `[gateway] listen` until `shutdown`. The heartbeat notices the listener
+/// once it is bound, and redirecting starts then (not before).
+pub async fn serve_proxy(
+    g: &GatewayConfig,
+    orig: Arc<PinnedOrigDst>,
+    policies: GatewayPolicies,
+    events: Arc<dyn EventSink>,
+    shutdown: impl std::future::Future<Output = ()>,
+) -> io::Result<()> {
+    let mut cfg = g.proxy.clone();
+    cfg.listen = g.listen;
+    let proxy =
+        kavach_gateway::Gateway::bind(cfg, orig, Arc::new(BundlePolicies(policies)), events)
+            .await?;
+    info!(listen = %g.listen, "L7 gateway proxy listening");
+    proxy.serve_until(shutdown).await
+}
+
+/// Which gateway decisions go to the audit log: every deny, and allows up to `allows_per_sec`
+/// per second (the rest are counted).
+#[derive(Debug)]
+pub struct AuditThrottle {
+    window: std::time::Instant,
+    allows: u32,
+    allows_per_sec: u32,
+    pub skipped: u64,
+}
+
+impl AuditThrottle {
+    pub fn new(allows_per_sec: u32) -> Self {
+        Self {
+            window: std::time::Instant::now(),
+            allows: 0,
+            allows_per_sec,
+            skipped: 0,
+        }
+    }
+
+    pub fn admit(&mut self, ev: &DecisionEvent) -> bool {
+        if ev.decision == Decision::Deny {
+            return true;
+        }
+        if self.window.elapsed() >= Duration::from_secs(1) {
+            self.window = std::time::Instant::now();
+            self.allows = 0;
+        }
+        if self.allows < self.allows_per_sec {
+            self.allows += 1;
+            true
+        } else {
+            self.skipped += 1;
+            false
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -457,6 +535,65 @@ punt = { to = "93.184.216.0/24", port = 443, proto = "tcp", gateway = "mcp" }
             orig_info(&v6, &GatewaySnapshot::default()).dst,
             "[2001:db8::1]:8443".parse().unwrap()
         );
+    }
+
+    #[test]
+    fn bundle_policies_follow_the_active_bundle() {
+        let src = r#"
+version = 1
+[gateway.mcp]
+allow_tools = ["search"]
+[gateway.other]
+allow_tools = ["*"]
+[[rule]]
+id = "mcp"
+punt = { to = "198.51.100.0/24", port = 443, proto = "tcp", gateway = "mcp" }
+[[rule]]
+id = "other"
+punt = { to = "203.0.113.0/24", port = 443, proto = "tcp", gateway = "other" }
+"#;
+        let h = GatewayPolicies::new();
+        let src_ = BundlePolicies(h.clone());
+        let info = |rule_id: u32, gw: &str| OrigInfo {
+            dst: "198.51.100.1:443".parse().unwrap(),
+            rule_id,
+            gateway: gw.into(),
+            cgroup_id: 1,
+            pid: 1,
+        };
+        assert!(src_.policy_for(&info(1, "mcp")).is_none(), "no bundle yet");
+        h.publish(&kavach_policy::compile(src, 0).unwrap().policy, 1);
+        let p = src_
+            .policy_for(&info(1, "mcp"))
+            .expect("rule 1 punts to mcp");
+        assert_eq!(p.allow_tools, ["search"]);
+        assert!(
+            src_.policy_for(&info(1, "other")).is_none(),
+            "a record naming another gateway than its rule gets nothing"
+        );
+        assert!(src_.policy_for(&info(1, "")).is_none());
+        assert!(src_.policy_for(&info(7, "mcp")).is_none());
+    }
+
+    #[test]
+    fn audit_keeps_every_deny_and_samples_allows() {
+        let ev = |decision| DecisionEvent {
+            gateway: "mcp".into(),
+            rule_id: 1,
+            pid: 1,
+            cgroup_id: 1,
+            peer: "127.0.0.1:1".parse().unwrap(),
+            dst: "198.51.100.1:443".parse().unwrap(),
+            protocol: kavach_gateway::proxy::Protocol::Http,
+            method: None,
+            target: None,
+            decision,
+            reason: kavach_gateway::proxy::Reason::Policy,
+        };
+        let mut t = AuditThrottle::new(2);
+        let allows = (0..5).filter(|_| t.admit(&ev(Decision::Allow))).count();
+        assert_eq!((allows, t.skipped), (2, 3));
+        assert!((0..100).all(|_| t.admit(&ev(Decision::Deny))));
     }
 
     #[test]
