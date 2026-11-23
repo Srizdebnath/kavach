@@ -185,6 +185,7 @@ sudo kavachctl apply policy.kvb --dry-run           # diff against what is runni
 sudo kavachctl apply policy.kvb                     # atomic swap, reported in µs
 sudo kavachctl stats                                # verdict counters
 sudo kavachctl events --kind egress                 # live verdicts (sampled 1-in-sample_rate)
+sudo kavachctl top                                  # live dashboard (q quit, p pause, tab, s sort)
 ```
 
 Recommended rollout:
