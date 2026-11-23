@@ -1,1 +1,6 @@
-obj-m := kavach_ko.o
+# SPDX-License-Identifier: GPL-2.0-only
+# kavach.ko = Rust evaluator (kavach_ko.rs + generated kavach_vendor.rs) + C kfunc shim.
+# Build through the Makefile next to this file (it generates kavach_vendor.rs first).
+obj-m := kavach.o
+kavach-y := kavach_ko.o kavach_kfunc.o
+ccflags-y += -I$(src)/../../bpf/include
