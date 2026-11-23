@@ -92,6 +92,26 @@ async fn main() -> Result<()> {
         }
     }
 
+    // L7 gateway redirect for punted TCP connects. Lives until kavachd exits; on exit (or a
+    // crash) the liveness deadline lapses and punts fall back to their fail mode. The proxy
+    // resolves original destinations through `gateway.orig` (kavach_gateway::orig::OrigDst).
+    let _gateway = if cfg.gateway.enabled {
+        match kavachd::gateway::start(&mut k, &cfg.gateway, std::process::id()) {
+            Ok(g) => {
+                info!(listen = %cfg.gateway.listen, listen6 = ?cfg.gateway.listen6,
+                      "L7 gateway redirect attached (active while the listener is up)");
+                Some(g)
+            }
+            Err(e) => {
+                error!(error = %format!("{e:#}"), "L7 gateway redirect not started; punts use their fail mode");
+                None
+            }
+        }
+    } else {
+        kavachd::gateway::disable(&mut k);
+        None
+    };
+
     // Opt-in AF_XDP gateway backend; lives until kavachd exits (its sockets close with it).
     let _afxdp = start_afxdp(&mut k, &cfg, &xdp_modes);
 
@@ -238,8 +258,10 @@ fn start_afxdp(
             let modes: Vec<String> = b.modes().iter().map(|(q, m)| format!("{q}:{m}")).collect();
             warn!(
                 iface = %a.iface, ?ports, ?modes, watchdog_ms = a.watchdog_ms,
-                "AF_XDP gateway backend ON: these ports now terminate in the gateway (preview \
-                 consumer counts and drops them) and bypass TC ingress policy"
+                "AF_XDP gateway backend ON: frames to these ports are consumed (counted, then \
+                 dropped) in user space, because AF_XDP cannot hand a frame back to the kernel \
+                 stack; they bypass TC ingress policy. Punted connections do not use this path \
+                 ([gateway] enabled redirects them at connect())"
             );
             Some(b)
         }

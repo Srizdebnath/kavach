@@ -41,5 +41,8 @@ mod aya_pod {
         Policy,
         AddrKey,
         Event,
+        GatewayCfg,
+        PuntRecord,
+        OrigKey,
     );
 }

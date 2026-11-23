@@ -1,5 +1,6 @@
 //! `/etc/kavach/kavachd.toml` — host configuration (not policy).
 
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use serde::Deserialize;
@@ -44,11 +45,77 @@ pub struct Config {
 }
 
 /// `[gateway]`.
-#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, default)]
 pub struct GatewayConfig {
+    /// Redirect punted TCP connects to the L7 gateway (`cgroup/connect4|6` + sockops on the
+    /// root cgroup). Off: punts resolve through the rule's fail mode.
+    pub enabled: bool,
+    /// The gateway's IPv4 listener. Must be a loopback address: punted traffic never leaves
+    /// the host on its way to the gateway.
+    pub listen: SocketAddr,
+    /// Optional IPv6 listener (`[::1]:port`). Without it, IPv6 sockets are redirected to the
+    /// IPv4-mapped `listen` (`IPV6_V6ONLY` sockets cannot be; their punts use the fail mode).
+    pub listen6: Option<SocketAddr>,
+    /// cgroup v2 directory of an out-of-process gateway (e.g.
+    /// `/sys/fs/cgroup/system.slice/kavach-gateway.service`). Its connects are never redirected.
+    /// kavachd itself is always exempt (it hosts the in-process proxy).
+    pub exempt_cgroup: Option<PathBuf>,
     /// `[gateway.afxdp]`: opt-in AF_XDP RX backend (off by default).
     pub afxdp: kavach_gateway::afxdp::AfXdpConfig,
+}
+
+/// Default gateway listener (the proxy's default bind address).
+pub const DEFAULT_GATEWAY_LISTEN: SocketAddr = SocketAddr::V4(std::net::SocketAddrV4::new(
+    std::net::Ipv4Addr::LOCALHOST,
+    15001,
+));
+
+impl Default for GatewayConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            listen: DEFAULT_GATEWAY_LISTEN,
+            listen6: None,
+            exempt_cgroup: None,
+            afxdp: Default::default(),
+        }
+    }
+}
+
+impl GatewayConfig {
+    /// Check the redirect settings (a disabled gateway is always valid).
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.enabled {
+            return Ok(());
+        }
+        match self.listen {
+            SocketAddr::V4(a) if a.ip().is_loopback() && a.port() != 0 => {}
+            other => {
+                return Err(format!(
+                    "gateway.listen = {other}: must be an IPv4 loopback address with a port \
+                     (punted connections must not leave the host)"
+                ));
+            }
+        }
+        if let Some(l6) = self.listen6 {
+            match l6 {
+                SocketAddr::V6(a) if a.ip().is_loopback() && a.port() != 0 => {}
+                other => {
+                    return Err(format!("gateway.listen6 = {other}: must be [::1]:<port>"));
+                }
+            }
+        }
+        if let Some(cg) = &self.exempt_cgroup
+            && !cg.is_absolute()
+        {
+            return Err(format!(
+                "gateway.exempt_cgroup = {}: must be an absolute cgroup v2 directory",
+                cg.display()
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -150,6 +217,7 @@ impl Config {
             Ok(s) => {
                 let c: Self = toml::from_str(&s)?;
                 c.anomaly.validate().map_err(anyhow::Error::msg)?;
+                c.gateway.validate().map_err(anyhow::Error::msg)?;
                 Ok(c)
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -177,6 +245,42 @@ mod tests {
             "AF_XDP backend is never on by default"
         );
         assert!(!super::Config::default().gateway.afxdp.enabled);
+        assert_eq!(
+            c.gateway,
+            super::GatewayConfig::default(),
+            "example = defaults"
+        );
+        assert!(!c.gateway.enabled, "punt redirect is never on by default");
+    }
+
+    #[test]
+    fn gateway_redirect_section_parses_and_validates() {
+        let c: super::Config = toml::from_str(
+            r#"
+[gateway]
+enabled = true
+listen = "127.0.0.1:15001"
+listen6 = "[::1]:15001"
+exempt_cgroup = "/sys/fs/cgroup/system.slice/kavach-gateway.service"
+"#,
+        )
+        .unwrap();
+        assert!(c.gateway.enabled);
+        assert_eq!(c.gateway.listen, super::DEFAULT_GATEWAY_LISTEN);
+        assert_eq!(c.gateway.listen6, Some("[::1]:15001".parse().unwrap()));
+        c.gateway.validate().unwrap();
+        let bad = |s: &str| {
+            let c: super::Config = toml::from_str(s).unwrap();
+            c.gateway.validate().unwrap_err()
+        };
+        assert!(bad("[gateway]\nenabled = true\nlisten = \"10.0.0.1:15001\"").contains("loopback"));
+        assert!(bad("[gateway]\nenabled = true\nlisten = \"127.0.0.1:0\"").contains("port"));
+        assert!(bad("[gateway]\nenabled = true\nlisten = \"[::1]:15001\"").contains("IPv4"));
+        assert!(bad("[gateway]\nenabled = true\nlisten6 = \"[::2]:1\"").contains("listen6"));
+        assert!(bad("[gateway]\nenabled = true\nexempt_cgroup = \"x\"").contains("absolute"));
+        // disabled: anything goes (it is not used)
+        let c: super::Config = toml::from_str("[gateway]\nlisten = \"10.0.0.1:1\"").unwrap();
+        c.gateway.validate().unwrap();
     }
 
     #[test]
