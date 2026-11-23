@@ -153,7 +153,7 @@ Deep dive: [Architecture](docs/ARCHITECTURE.md) · [Requirements (SRS)](docs/SRS
 | G2 | Encrypted traffic is opaque (TLS 1.3, ECH, QUIC) | Decide on *process identity* + destination at `connect()`; no MITM. TLS/JA4/DNS/QUIC parsers ready | ✅ identity · 🧩 parsers are a library |
 | G3 | AI agents speak MCP / A2A / WebSockets | Punt verdict + MCP/A2A tool-policy core | 🧪 v0.4 |
 | G4 | East-west traffic is invisible | Every host enforces; ingress deny-by-default for new flows; one signed fleet policy | ✅ built |
-| G5 | IPs are not identity | Rules on binary SHA-256, path, uid, cgroup; tamper revokes trust in-kernel | ✅ built (k8s/SPIFFE: v0.4) |
+| G5 | IPs are not identity | Rules on binary SHA-256, path, uid, cgroup, k8s labels, SPIFFE ID; tamper revokes trust in-kernel | ✅ built (k8s/SPIFFE: v0.4 node agent) |
 | G6 | Rule sprawl and misconfiguration | Hard validation, shadowed-rule errors, TTLs, `diff`, `--dry-run`, `explain` | ✅ built |
 | G7 | Exploited within hours of disclosure | `block add` in seconds, policy hot-swap in < 1 ms, signed releases | ✅ built |
 | G8 | Kernel modules can crash the box | Verified eBPF only, differential tests, clean unload, survives daemon crash | ✅ built |
@@ -408,7 +408,7 @@ already stopped. Config, state and logs are kept.
 |---|---|
 | `direction` | `ingress` or `egress` (default egress) |
 | `allow` / `deny` / `log` | the verdict, with `{ to \| from, port, proto }` |
-| `who` | `{ exe = "/path" }`, `{ binary = "sha256:…" }`, `{ user = "svc-pay" }` (name or uid), `{ cgroup = "/system.slice/x.service" }` |
+| `who` | `{ exe = "/path" }`, `{ binary = "sha256:…" }`, `{ user = "svc-pay" }` (name or uid), `{ cgroup = "/system.slice/x.service" }`, `{ k8s = "app=db,ns=prod" }`, `{ spiffe = "spiffe://td/ns/prod/*" }` |
 | `[sets]` | named CIDR sets, referenced as `@name` |
 | `ttl` | e.g. `"30d"`: the rule stops matching at expiry without operator action |
 | `fail` | `open` or `closed` (per rule, or in `[defaults]`) |
@@ -417,6 +417,17 @@ already stopped. Config, state and logs are kept.
 The compiler rejects invalid CIDRs/ports, unknown fields, contradictions and **shadowed rules**
 (a rule that can never match because an earlier one covers it). Limits: 1 024 rules, 64 identity
 selectors, 64 address sets per policy. Full example: [`examples/kavach.toml`](examples/kavach.toml).
+
+**Kubernetes / SPIFFE identity** (v0.4 node agent, `[k8s] enabled = true` in kavachd.toml).
+`k8s` takes a label-selector subset: `k=v`, `k!=v`, `k in (a,b)`, `k notin (a,b)`, `k`, `!k`,
+with `ns` meaning the pod's namespace (comma = AND). `spiffe` is an exact ID or a trailing `/*`
+prefix; a pod's ID comes from `spiffe_template` (default
+`spiffe://{trust_domain}/ns/{namespace}/sa/{service_account}`). Both can be combined with `exe`,
+`binary` and `user`, not with `cgroup`. kavachd maps pod cgroups (cgroup v2, systemd or cgroupfs
+driver; containerd, CRI-O, docker) to pod metadata from the API server, the kubelet or a
+PodList file. A pod whose metadata is not known yet has *unknown* identity: rules with
+`fail = "closed"` (the default) refuse it, `fail = "open"` rules skip it. Each fail-closed
+workload selector uses a second selector bit for that.
 
 ## Operating it
 
@@ -453,11 +464,12 @@ scripts/priv-test.sh     # real-kernel suite (sudo)
 | v0.1 | XDP blocklist + per-source rate limiting | ✅ kernel-tested |
 | v0.2 | Identity-aware egress via BPF-LSM: binary hash/path, uid, cgroup; tamper revocation | ✅ kernel-tested |
 | v0.3 | `kavach.toml` policy-as-code, `kavachctl`, signed bundles, A/B hot-swap, audit log, `top`, anomaly detection | ✅ kernel-tested |
-| v0.4 | Agent gateway (MCP / A2A), k8s/SPIFFE identity, `kavach.ko` kfunc; AF_XDP RX backend | 🧪 policy core + AF_XDP backend (kernel-tested); proxy pending |
+| v0.4 | Agent gateway (MCP / A2A), k8s/SPIFFE identity, `kavach.ko` kfunc; AF_XDP RX backend | 🧪 policy core, AF_XDP backend, k8s/SPIFFE identity (kernel-tested); proxy pending |
 | v0.5 | FreeBSD pfil shim, macOS Network Extension | planned |
 
-Honest limits today: kavachd must run in the host PID namespace for identity rules; k8s-label and SPIFFE selectors are rejected by the compiler until the v0.4
-node agent exists; the QUIC parser handles a ClientHello that fits in one Initial packet;
+Honest limits today: kavachd must run in the host PID namespace for identity rules (and see
+the host cgroup tree for k8s / SPIFFE ones); SPIFFE IDs are derived from pod metadata, not
+fetched from a SPIRE agent, and label changes reach the kernel within `resync_secs`; the QUIC parser handles a ClientHello that fits in one Initial packet;
 anomaly detection sees only `drop`/`log` events; the AF_XDP backend has a counting consumer only
 (redirected ports are dropped until the v0.4 proxy lands), and zero-copy is untested on real NICs.
 
