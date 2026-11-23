@@ -17,6 +17,20 @@ in the README) describe *scope*; version numbers describe *releases*.
   punted flow and names the deciding pattern. New `kavachctl gateway list` and
   `kavachctl gateway test <name> <frames.jsonl>`.
 - kavachd publishes the active bundle's gateway policies to a shared handle for the gateway proxy.
+- Kernel redirect of punted TCP connects to the L7 gateway (`[gateway] enabled`, `listen`,
+  `listen6`, `exempt_cgroup` in kavachd.toml; off by default). New `cgroup/connect4|6`,
+  `cgroup/getpeername4|6` and `sockops` programs on the root cgroup v2, maps `gw_cfg`,
+  `sk_punt`, `orig_dst`, `gw_stats`. kavachd runs the proxy in-process (exempt from
+  redirection), resolves original destinations from `orig_dst`, audits gateway decisions, and
+  renews a liveness deadline only while the listener is up, so a dead gateway falls back to
+  each rule's fail mode within 3 s. `kavachctl doctor` reports whether the redirect can run.
+
+### Changed
+- Kernel ABI v3 (pins under `/sys/fs/bpf/kavach/v3`; upgrades retire v2). `Rule` carries the
+  punt rule's gateway index in former reserved bytes.
+- The AF_XDP backend keeps consuming frames on its selected ports, now documented as
+  deliberate: AF_XDP cannot hand frames back to the stack, and a TAP re-inject would bypass
+  policy. Punted flows do not use it.
 
 ## [0.3.1] - 2026-11-23
 

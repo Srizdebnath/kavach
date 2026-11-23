@@ -15,7 +15,8 @@ kavach/
 │   ├── include/kavach_eval.h  # snapshot, identity masks, rule scan (mirror of kavach-core)
 │   ├── xdp_filter.c           # blocklist + GCRA rate limit (+ opt-in AF_XDP redirect)
 │   ├── tc_flow.c              # flow cache, reply tracking, ingress rules, re-evaluation
-│   └── lsm_egress.c           # connect/sendmsg verdicts, exec/taint tracking, task iterator
+│   ├── lsm_egress.c           # connect/sendmsg verdicts, exec/taint tracking, task iterator
+│   └── gw_redirect.c          # punt → L7 gateway: cgroup connect/getpeername rewrite, sockops
 ├── crates/
 │   ├── kavach-common/         # no_std #[repr(C)] ABI + address helpers — single source of truth
 │   ├── kavach-core/           # no_std, forbid(unsafe): reference evaluator
@@ -31,8 +32,7 @@ kavach/
 ```
 
 Planned (v0.4/v0.5): `kernel/kavach-ko` (Rust-for-Linux kfunc), `crates/kavach-parsers`
-(TLS/JA4/DNS), the kernel redirect into the `crates/kavach-gateway` L7 proxy (§9b),
-`shims/{freebsd,macos}`.
+(TLS/JA4/DNS), `shims/{freebsd,macos}`.
 
 ## 2. Crate dependency graph
 
@@ -98,6 +98,10 @@ All maps except `sync_*` are pinned `LIBBPF_PIN_BY_NAME` under `/sys/fs/bpf/kava
 | `xsk_ports` | HASH[256] | `proto << 16 \| port` (host order) → 1 | kavachd | XDP |
 | `xsk_alive` | ARRAY[64] | RX queue → u64 redirect deadline (`CLOCK_BOOTTIME`) | gateway watchdog | XDP |
 | `xsk_stats` | PERCPU_ARRAY[4] | `KV_XSK_STAT_*` → u64 | XDP | kavachd |
+| `gw_cfg` | ARRAY[1] | `GatewayCfg{alive_until_ns, listen4/6, exempt tgid/cgroup}` | kavachd heartbeat | LSM, TC |
+| `sk_punt` | SK_STORAGE | socket → `PuntRecord` (one-shot PENDING → REDIRECTED) | LSM, connect hook | connect/getpeername hooks, sockops |
+| `orig_dst` | LRU_HASH 64k | `OrigKey` (client 4-tuple) → `PuntRecord` | sockops (insert at connect, delete at close); kavachd verdict write-back | kavachd (`OrigDst`) |
+| `gw_stats` | PERCPU_ARRAY[8] | `KV_GW_STAT_*` → u64 | LSM, TC, hooks | kavachd |
 | `sync_inner` / `sync_rcu` | ARRAY / ARRAY_OF_MAPS | used only to force `synchronize_rcu()` | kavachd | — |
 
 * **Δ GCRA in a shared LRU_HASH** (not per-CPU token buckets): one 16-byte state per source,
@@ -195,9 +199,11 @@ has hashed it, typically within milliseconds of exec.
 ```
 
 * No match ⇒ `default[dir]`.
-* `Punt` (no L7 consumer before v0.4) resolves through the rule's fail mode: closed ⇒ drop,
-  open ⇒ log. A punt rule may name a `[gateway.<name>]` policy. The gateway index stays in
-  user space; the kernel rule table is unchanged. kavachd publishes the active bundle's gateway
+* `Punt` resolves through the rule's fail mode (closed ⇒ drop, open ⇒ log) unless the LSM
+  hands the connect to a live L7 gateway (§9c). A punt rule may name a `[gateway.<name>]`
+  policy; the kernel `Rule` carries its 1-based index (`gateway`, 0 = none, so never
+  redirected). The evaluator (C and `kavach-core`) is unchanged: the redirect is an action the
+  LSM takes on top of a `punted` decision. kavachd publishes the active bundle's gateway
   policies (`GatewayPolicies` in `kavachd/src/gateway_policies.rs`, keyed by name and by punt
   rule id) for the proxy, which decides each frame with `kavach_gateway::ToolPolicy`.
 * Egress to loopback bypasses evaluation unless the policy sets `loopback_bypass = false`.
@@ -342,9 +348,12 @@ XDP: parse → blocklist → GCRA → [flag] xsk_ports[(proto,dport)]? → xsk_a
   `KV_XDP_F_AFXDP` last. When the backend is disabled, kavachd's fresh `xdp_cfg` already has the
   flag clear and it also empties `xsk_ports`, so a previous run leaves nothing behind.
 * **What redirected frames skip.** The XDP blocklist and rate limit still apply, but redirected
-  frames never reach TC (flow tracking, ingress policy) or the socket layer. Until the v0.4
-  proxy lands, kavachd's consumer is a counting sink that drops them, so only enable it for
-  ports the gateway itself terminates.
+  frames never reach TC (flow tracking, ingress policy) or the socket layer. kavachd's
+  consumer counts and drops them, deliberately: AF_XDP cannot hand a frame back to the local
+  stack (TX leaves through the NIC), and re-injecting through a TAP device would re-enter the
+  stack after XDP/TC, under another ifindex and without TC's flow state, i.e. around policy.
+  Consuming fails closed for exactly the selected ports. Punted L7 flows never use this path
+  (§9c). Only enable it for ports nothing else on the host must receive.
 * **Code.** `crates/kavach-gateway/src/afxdp/`: `sys.rs` (raw `libc` syscalls behind a `Sys`
   trait), `ring.rs` (SPSC rings with acquire/release indices), `socket.rs` (UMEM of
   `2 × ring_size` frames: half on the fill ring, half for TX; transmitting a received frame
@@ -398,6 +407,57 @@ XDP: parse → blocklist → GCRA → [flag] xsk_ports[(proto,dport)]? → xsk_a
   `proxy/conn.rs` (sniffing and the relays), `proxy/mod.rs` (config, traits, policy store).
   The pure parsers are fuzzed by `fuzz/fuzz_targets/gateway_framing.rs`.
 
+## 9c. Kernel redirect of punted connections
+
+`[gateway] enabled = true` in kavachd.toml (off by default) sends punted TCP connects to the
+proxy (§9b) on `listen` (loopback only, default `127.0.0.1:15001`; optional `listen6`).
+
+```
+connect(dst) ─► lsm/socket_connect: rule verdict Punt, rule.gateway != 0, gw_cfg alive?
+                  │ no / not TCP / v6-only socket without listen6 ──► fail mode (as before)
+                  │ caller is the gateway (exempt tgid / cgroup) ───► allow (upstream leg)
+                  └ yes: allow, sk_punt = {dst, rule, gateway, pid, cgroup, PENDING}
+             ─► cgroup/connect4|6: PENDING for this same dst + policy generation?
+                  └ rewrite dst → listener, REDIRECTED (anything else voids the record)
+             ─► sockops TCP_CONNECT_CB (port bound, before the SYN): orig_dst[client 4-tuple]
+             ─► proxy accept → OrigDst::lookup(peer, local) → OrigInfo → per-frame decision
+close      ─► sockops STATE_CB(TCP_CLOSE): delete orig_dst entry
+getpeername ─► cgroup/getpeername4|6: the client still sees dst
+```
+
+* **Why the LSM decides.** In `connect()` the LSM hook runs before `sk_prot->pre_connect`, which
+  runs the cgroup hook, and only the LSM can compute the executable identity. So identity,
+  evaluation and the punt decision stay in one place; the cgroup programs only act on a
+  record made for that very call (same destination, same generation, one-shot), so a failed
+  or repeated `connect()` cannot inherit an older redirect. `sendmsg()` with a name on a socket
+  already connected to the gateway keeps its record.
+* **Attach.** `cgroup/connect4`, `connect6`, `getpeername4`, `getpeername6` and `sockops` are
+  attached (multi-attach bpf_links, pinned under `links/`) to the root of the cgroup v2
+  hierarchy, all or nothing, and detached when the gateway is disabled. All are 4.17–5.8
+  hook types with bpf_link support since 5.7, so the 6.1 floor needs no fallback. Without
+  the BPF LSM the redirect is not started (nothing could punt).
+* **Key.** `orig_dst` is keyed by the client side as the proxy sees it on accept
+  (`peer`, `local`), IPv4-mapped; a v6 dual-stack socket redirected to `::ffff:127.0.0.1`
+  produces the same key as the proxy's v4 accept. The entry is inserted before the SYN (the
+  proxy cannot accept first), removed at `TCP_CLOSE` (state callbacks are enabled only for
+  redirected sockets), and the map is LRU so a lost close cannot pin it. A connection made
+  straight to the listener has no entry and is closed by the proxy.
+* **No loops.** kavachd hosts the proxy, and its tgid is exempt: a punt by the gateway itself
+  is allowed and never redirected, also when TC re-evaluates the upstream flow after a policy
+  swap. An out-of-process gateway is exempted by `exempt_cgroup` (exact cgroup id).
+* **Liveness.** A heartbeat thread renews `gw_cfg.alive_until_ns` (now + 3 s, every 1 s) only
+  while something listens on `listen` (`/proc/net/tcp*`). A stopped, crashed or unbound
+  gateway lets the deadline lapse and punts fall back to their fail mode: a fail-open rule
+  never becomes "connection refused" because the proxy is down. Clean exit zeroes it at once.
+* **Verdict write-back.** The proxy is in the path and enforces its own per-frame decisions.
+  The client leg runs over loopback, where TC and `flow_cache` are not attached, and the
+  upstream leg belongs to the gateway's identity, so no `flow_cache` entry could carry an L7
+  verdict. `PinnedOrigDst::record_verdict` stores the latest connection-level verdict in the
+  `orig_dst` entry (`KV_PUNT_F_DECIDED`) for observability only; decisions are also audited
+  (`gateway_decision`: every deny, allows sampled at 10/s).
+* **Not redirected.** UDP/ICMP punts, punt rules naming no gateway, and `IPV6_V6ONLY` sockets
+  when no `listen6` is configured keep the fail mode (`gw_stats` says which).
+
 ## 10. Failure semantics
 
 | Event | Behaviour |
@@ -405,7 +465,8 @@ XDP: parse → blocklist → GCRA → [flag] xsk_ports[(proto,dport)]? → xsk_a
 | kavachd crash / stop | Programs, links and maps stay pinned; the last policy keeps enforcing (verified live) |
 | kavachd restart | Re-adopts pins, continues the generation counter, re-stages the persisted bundle, reconciles exe cache |
 | Bundle invalid / rollback / wrong fleet | Rejected; active policy unchanged; audit record + error |
-| Punt with no consumer | Rule fail mode decides |
+| Punt with no consumer (gateway disabled, not listening, dead > 3 s) | Rule fail mode decides |
+| Punt of UDP/ICMP, or by a rule naming no gateway | Rule fail mode decides |
 | BPF LSM not active | Identity egress is reported as off; XDP/TC still work |
 | `kavachctl kill-switch --yes` (root) | Detach all links, unpin everything, remove the pin dir |
 | AF_XDP consumer stalls (backend enabled) | Watchdog unsets the queue's socket within `watchdog_ms`; selected ports fall back to the stack |
