@@ -40,6 +40,12 @@ __bpf_kfunc int kavach_evaluate(const void *pol, u32 pol__sz, const struct kavac
 
 __bpf_kfunc_end_defs();
 
+/*
+ * No KF_* flags: every argument is plain memory (`void *` + `__sz`, or a pointer to a struct of
+ * scalars), which the verifier bounds-checks by size for any kfunc. KF_TRUSTED_ARGS /
+ * KF_RCU only constrain pointers to BTF kernel objects, and the kfunc neither acquires nor
+ * releases anything, nor sleeps (so not KF_SLEEPABLE: callable from LSM and TC alike).
+ */
 BTF_KFUNCS_START(kavach_kfunc_ids)
 BTF_ID_FLAGS(func, kavach_evaluate)
 BTF_KFUNCS_END(kavach_kfunc_ids)
@@ -59,8 +65,11 @@ int kavach_kfunc_register(void)
 	BUILD_BUG_ON(offsetof(struct kavach_eval_req, port) != 24);
 	BUILD_BUG_ON(offsetof(struct kavach_eval_req, dir) != 27);
 	BUILD_BUG_ON(offsetof(struct kavach_eval_res, verdict) != 4);
+	BUILD_BUG_ON(offsetof(struct kavach_eval_res, gateway) != 6);
 
-	/* lsm/socket_connect, lsm/socket_sendmsg (LSM maps to the tracing kfunc hook). */
+	/* lsm/socket_connect, lsm/socket_sendmsg (BTF_KFUNC_HOOK_LSM). Only LSM and TC programs
+	 * call kv_evaluate (bpf/lsm_egress.c, bpf/tc_flow.c); a program of any other type that
+	 * referenced the kfunc would be rejected by the verifier once the module is loaded. */
 	ret = register_btf_kfunc_id_set(BPF_PROG_TYPE_LSM, &kavach_kfunc_set);
 	if (ret)
 		return ret;

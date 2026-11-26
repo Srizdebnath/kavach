@@ -217,8 +217,14 @@ pub fn evaluate_traced<T: Tables + ?Sized, F: FnMut(usize, Option<Miss>)>(
     } else {
         pol.hdr.default_ingress
     };
+    // A default has no fail mode to resolve Punt through (the compiler rejects `punt`
+    // defaults): like an out-of-range byte, it fails closed.
+    let verdict = match Verdict::from_u8(d) {
+        Some(Verdict::Punt) | None => Verdict::Drop,
+        Some(v) => v,
+    };
     Decision {
-        verdict: Verdict::from_u8(d).unwrap_or(Verdict::Drop),
+        verdict,
         rule_id: 0,
         rule_index: None,
         punted: false,

@@ -96,6 +96,31 @@ fn default_applies_when_nothing_matches() {
     assert_eq!(d.rule_id, 0);
 }
 
+/// Found by fuzz/fuzz_targets/kfunc_evaluate.rs: a raw slot whose default is Punt (which the
+/// compiler never emits) or an unknown byte must not leak an unresolved verdict.
+#[test]
+fn punt_or_garbage_default_fails_closed() {
+    let t = Mem::default();
+    for raw in [Verdict::Punt as u8, 4, 0xff] {
+        let mut p = policy(&[], Verdict::Allow);
+        p.hdr.default_egress = raw;
+        p.hdr.default_ingress = raw;
+        let s = Snapshot::new(&p, 0).unwrap();
+        let mut fq = q([0; 16], 1, 0);
+        assert_eq!(
+            evaluate(&t, &s, &fq, 0).verdict,
+            Verdict::Drop,
+            "egress {raw}"
+        );
+        fq.dir = KV_DIR_INGRESS;
+        assert_eq!(
+            evaluate(&t, &s, &fq, 0).verdict,
+            Verdict::Drop,
+            "ingress {raw}"
+        );
+    }
+}
+
 #[test]
 fn invalid_slot_has_no_snapshot() {
     let mut p = policy(&[], Verdict::Allow);

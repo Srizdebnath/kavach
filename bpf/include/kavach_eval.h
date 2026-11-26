@@ -161,7 +161,8 @@ static __always_inline void kv_evaluate(const struct kv_snapshot *s, __u8 dir, _
 			d->rule_id = res.rule_id;
 			d->verdict = res.verdict;
 			d->punted = res.punted;
-			return;
+			d->gateway = res.punted ? res.gateway : 0;
+			goto out;
 		}
 		/* Size mismatch (module built for another ABI): fall through to the C mirror. */
 	}
@@ -199,9 +200,14 @@ static __always_inline void kv_evaluate(const struct kv_snapshot *s, __u8 dir, _
 		d->verdict = dir == KV_DIR_EGRESS ? s->pol->hdr.default_egress
 						  : s->pol->hdr.default_ingress;
 	}
+out:
 	/* An out-of-range verdict fails closed, as Verdict::from_u8(..).unwrap_or(Drop) does in
-	 * kavach-core (found by kernel/kavach-ko/selftest.py). */
-	if (d->verdict > KV_VERDICT_PUNT)
+	 * kavach-core (found by kernel/kavach-ko/selftest.py). So does a Punt that is still here:
+	 * a rule's Punt was resolved above, so it came from a default, which has no fail mode
+	 * (the compiler rejects `punt` defaults; found by fuzz/fuzz_targets/kfunc_evaluate.rs).
+	 * Applied to the kfunc's answer too, so a module built from other sources cannot make the
+	 * callers treat garbage as allow. */
+	if (d->verdict >= KV_VERDICT_PUNT)
 		d->verdict = KV_VERDICT_DROP;
 }
 

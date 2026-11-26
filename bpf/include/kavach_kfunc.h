@@ -13,6 +13,7 @@
  *   - the LPM lookup in `addr_sets` and the clock read stay in BPF (the module never touches BPF
  *     maps), so `sets` and `now_ns` are inputs.
  *
+ * All three pointers must be non-NULL and naturally aligned (the module checks).
  * Returns 0 and fills @res, or a negative errno (the caller then uses the C evaluator).
  *
  *   int kavach_evaluate(const void *pol, __u32 pol__sz,
@@ -35,7 +36,7 @@ struct kavach_eval_res {
 	__u32 rule_id; /* 0 = default verdict */
 	__u8 verdict;  /* final: Allow / Drop / Log (Punt resolved through the fail mode) */
 	__u8 punted;
-	__u16 _pad;
+	__u16 gateway; /* punting rule's kv_rule.gateway (0 unless punted) */
 };
 
 #define KAVACH_EVAL_REQ_SIZE 32

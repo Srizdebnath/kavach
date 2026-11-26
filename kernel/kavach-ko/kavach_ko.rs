@@ -42,7 +42,7 @@ struct EvalRes {
     rule_id: u32,
     verdict: u8,
     punted: u8,
-    _pad: u16,
+    gateway: u16,
 }
 
 // Same numbers as the _Static_asserts in kavach_kfunc.h and the BUILD_BUG_ONs in kavach_kfunc.c.
@@ -51,6 +51,7 @@ const _: () = assert!(size_of::<EvalRes>() == 8);
 const _: () = assert!(core::mem::offset_of!(EvalReq, port) == 24);
 const _: () = assert!(core::mem::offset_of!(EvalReq, dir) == 27);
 const _: () = assert!(core::mem::offset_of!(EvalRes, verdict) == 4);
+const _: () = assert!(core::mem::offset_of!(EvalRes, gateway) == 6);
 
 /// `Tables` for the kfunc: rule evaluation only needs the remote address-set bitmap, which the
 /// BPF caller already looked up in `addr_sets` (the module never touches BPF maps). The identity
@@ -74,20 +75,28 @@ impl Tables for Precomputed {
     }
 }
 
+/// Non-NULL and aligned for `T` (written out: `<*const T>::is_aligned` needs a newer rustc than
+/// the kernel's minimum).
+fn usable<T>(p: *const T) -> bool {
+    !p.is_null() && (p as usize) % core::mem::align_of::<T>() == 0
+}
+
 /// Body of the `kavach_evaluate` kfunc, called from `kavach_kfunc.c`.
 ///
-/// Returns 0 and fills `res`, `-EINVAL` when `pol_sz` is not the size of this build's
-/// `struct kv_policy` (BPF objects built against another ABI), `-ENOENT` when the slot is not
-/// marked valid. On error `res` is untouched and the caller falls back to the C evaluator.
+/// Returns 0 and fills `res`; `-EINVAL` when `pol_sz` is not the size of this build's
+/// `struct kv_policy` (BPF objects built against another ABI) or a pointer is NULL or
+/// misaligned; `-ENOENT` when the slot is not marked valid. On error `res` is untouched and the
+/// caller falls back to the C evaluator.
 ///
 /// # Safety
 ///
 /// Called only through the kfunc, after the verifier proved that `pol` is readable for
 /// `pol_sz` bytes (`__sz` argument), and that `req` and `res` point to initialised, writable
-/// BPF stack memory of their struct sizes. None of them is NULL (the arguments are not
-/// `__nullable`). `pol` is a value of the `policy_slots` array map: kavachd only ever rewrites
-/// the slot that is *not* active (FR-HS-2), so the snapshot read here is not written
-/// concurrently; the C evaluator relies on the same protocol.
+/// BPF memory of their struct sizes. The verifier does not prove alignment, and a caller could
+/// pass a pointer into the middle of a larger value, so alignment (and, defensively, NULL) is
+/// checked here before any reference is formed. `pol` is a value of the `policy_slots` array
+/// map: kavachd only ever rewrites the slot that is *not* active (FR-HS-2), so the snapshot read
+/// here is not written concurrently; the C evaluator relies on the same protocol.
 #[no_mangle]
 pub unsafe extern "C" fn kavach_rs_evaluate(
     pol: *const c_void,
@@ -98,16 +107,18 @@ pub unsafe extern "C" fn kavach_rs_evaluate(
     if pol_sz as usize != size_of::<Policy>() {
         return EINVAL.to_errno();
     }
-    // SAFETY: see the function's safety section: `pol` points to `size_of::<Policy>()` readable
-    // bytes of a map value (8-byte aligned), `Policy` is `#[repr(C)]` and valid for any bit
-    // pattern; `req`/`res` are valid for their sizes and alignments.
-    let (policy, req, res) = unsafe {
-        (
-            &*pol.cast::<Policy>(),
-            &*req.cast::<EvalReq>(),
-            &mut *res.cast::<EvalRes>(),
-        )
-    };
+    let (pol, req, res) = (
+        pol.cast::<Policy>(),
+        req.cast::<EvalReq>(),
+        res.cast::<EvalRes>(),
+    );
+    if !usable(pol) || !usable(req) || !usable(res.cast_const()) {
+        return EINVAL.to_errno();
+    }
+    // SAFETY: see the function's safety section: the pointers are non-NULL and aligned (checked
+    // above), `pol` points to `size_of::<Policy>()` readable bytes, `Policy` is `#[repr(C)]`
+    // and valid for any bit pattern; `req`/`res` are valid for their sizes.
+    let (policy, req, res) = unsafe { (&*pol, &*req, &mut *res) };
     // The slot passed in is already the one selected by the caller's generation; `Snapshot`
     // only uses the generation to pick a slot for table lookups, which `Precomputed` ignores.
     let Some(snap) = Snapshot::new(policy, 0) else {
@@ -126,6 +137,12 @@ pub unsafe extern "C" fn kavach_rs_evaluate(
     // `Verdict` is `#[repr(u8)]` with the wire values.
     res.verdict = d.verdict as u8;
     res.punted = u8::from(d.punted);
+    // The gateway index is not part of `Decision`; take it from the deciding rule, as the C
+    // mirror does (`kv_rule.gateway`), so a punt keeps its redirect target.
+    res.gateway = match d.rule_index {
+        Some(i) if d.punted => policy.rules.get(i).map_or(0, |r| r.gateway),
+        _ => 0,
+    };
     0
 }
 
