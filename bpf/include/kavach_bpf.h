@@ -129,6 +129,16 @@ struct {
 	__type(value, struct kv_class_val);
 } cgroup_class SEC(".maps");
 
+/* k8s / SPIFFE workload class per cgroup (kavachd's node agent). The nearest classified cgroup on
+ * a task's path wins; an entry for the kubepods root marks unresolved pods as identity-unknown. */
+struct {
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, KV_WL_MAX);
+	__type(key, __u64);
+	__type(value, struct kv_class_val);
+} wl_class SEC(".maps");
+
 /* Two whole policies (A/B). One lookup per evaluation, then direct indexing. */
 struct {
 	__uint(pinning, LIBBPF_PIN_BY_NAME);

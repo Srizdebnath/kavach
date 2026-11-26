@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::schema::*;
+use crate::workload::{LabelSelector, SpiffePattern, WorkloadKind, WorkloadSel};
 
 pub const MAX_SET_ENTRIES: usize = 4096;
 /// `[gateway.<name>]` policies per kavach.toml.
@@ -235,6 +236,8 @@ pub struct CompiledPolicy {
     pub agents: Vec<AgentSpec>,
     /// Named L7 gateway policies, sorted by name (bundle format 3+).
     pub gateways: Vec<CompiledGateway>,
+    /// k8s / SPIFFE parts of selectors (bundle format 3+); see [`crate::workload`].
+    pub workloads: Vec<WorkloadSel>,
 }
 
 impl CompiledPolicy {
@@ -258,14 +261,25 @@ impl CompiledPolicy {
             .and_then(|r| self.rule_gateway(r))
     }
 
-    /// True when the policy needs bundle format 3 (it carries gateway policies).
+    /// True when the policy carries gateway policies (a format-3 section).
     pub fn uses_gateways(&self) -> bool {
         !self.gateways.is_empty() || self.rules.iter().any(|r| r.gateway != 0)
     }
 
-    /// The format-2 payload for this policy, or `None` when it uses gateways (format 3 only).
+    /// True when the policy carries k8s / SPIFFE workload selectors (a format-3 section).
+    pub fn uses_workloads(&self) -> bool {
+        !self.workloads.is_empty()
+    }
+
+    /// True when the policy needs bundle format 3: it carries gateway policies, workload
+    /// selectors, or both.
+    pub fn needs_format_3(&self) -> bool {
+        self.uses_gateways() || self.uses_workloads()
+    }
+
+    /// The format-2 payload for this policy, or `None` when it needs format 3.
     pub fn to_v2(&self) -> Option<CompiledPolicyV2> {
-        (!self.uses_gateways()).then(|| CompiledPolicyV2 {
+        (!self.needs_format_3()).then(|| CompiledPolicyV2 {
             version: self.version,
             created_unix: self.created_unix,
             source_sha256: self.source_sha256,
@@ -307,7 +321,8 @@ impl CompiledPolicy {
     }
 }
 
-/// Bundle format 2 payload (before gateway policies); decoded and upgraded on verify.
+/// Bundle format 2 payload (before gateway policies and workload selectors); decoded and upgraded
+/// on verify.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompiledPolicyV2 {
     pub version: u32,
@@ -332,6 +347,7 @@ impl From<CompiledPolicyV2> for CompiledPolicy {
             rules: p.rules.into_iter().map(CompiledRule::from).collect(),
             agents: p.agents,
             gateways: Vec::new(),
+            workloads: Vec::new(),
         }
     }
 }
@@ -568,7 +584,8 @@ pub fn compile_file(
         );
     }
 
-    let mut selectors: BTreeMap<Selector, usize> = BTreeMap::new();
+    let mut selectors: BTreeMap<(Selector, Option<WorkloadKind>), usize> = BTreeMap::new();
+    let mut workloads: Vec<WorkloadSel> = Vec::new();
     let mut sel_list: Vec<Selector> = Vec::new();
     let mut sets: BTreeMap<(Vec<IpNet>, Vec<String>), usize> = BTreeMap::new();
     let mut set_list: Vec<AddrSet> = Vec::new();
@@ -651,9 +668,22 @@ pub fn compile_file(
 
         // Who
         let mut sel = Selector::default();
+        let mut workload: Option<WorkloadKind> = None;
         if let Some(w) = &r.who {
             if w.k8s.is_some() || w.spiffe.is_some() {
-                d.err(rid, "k8s / spiffe selectors require the v0.4 node agent");
+                let k8s = w.k8s.as_deref().map(LabelSelector::parse).transpose();
+                let spiffe = w.spiffe.as_deref().map(SpiffePattern::parse).transpose();
+                match (k8s, spiffe) {
+                    (Ok(k8s), Ok(spiffe)) => workload = Some(WorkloadKind::Match { k8s, spiffe }),
+                    (Err(e), _) | (_, Err(e)) => d.err(rid, e),
+                }
+                if w.cgroup.is_some() {
+                    d.err(
+                        rid,
+                        "k8s / spiffe selectors already identify the pod's cgroup; they cannot \
+                         be combined with `cgroup` in one `who`",
+                    );
+                }
             }
             for b in w.binary.as_ref().map(OneOrMany::to_vec).unwrap_or_default() {
                 match parse_sha256(&b) {
@@ -700,29 +730,57 @@ pub fn compile_file(
             sel.cgroups.sort();
             sel.cgroups.dedup();
         }
-        if dir == Direction::Ingress && !sel.is_any() {
+        let any = sel.is_any() && workload.is_none();
+        if dir == Direction::Ingress && !any {
             d.err(
                 rid,
                 "ingress rules cannot use `who` yet (local service identity lands in v0.4)",
             );
         }
-        let sel_mask = if sel.is_any() {
-            0
-        } else {
+        let mut intern = |sel: &Selector, wl: Option<WorkloadKind>, d: &mut Diags| -> u64 {
             let n = sel_list.len();
-            let bit = *selectors.entry(sel.clone()).or_insert_with(|| {
-                sel_list.push(sel);
-                n
-            });
+            let bit = *selectors
+                .entry((sel.clone(), wl.clone()))
+                .or_insert_with(|| {
+                    sel_list.push(sel.clone());
+                    if let Some(kind) = wl {
+                        workloads.push(WorkloadSel {
+                            sel: n as u32,
+                            kind,
+                        });
+                    }
+                    n
+                });
             if bit >= KV_MAX_SELECTORS as usize {
                 d.err(
                     rid,
-                    format!("more than {KV_MAX_SELECTORS} distinct selectors"),
+                    format!(
+                        "more than {KV_MAX_SELECTORS} distinct selectors (each fail-closed k8s / \
+                         spiffe selector uses a second one for its unknown-identity twin)"
+                    ),
                 );
                 0
             } else {
                 1u64 << bit
             }
+        };
+        let sel_mask = if any {
+            0
+        } else {
+            intern(&sel, workload.clone(), &mut d)
+        };
+        // Fail-closed workload rules: a `drop` twin that matches pods whose identity kavachd has
+        // not resolved yet (see `crate::workload`). Log rules only observe, so they just skip.
+        let fail_mode = r.fail.unwrap_or(file.defaults.fail);
+        let unknown_mask = if workload.is_some()
+            && sel_mask != 0
+            && fail_mode == FailMode::Closed
+            && action != Action::Log
+        {
+            let of = sel_mask.trailing_zeros();
+            intern(&sel, Some(WorkloadKind::Unknown { of }), &mut d)
+        } else {
+            0
         };
 
         // Remote
@@ -799,29 +857,36 @@ pub fn compile_file(
             d.warn(rid, "port given without proto: matches both tcp and udp");
         }
 
-        let fail = match r.fail.unwrap_or(file.defaults.fail) {
+        let fail = match fail_mode {
             FailMode::Open => KV_FAIL_OPEN,
             FailMode::Closed => KV_FAIL_CLOSED,
         };
-        for (lo, hi) in ports {
-            rules.push(CompiledRule {
-                name: r.id.clone(),
-                id: idx as u32 + 1,
-                sel: sel_mask,
-                dir: match dir {
-                    Direction::Egress => KV_DIR_EGRESS,
-                    Direction::Ingress => KV_DIR_INGRESS,
-                },
-                proto,
-                port_lo: lo,
-                port_hi: hi,
-                remote_set,
-                verdict: action_verdict(action),
-                fail,
-                not_after_unix,
-                gateway,
-            });
+        let mut push = |sel: u64, verdict: u8, gateway: u32| {
+            for &(lo, hi) in &ports {
+                rules.push(CompiledRule {
+                    name: r.id.clone(),
+                    id: idx as u32 + 1,
+                    sel,
+                    dir: match dir {
+                        Direction::Egress => KV_DIR_EGRESS,
+                        Direction::Ingress => KV_DIR_INGRESS,
+                    },
+                    proto,
+                    port_lo: lo,
+                    port_hi: hi,
+                    remote_set,
+                    verdict,
+                    fail,
+                    not_after_unix,
+                    gateway,
+                });
+            }
+        };
+        if unknown_mask != 0 {
+            // The unknown-identity twin drops; it never reaches a gateway.
+            push(unknown_mask, Verdict::Drop as u8, 0);
         }
+        push(sel_mask, action_verdict(action), gateway);
     }
     for (g, used) in gateways.iter().zip(&gateways_used) {
         if !used {
@@ -879,6 +944,7 @@ pub fn compile_file(
         rules,
         agents: file.agents.clone(),
         gateways,
+        workloads,
     };
     Ok(CompileOutput {
         policy,

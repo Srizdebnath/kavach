@@ -70,6 +70,14 @@ static __always_inline __u64 kv_cgroup_mask(__u64 cgid, __u32 slot)
 	return c ? c->mask[slot & 1] : 0;
 }
 
+/* Workload lookup; *hit tells an entry with mask 0 (resolved, no match) from no entry. */
+static __always_inline __u64 kv_wl_mask(__u64 cgid, __u32 slot, bool *hit)
+{
+	struct kv_class_val *c = bpf_map_lookup_elem(&wl_class, &cgid);
+	*hit = c != NULL;
+	return c ? c->mask[slot & 1] : 0;
+}
+
 /*
  * m = (exe | wild_exe) & (uid | wild_uid) & (cgroup | wild_cgroup)
  * cg_mask is the OR over the cgroup and its ancestors (subtree semantics), computed by caller.

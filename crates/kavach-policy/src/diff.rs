@@ -50,8 +50,11 @@ fn by_name(p: &CompiledPolicy) -> BTreeMap<String, (usize, Vec<String>)> {
 fn describe(p: &CompiledPolicy, r: &CompiledRule) -> String {
     let sel = (0..64)
         .filter(|b| r.sel & (1 << b) != 0)
-        .filter_map(|b| p.selectors.get(b))
-        .map(|s| format!("{s:?}"))
+        .filter_map(|b| p.selectors.get(b).map(|s| (b, s)))
+        .map(|(b, s)| match p.workload_of(b) {
+            Some(w) => format!("{s:?}+{w}"),
+            None => format!("{s:?}"),
+        })
         .collect::<Vec<_>>()
         .join("|");
     let set = match r.remote_set {

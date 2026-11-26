@@ -9,6 +9,7 @@ pub mod compile;
 pub mod diff;
 pub mod kernel;
 pub mod schema;
+pub mod workload;
 
 pub use compile::{CompileOutput, CompiledPolicy, Diagnostic, Severity, compile};
 pub use ed25519_dalek::{SigningKey, VerifyingKey};

@@ -238,6 +238,7 @@ fn handle_inner(st: &mut Daemon, req: Request) -> Result<Response> {
                 "# TYPE kavach_policy_generation gauge\nkavach_policy_generation {}\n# TYPE kavach_policy_serial gauge\nkavach_policy_serial {}\n# TYPE kavach_policy_expired gauge\nkavach_policy_expired {}\n",
                 st.generation, st.serial, u8::from(st.expired)
             ));
+            text.push_str(&st.workload_metrics());
             Response::Metrics { text }
         }
         Request::BlockAdd {

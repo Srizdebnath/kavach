@@ -69,3 +69,23 @@ listen  = "127.0.0.1:15001"   # loopback only
 # queues      = [0]           # RX queue ids, opted in one by one
 # ports       = [8443]        # 8443 = 8443/tcp; also "443/udp"
 # watchdog_ms = 250           # detach a queue whose fill ring stalls this long with frames waiting
+
+# k8s-label / SPIFFE identity node agent (v0.4). OFF unless enabled; hosts without Kubernetes
+# need nothing here. Maps each pod's cgroup (cgroup v2 only) to its labels, namespace and service
+# account, so `who = { k8s = "app=db" }` / `who = { spiffe = "spiffe://..." }` rules match it.
+# Pods whose metadata is not known yet are "identity unknown": fail-closed workload rules refuse
+# them, fail-open ones skip them. kavachd must see the host's cgroup tree (host cgroup namespace).
+# [k8s]
+# enabled         = false
+# source          = "apiserver"   # apiserver (RBAC: pods list) | kubelet (nodes/proxy get) | file
+# node_name       = ""            # default: $NODE_NAME, else the hostname
+# trust_domain    = "cluster.local"
+# spiffe_template = "spiffe://{trust_domain}/ns/{namespace}/sa/{service_account}"
+# api_server      = ""            # default (in a pod): https://$KUBERNETES_SERVICE_HOST:$..._PORT
+# kubelet_url     = ""            # default: https://<node_name>:10250
+# token_file      = "/var/run/secrets/kubernetes.io/serviceaccount/token"   # re-read per request
+# ca_file         = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+# pods_file       = ""            # source = "file": a PodList JSON (kubectl get pods -o json)
+# cgroup_root     = "/sys/fs/cgroup"
+# resync_secs     = 30            # full re-list (label changes); new pods are listed at once
+# scan_ms         = 500           # cgroupfs scan interval

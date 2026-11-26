@@ -14,6 +14,7 @@ struct Mem {
     exe: HashMap<ExeKey, ExeClass>,
     uid: HashMap<u32, ClassVal>,
     cg: HashMap<u64, ClassVal>,
+    wl: HashMap<u64, ClassVal>,
     /// (slot, prefix bits in 128-space, masked addr, bitmap)
     sets: Vec<(u32, u32, [u8; 16], u64)>,
 }
@@ -27,6 +28,9 @@ impl Tables for Mem {
     }
     fn cgroup_class(&self, id: u64) -> Option<ClassVal> {
         self.cg.get(&id).copied()
+    }
+    fn workload_class(&self, id: u64) -> Option<ClassVal> {
+        self.wl.get(&id).copied()
     }
     fn remote_sets(&self, slot: u32, addr: &[u8; 16]) -> u64 {
         self.sets
@@ -365,4 +369,49 @@ mod prop {
             prop_assert!(d.verdict != Verdict::Punt);
         }
     }
+}
+
+#[test]
+fn workload_class_nearest_cgroup_wins_and_ors_into_cgroup_dimension() {
+    // selector 0: workload (k8s), selector 1: workload "unknown" twin, selector 2: plain cgroup
+    let mut p = policy(&[], Verdict::Allow);
+    p.hdr.wild_cgroup = !0b111;
+    p.hdr.sel_used = 0b111;
+    let mut t = Mem::default();
+    // kubepods root (id 10) = unknown; pod 20 resolved and matching; container 30 below it.
+    t.wl.insert(
+        10,
+        ClassVal {
+            mask: [0b010, 0b010],
+        },
+    );
+    t.wl.insert(
+        20,
+        ClassVal {
+            mask: [0b001, 0b001],
+        },
+    );
+    t.cg.insert(
+        10,
+        ClassVal {
+            mask: [0b100, 0b100],
+        },
+    );
+    let snap = Snapshot::new(&p, 0).unwrap();
+    let who = |c: &'static [u64]| Who {
+        cgroups: c,
+        ..Default::default()
+    };
+    // without the flag the workload map is ignored
+    assert_eq!(identity_mask(&t, &snap, &who(&[30, 20, 10, 1])), 0b100);
+    p.hdr.flags |= KV_POL_F_WORKLOAD;
+    let snap = Snapshot::new(&p, 0).unwrap();
+    assert_eq!(identity_mask(&t, &snap, &who(&[30, 20, 10, 1])), 0b101);
+    // an unresolved pod (no entry of its own) inherits the root's unknown bits
+    assert_eq!(identity_mask(&t, &snap, &who(&[31, 21, 10, 1])), 0b110);
+    // a resolved pod with no matching selector still overrides the root (mask 0 entry)
+    t.wl.insert(22, ClassVal { mask: [0, 0] });
+    assert_eq!(identity_mask(&t, &snap, &who(&[32, 22, 10, 1])), 0b100);
+    // outside kubepods: nothing
+    assert_eq!(identity_mask(&t, &snap, &who(&[5, 1])), 0);
 }

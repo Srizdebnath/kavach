@@ -1758,3 +1758,205 @@ fail = "closed"
     assert_eq!(f.k().detach_gateway(), kernel::GATEWAY_PROGS.len());
     assert!(!f.k().gateway_attached());
 }
+
+/// A fake kubepods tree under the real cgroup v2 root. Moves this process back to its original
+/// cgroup and removes the tree on drop.
+struct CgroupTree {
+    base: std::path::PathBuf,
+    home: std::path::PathBuf,
+    dirs: Vec<std::path::PathBuf>,
+}
+
+impl CgroupTree {
+    fn new(leaves: &[&str]) -> Self {
+        let own = std::fs::read_to_string("/proc/self/cgroup").unwrap();
+        let rel = own
+            .lines()
+            .find_map(|l| l.strip_prefix("0::"))
+            .expect("cgroup v2")
+            .trim_start_matches('/')
+            .to_owned();
+        let root = std::path::Path::new("/sys/fs/cgroup");
+        let base = root.join(format!("kavach-test-{}", std::process::id()));
+        let mut dirs = Vec::new();
+        for l in leaves {
+            let mut p = base.clone();
+            for part in l.split('/') {
+                p = p.join(part);
+                if !dirs.contains(&p) {
+                    std::fs::create_dir_all(&p).unwrap();
+                    dirs.push(p.clone());
+                }
+            }
+        }
+        Self {
+            base,
+            home: root.join(rel),
+            dirs,
+        }
+    }
+    fn enter(&self, leaf: &str) {
+        std::fs::write(
+            self.base.join(leaf).join("cgroup.procs"),
+            std::process::id().to_string(),
+        )
+        .unwrap();
+    }
+    fn leave(&self) {
+        std::fs::write(
+            self.home.join("cgroup.procs"),
+            std::process::id().to_string(),
+        )
+        .unwrap();
+    }
+}
+
+impl Drop for CgroupTree {
+    fn drop(&mut self) {
+        self.leave();
+        for d in self.dirs.iter().rev() {
+            let _ = std::fs::remove_dir(d);
+        }
+        let _ = std::fs::remove_dir(&self.base);
+    }
+}
+
+#[test]
+#[ignore = "needs root + BPF LSM + cgroup v2: scripts/priv-test.sh"]
+fn lsm_k8s_and_spiffe_identity_by_cgroup() {
+    use kavachd::workload::{K8sConfig, SourceKind, cgroup, source};
+    let lsms = std::fs::read_to_string("/sys/kernel/security/lsm").unwrap_or_default();
+    if !lsms.contains("bpf") {
+        eprintln!("skipping: BPF LSM not active");
+        return;
+    }
+    cgroup::ensure_cgroup2(std::path::Path::new("/sys/fs/cgroup")).expect("cgroup v2 host");
+    let mut f = Fixture::new();
+    f.k().attach_lsm().expect("attach LSM");
+
+    const DB: &str = "1b3c5e7a-2d4f-4a6b-8c9d-0e1f2a3b4c5d";
+    const NEW: &str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+    const CID: &str = "4f1d0c6a2b3e5f7081928a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f";
+    let db_leaf = format!("kubepods/burstable/pod{DB}/{CID}");
+    let new_leaf = format!("kubepods/besteffort/pod{NEW}/{CID}");
+    let tree = CgroupTree::new(&[&db_leaf, &new_leaf, "plain"]);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let pods_file = tmp.path().join("pods.json");
+    let write_pods = |app: &str| {
+        std::fs::write(
+            &pods_file,
+            format!(
+                r#"{{"items":[{{"metadata":{{"uid":"{DB}","namespace":"prod","name":"db-0","labels":{{"app":"{app}"}}}},"spec":{{"nodeName":"node-1","serviceAccountName":"db"}}}}]}}"#
+            ),
+        )
+        .unwrap()
+    };
+    let cfg = K8sConfig {
+        enabled: true,
+        source: SourceKind::File,
+        pods_file: pods_file.clone(),
+        node_name: "node-1".into(),
+        cgroup_root: tree.base.clone(), // a subtree of the real cgroup2 mount
+        ..Default::default()
+    };
+    let mut src = source::build(&cfg).unwrap();
+    let refresh = |f: &mut Fixture, src: &mut Box<dyn source::Source>| {
+        let pods = src.fetch().unwrap();
+        let d = f.d();
+        d.workloads.enabled = true;
+        d.workloads.view = cgroup::scan(&tree.base);
+        d.workloads.pods = pods;
+        d.sync_workloads(None).unwrap();
+    };
+    write_pods("db");
+    // Startup order: prime (scan + fetch, no map writes), then the policy restore stages it.
+    let _agent = kavachd::workload::prime(cfg.clone(), f.d()).expect("prime");
+    assert_eq!(
+        f.d().workloads.stats.entries,
+        0,
+        "prime does not write wl_class"
+    );
+    assert_eq!(f.d().workloads.view.roots.len(), 1);
+    assert_eq!(f.d().workloads.view.pods.len(), 2);
+
+    f.apply_toml(
+        r#"
+version = 1
+[defaults]
+egress = "allow"
+ingress = "allow"
+[[rule]]
+id = "db-no-testnet-1"
+who = { k8s = "app=db,ns=prod" }
+fail = "open"
+deny = { to = "192.0.2.1", port = 9, proto = "tcp" }
+[[rule]]
+id = "prod-sa-to-testnet-2"
+who = { spiffe = "spiffe://cluster.local/ns/prod/*" }
+fail = "closed"
+allow = { to = "192.0.2.2", port = 9, proto = "tcp" }
+[[rule]]
+id = "nobody-else-to-testnet-2"
+deny = { to = "192.0.2.2", port = 9, proto = "tcp" }
+"#,
+    );
+    let st = f.d().workloads.stats.clone();
+    assert_eq!((st.resolved, st.unknown, st.overflow), (1, 1, 0), "{st:?}");
+    assert_eq!(st.entries, 3, "root + two pods");
+
+    let connect = |last: u8| {
+        let a: SocketAddr = format!("192.0.2.{last}:9").parse().unwrap();
+        match TcpStream::connect_timeout(&a, std::time::Duration::from_millis(150)) {
+            Ok(_) => false,
+            Err(e) => e.raw_os_error() == Some(nix::libc::EPERM),
+        }
+    };
+
+    // Resolved pod with app=db in prod: label rule denies .1, its SPIFFE ID is allowed to .2.
+    tree.enter(&db_leaf);
+    assert!(connect(1), "k8s label selector denies");
+    assert!(!connect(2), "spiffe prefix allows");
+
+    // Pod whose metadata is not known: the fail-open label rule is skipped, the fail-closed
+    // spiffe rule refuses (unknown-identity twin).
+    tree.enter(&new_leaf);
+    assert!(!connect(1), "fail-open rule skipped for an unknown pod");
+    assert!(connect(2), "fail-closed rule refuses an unknown pod");
+
+    // Not a pod at all: neither workload rule applies; the catch-all deny on .2 does.
+    tree.enter("plain");
+    assert!(!connect(1));
+    assert!(connect(2));
+
+    // Relabel the db pod: the resolver updates wl_class in place (no policy apply).
+    write_pods("cache");
+    refresh(&mut f, &mut src);
+    tree.enter(&db_leaf);
+    assert!(!connect(1), "label no longer matches");
+    assert!(!connect(2), "still in prod: spiffe allow");
+
+    // A new policy generation recomputes the staged slot's workload masks before the flip.
+    f.apply_toml(
+        r#"
+version = 1
+[defaults]
+egress = "allow"
+[[rule]]
+id = "cache-no-testnet-3"
+who = { k8s = "app=cache" }
+deny = { to = "192.0.2.3", port = 9, proto = "tcp" }
+"#,
+    );
+    assert!(connect(3), "new slot's masks were staged");
+    assert!(!connect(1));
+    tree.leave();
+    assert!(!connect(3), "outside the pod");
+
+    // The pods' cgroups go away: their entries are deleted.
+    drop(tree);
+    let d = f.d();
+    d.workloads.view = Default::default();
+    d.sync_workloads(None).unwrap();
+    assert_eq!(d.workloads.stats.entries, 0);
+}

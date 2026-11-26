@@ -48,6 +48,129 @@ fn default_gateway_listening() -> bool {
         })
 }
 
+/// `[k8s]` of kavachd.toml, as far as doctor needs it.
+#[derive(Debug, Default, PartialEq)]
+struct K8sCfg {
+    enabled: bool,
+    source: String,
+    files: Vec<String>,
+}
+
+fn k8s_cfg(toml_src: &str) -> K8sCfg {
+    let v: toml::Table = toml_src.parse().unwrap_or_default();
+    let Some(k) = v.get("k8s").and_then(|k| k.as_table()) else {
+        return K8sCfg::default();
+    };
+    let s = |key: &str, def: &str| {
+        k.get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or(def)
+            .to_owned()
+    };
+    let source = s("source", "apiserver");
+    const SA: &str = "/var/run/secrets/kubernetes.io/serviceaccount";
+    let files = if source == "file" {
+        vec![s("pods_file", "")]
+    } else {
+        let ca = s("ca_file", &format!("{SA}/ca.crt"));
+        let token = s("token_file", &format!("{SA}/token"));
+        let http_url = s(
+            if source == "kubelet" {
+                "kubelet_url"
+            } else {
+                "api_server"
+            },
+            "",
+        );
+        // A plain-http loopback proxy needs no CA.
+        let mut f = if http_url.starts_with("http://") {
+            vec![]
+        } else {
+            vec![ca]
+        };
+        if !token.is_empty() {
+            f.push(token);
+        }
+        f
+    };
+    K8sCfg {
+        enabled: k.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false),
+        source,
+        files,
+    }
+}
+
+/// Kubepods tree roots directly (or 1-3 levels) under the cgroup root.
+fn kubepods_roots(root: &Path, depth: usize) -> usize {
+    let Ok(rd) = std::fs::read_dir(root) else {
+        return 0;
+    };
+    rd.flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .map(|e| {
+            let n = e.file_name().to_string_lossy().into_owned();
+            let base = n.strip_suffix(".slice").unwrap_or(&n).to_owned();
+            if base == "kubepods" || base.ends_with("-kubepods") {
+                1
+            } else if depth < 3 {
+                kubepods_roots(&e.path(), depth + 1)
+            } else {
+                0
+            }
+        })
+        .sum()
+}
+
+/// The k8s / SPIFFE identity check (not required: only identity rules depend on it).
+fn k8s_check(cfg: &K8sCfg, cg2: bool, roots: usize, readable: &dyn Fn(&str) -> bool) -> Check {
+    let name = "k8s / SPIFFE identity";
+    let mk = |ok: bool, detail: String, fix: &'static str| Check {
+        name,
+        ok,
+        required: false,
+        detail,
+        fix,
+    };
+    if !cfg.enabled {
+        return if roots == 0 {
+            mk(true, "off (not a Kubernetes node)".into(), "")
+        } else {
+            mk(
+                false,
+                format!("off, but {roots} kubepods cgroup tree(s) found"),
+                "k8s / spiffe selectors match nothing until [k8s] enabled = true in kavachd.toml",
+            )
+        };
+    }
+    if !cg2 {
+        return mk(
+            false,
+            "cgroup v1 / hybrid hierarchy".into(),
+            "pod identity needs cgroup v2 (systemd.unified_cgroup_hierarchy=1)",
+        );
+    }
+    let missing: Vec<&str> = cfg
+        .files
+        .iter()
+        .filter(|f| f.is_empty() || !readable(f))
+        .map(String::as_str)
+        .collect();
+    if !missing.is_empty() {
+        return mk(
+            false,
+            format!("source {}: cannot read {missing:?}", cfg.source),
+            "set ca_file / token_file (or pods_file) in [k8s]; in a pod, mount the service \
+             account token (RBAC: pods list for apiserver, nodes/proxy get for kubelet)",
+        );
+    }
+    mk(
+        roots > 0,
+        format!("source {}, {roots} kubepods tree(s)", cfg.source),
+        "no kubepods cgroup tree under /sys/fs/cgroup: is the kubelet running, and is kavachd \
+         in the host cgroup namespace?",
+    )
+}
+
 pub fn checks() -> Vec<Check> {
     // PROC_PID_INIT_INO: the initial PID namespace's fixed inode.
     let host_pidns = std::fs::read_link("/proc/self/ns/pid")
@@ -68,6 +191,12 @@ pub fn checks() -> Vec<Check> {
         .map(|l| l.split_whitespace().nth(3).unwrap_or("?").to_owned())
         .unwrap_or_else(|| "?".into());
     let systemd = Path::new("/run/systemd/system").exists();
+    let k8s = k8s_check(
+        &k8s_cfg(&std::fs::read_to_string("/etc/kavach/kavachd.toml").unwrap_or_default()),
+        cg2,
+        kubepods_roots(Path::new("/sys/fs/cgroup"), 0),
+        &|f| std::fs::File::open(f).is_ok(),
+    );
     vec![
         Check {
             name: "kernel >= 6.1",
@@ -160,6 +289,7 @@ pub fn checks() -> Vec<Check> {
             detail: "/run/systemd/system".into(),
             fix: "without systemd, run kavachd under your init's supervisor (see docs/INSTALL.md)",
         },
+        k8s,
     ]
 }
 
@@ -188,6 +318,36 @@ mod tests {
         assert_eq!(super::version("7.1.9-arch1-2"), (7, 1));
         assert_eq!(super::version("6.1.0-27-amd64"), (6, 1));
         assert_eq!(super::version("5.15.0"), (5, 15));
+    }
+
+    #[test]
+    fn k8s_identity_check() {
+        use super::*;
+        let yes = |_: &str| true;
+        let no = |_: &str| false;
+        let off = k8s_cfg("");
+        assert!(!off.enabled);
+        assert!(k8s_check(&off, true, 0, &yes).ok, "non-k8s host: fine");
+        assert!(!k8s_check(&off, true, 2, &yes).ok, "kubepods but agent off");
+
+        let api = k8s_cfg("[k8s]\nenabled = true\n");
+        assert_eq!(api.source, "apiserver");
+        assert_eq!(api.files.len(), 2, "CA + token");
+        assert!(k8s_check(&api, true, 1, &yes).ok);
+        assert!(!k8s_check(&api, false, 1, &yes).ok, "cgroup v1 refused");
+        let c = k8s_check(&api, true, 1, &no);
+        assert!(!c.ok && c.detail.contains("ca.crt"), "{}", c.detail);
+        assert!(!k8s_check(&api, true, 0, &yes).ok, "no kubepods tree");
+
+        let proxy = k8s_cfg(
+            "[k8s]\nenabled = true\nsource = \"kubelet\"\nkubelet_url = \"http://127.0.0.1:10255\"\ntoken_file = \"\"\n",
+        );
+        assert!(proxy.files.is_empty());
+        let file = k8s_cfg("[k8s]\nenabled = true\nsource = \"file\"\n");
+        assert!(
+            !k8s_check(&file, true, 1, &yes).ok,
+            "file source needs pods_file"
+        );
     }
 
     #[test]

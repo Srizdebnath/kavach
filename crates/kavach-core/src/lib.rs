@@ -19,6 +19,10 @@ pub trait Tables {
     fn exe_class(&self, key: &ExeKey) -> Option<ExeClass>;
     fn uid_class(&self, uid: u32) -> Option<ClassVal>;
     fn cgroup_class(&self, cgroup_id: u64) -> Option<ClassVal>;
+    /// k8s / SPIFFE workload class of a cgroup (`wl_class`). Default: none.
+    fn workload_class(&self, _cgroup_id: u64) -> Option<ClassVal> {
+        None
+    }
     /// Longest-prefix match in `addr_sets` for `slot`; 0 when nothing matches.
     fn remote_sets(&self, slot: u32, addr: &[u8; 16]) -> u64;
 }
@@ -84,11 +88,19 @@ pub fn identity_mask<T: Tables + ?Sized>(t: &T, snap: &Snapshot<'_>, who: &Who<'
     let cg_m = if h.wild_cgroup == u64::MAX {
         0
     } else {
-        who.cgroups
-            .iter()
-            .take(KV_CGROUP_LEVELS as usize + 1)
+        let path = || who.cgroups.iter().take(KV_CGROUP_LEVELS as usize + 1);
+        let subtree = path()
             .filter_map(|id| t.cgroup_class(*id))
-            .fold(0, |acc, c| acc | c.mask[(slot & 1) as usize])
+            .fold(0, |acc, c| acc | c.mask[(slot & 1) as usize]);
+        // Workload class: the nearest classified cgroup wins (leaf first).
+        let wl = if h.flags & KV_POL_F_WORKLOAD != 0 {
+            path()
+                .find_map(|id| t.workload_class(*id))
+                .map_or(0, |c| c.mask[(slot & 1) as usize])
+        } else {
+            0
+        };
+        subtree | wl
     };
     combine_mask(&h.wild_exe, &h.wild_uid, &h.wild_cgroup, exe_m, uid_m, cg_m) & h.sel_used
 }

@@ -5,9 +5,12 @@
 //! | [u8; 8] key_id | [u8; 32] fleet | u32 payload_len | payload (postcard CompiledPolicy)
 //! | [u8; 64] signature
 //!
-//! format 1: payload without `unclassified_deny`        (CompiledPolicyV1)
-//! format 2: payload without gateway policies           (CompiledPolicyV2)
-//! format 3: `[gateway.*]` policies + per-rule gateway  (CompiledPolicy)
+//! format 1: payload without `unclassified_deny`             (CompiledPolicyV1)
+//! format 2: payload without the format-3 sections           (CompiledPolicyV2)
+//! format 3: format 2 + per-rule gateway index + two optional sections (CompiledPolicy):
+//!           `gateways`  — `[gateway.*]` L7 policies referenced by punt rules
+//!           `workloads` — k8s label / SPIFFE parts of selectors
+//!           A section the policy does not use is an empty list (one zero byte).
 //!
 //! signature = Ed25519(sk, "kavach-bundle-v1\0" || header || payload)   (pure Ed25519)
 //! key_id    = SHA-256(public key)[..8]
@@ -17,8 +20,10 @@
 //! anti-rollback serial → expiry → decode. Nothing attacker-controlled is decoded before the
 //! signature is checked.
 //!
-//! [`sign`] writes the oldest format that can carry the policy: a policy without gateway
-//! policies is still a format-2 bundle, so hosts that predate format 3 keep loading it.
+//! [`sign`] writes the oldest format that can carry the policy: a policy with neither gateway
+//! policies nor workload selectors is still a format-2 bundle, so hosts that predate format 3
+//! (v0.3.x) keep loading it. Those hosts reject a format-3 bundle at the header with
+//! [`BundleError::Format`] before decoding anything.
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use sha2::{Digest, Sha256};
@@ -27,9 +32,11 @@ use thiserror::Error;
 use crate::compile::CompiledPolicy;
 
 pub const MAGIC: &[u8; 4] = b"KVB1";
-/// Newest bundle format (gateway policies).
+/// Newest bundle format: format 2 plus the optional gateway-policy and workload-selector
+/// sections (either may be empty).
 pub const FORMAT: u16 = 3;
-/// Bundles without gateway policies; still written for gateway-free policies, still accepted.
+/// Bundles without gateway policies or workload selectors; still written for policies that use
+/// neither, still accepted.
 pub const FORMAT_V2: u16 = 2;
 /// Bundles signed before `CompiledDefaults::unclassified_deny` existed; still accepted.
 pub const FORMAT_V1: u16 = 1;
@@ -326,6 +333,18 @@ pub fn verify(
             r.name,
             r.gateway,
             policy.gateways.len()
+        )));
+    }
+    if let Some(w) = policy
+        .workloads
+        .iter()
+        .find(|w| w.sel as usize >= policy.selectors.len())
+    {
+        return Err(BundleError::Decode(format!(
+            "workload selector {} references selector #{} of {}",
+            w.kind,
+            w.sel,
+            policy.selectors.len()
         )));
     }
     Ok(VerifiedBundle {
