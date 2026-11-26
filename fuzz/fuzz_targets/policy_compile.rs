@@ -17,7 +17,7 @@ fuzz_target!(|data: &[u8]| {
         }
         let sk = kavach_policy::SigningKey::from_bytes(&[7u8; 32]);
         let Ok(b) = bundle::sign(&p, &sk, 2, 0, "default") else { return }; // oversized
-        let want = if p.uses_gateways() { bundle::FORMAT } else { bundle::FORMAT_V2 };
+        let want = if p.needs_format_3() { bundle::FORMAT } else { bundle::FORMAT_V2 };
         assert_eq!(bundle::peek_format(&b), Ok(want));
         let trust = bundle::TrustPolicy { trusted: vec![sk.verifying_key()], revoked: vec![], fleet: "default".into(), active_serial: 0, now_unix: 0 };
         assert_eq!(bundle::verify(&b, &trust, true).expect("own bundle verifies").policy, p);

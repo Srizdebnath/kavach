@@ -137,6 +137,8 @@ pub struct Daemon {
     pub scan_kick: Arc<tokio::sync::Notify>,
     /// L7 gateway policies of the active bundle, for the gateway proxy (clone the handle).
     pub gateways: crate::gateway_policies::GatewayPolicies,
+    /// k8s / SPIFFE node agent state (`crate::workload`).
+    pub workloads: crate::workload::Workloads,
 }
 
 impl Daemon {
@@ -161,6 +163,7 @@ impl Daemon {
             pinned: HashMap::new(),
             scan_kick: Arc::new(tokio::sync::Notify::new()),
             gateways: Default::default(),
+            workloads: Default::default(),
         }
     }
 
@@ -305,6 +308,8 @@ impl Daemon {
         }
         // 2. address sets + rule table into the inactive slot
         k.write_addr_sets(slot, &flat)?;
+        self.sync_workloads(Some((slot, &*p)))?;
+        let k = self.k()?;
         k.write_slot(slot, &table)?;
         // 3. flip with one 32-bit write, then wait out in-flight programs
         let t0 = Instant::now();
@@ -378,6 +383,7 @@ impl Daemon {
         self.gateways.publish(&policy, v.header.serial);
         report.generation = self.generation;
         report.warnings.extend(self.prewarm(&policy));
+        report.warnings.extend(self.workload_warnings(&policy));
         let identity_rules = policy.rules.iter().filter(|r| r.sel != 0).count();
         if identity_rules > 0 && !self.k()?.lsm {
             report.warnings.push(format!(
@@ -678,7 +684,10 @@ impl Daemon {
             xdp,
             tc,
             lsm,
-            features: vec![("kill_switch_engaged".into(), self.kernel.is_none())],
+            features: vec![
+                ("kill_switch_engaged".into(), self.kernel.is_none()),
+                ("k8s_identity".into(), self.workloads.enabled),
+            ],
             uptime_secs: self.started.elapsed().as_secs(),
         }
     }

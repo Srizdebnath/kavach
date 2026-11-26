@@ -10,3 +10,4 @@ pub mod gateway_policies;
 pub mod kernel;
 pub mod scan;
 pub mod supervise;
+pub mod workload;

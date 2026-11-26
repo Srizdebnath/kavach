@@ -163,12 +163,14 @@ allow = { to = "10.0.0.0/8" }
 }
 
 #[test]
-fn ingress_who_and_v04_selectors_rejected() {
+fn ingress_who_rejected() {
     let e = errors(
         "version=1\n[[rule]]\nid='i'\ndirection='ingress'\nwho={user=0}\nallow={from='1.1.1.1'}\n",
     );
     assert!(e[0].contains("v0.4"));
-    let e = errors("version=1\n[[rule]]\nid='k'\nwho={k8s='app=db'}\ndeny={}\n");
+    let e = errors(
+        "version=1\n[[rule]]\nid='i'\ndirection='ingress'\nwho={k8s='app=db'}\nallow={from='1.1.1.1'}\n",
+    );
     assert!(e[0].contains("v0.4"));
 }
 
@@ -648,6 +650,132 @@ fn signed_bundle_with_dangling_gateway_index_is_refused() {
     assert!(matches!(
         bundle::verify(&b, &trust(sk.verifying_key()), true),
         Err(BundleError::Decode(m)) if m.contains("gateway #9")
+    ));
+}
+
+/// Format-3 policy with only the workload-selector section.
+const WORKLOADS_ONLY: &str = r#"
+version = 1
+
+[defaults]
+egress = "drop"
+
+[[rule]]
+id    = "db-egress"
+who   = { k8s = "app=db,ns=prod" }
+allow = { to = "10.0.0.0/8", port = 5432, proto = "tcp" }
+
+[[rule]]
+id    = "mesh"
+who   = { spiffe = "spiffe://cluster.local/ns/prod/*" }
+fail  = "open"
+allow = { to = "10.1.0.0/16", port = 443, proto = "tcp" }
+"#;
+
+/// Format-3 policy with both sections: a fail-closed k8s rule punted to a gateway.
+const GATEWAYS_AND_WORKLOADS: &str = r#"
+version = 1
+
+[defaults]
+egress = "drop"
+
+[gateway.mcp]
+allow_tools = ["search"]
+
+[[rule]]
+id    = "dns"
+allow = { to = "1.1.1.1", port = 53, proto = "udp" }
+
+[[rule]]
+id   = "agent-mcp"
+who  = { k8s = "app=agent" }
+punt = { to = "203.0.113.0/24", port = 443, proto = "tcp", gateway = "mcp" }
+"#;
+
+#[test]
+fn format_3_carries_gateways_workloads_or_both() {
+    let sk = bundle::generate_key();
+    let t = trust(sk.verifying_key());
+    for (name, src, gateways, workloads) in [
+        ("gateways only", GATEWAY, true, false),
+        ("workloads only", WORKLOADS_ONLY, false, true),
+        ("both", GATEWAYS_AND_WORKLOADS, true, true),
+    ] {
+        let p = compile(src, 50).unwrap().policy;
+        assert_eq!(p.uses_gateways(), gateways, "{name}");
+        assert_eq!(p.uses_workloads(), workloads, "{name}");
+        assert!(p.needs_format_3() && p.to_v2().is_none(), "{name}");
+
+        let b = bundle::sign(&p, &sk, 2, 0, "prod").unwrap();
+        assert_eq!(bundle::peek_format(&b), Ok(bundle::FORMAT), "{name}");
+        // one payload layout for every format-3 bundle: the unused section is an empty list
+        assert_eq!(
+            b[bundle::HEADER_LEN..b.len() - bundle::SIG_LEN],
+            postcard::to_allocvec(&p).unwrap()[..],
+            "{name}"
+        );
+        let v = bundle::verify(&b, &t, true).unwrap();
+        assert_eq!(v.policy, p, "{name} round-trips");
+        assert_eq!(!v.policy.gateways.is_empty(), gateways, "{name}");
+        assert_eq!(!v.policy.workloads.is_empty(), workloads, "{name}");
+
+        // any change to the signed bytes is refused
+        let mut bad = b.clone();
+        let last = bad.len() - bundle::SIG_LEN - 1;
+        bad[last] ^= 1;
+        assert!(matches!(
+            bundle::verify(&bad, &t, true),
+            Err(BundleError::Signature)
+        ));
+    }
+
+    // Both sections: the fail-closed workload rule's unknown-identity twin drops and never
+    // names a gateway; the rule itself keeps its gateway.
+    let p = compile(GATEWAYS_AND_WORKLOADS, 50).unwrap().policy;
+    let punt: Vec<_> = p.rules.iter().filter(|r| r.name == "agent-mcp").collect();
+    assert_eq!(punt.len(), 2, "{punt:?}");
+    assert_eq!((punt[0].verdict, punt[0].gateway), (Verdict::Drop as u8, 0));
+    assert_eq!((punt[1].verdict, punt[1].gateway), (Verdict::Punt as u8, 1));
+    assert_eq!(p.rule_gateway(punt[1]).unwrap().name, "mcp");
+    assert_eq!(p.workloads.len(), 2, "selector + unknown-identity twin");
+}
+
+#[test]
+fn readers_reject_newer_formats_at_the_header() {
+    // A v0.3.x host accepts formats 1 and 2 only, so it refuses a format-3 bundle exactly as
+    // this build refuses a format-4 one: at the header, before any key, signature or payload
+    // work (the real v0.3.1 reader was checked the same way).
+    let p = compile(GATEWAYS_AND_WORKLOADS, 50).unwrap().policy;
+    let sk = bundle::generate_key();
+    let t = trust(sk.verifying_key());
+    let mut b = bundle::sign(&p, &sk, 2, 0, "prod").unwrap();
+    b[4..6].copy_from_slice(&(bundle::FORMAT + 1).to_le_bytes());
+    assert!(matches!(
+        bundle::verify(&b, &t, true),
+        Err(BundleError::Format(4))
+    ));
+    assert!(matches!(
+        bundle::peek_header(&b),
+        Err(BundleError::Format(4))
+    ));
+    // and a format-3 bundle cannot be relabelled as format 2 for an older host: the format is
+    // signed, so the relabelled bundle fails verification.
+    b[4..6].copy_from_slice(&bundle::FORMAT_V2.to_le_bytes());
+    assert!(matches!(
+        bundle::verify(&b, &t, true),
+        Err(BundleError::Signature)
+    ));
+}
+
+#[test]
+fn signed_bundle_with_dangling_workload_selector_is_refused() {
+    let mut p = compile(WORKLOADS_ONLY, 50).unwrap().policy;
+    p.workloads[0].sel = 40;
+    let sk = bundle::generate_key();
+    let b = bundle::sign(&p, &sk, 2, 0, "prod").unwrap();
+    assert!(matches!(
+        bundle::verify(&b, &trust(sk.verifying_key()), true),
+        Err(BundleError::Decode(m)) if m.contains("selector #40")
     ));
 }
 

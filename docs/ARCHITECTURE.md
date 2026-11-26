@@ -89,6 +89,7 @@ All maps except `sync_*` are pinned `LIBBPF_PIN_BY_NAME` under `/sys/fs/bpf/kava
 | `sk_ident` | SK_STORAGE Δ | socket → `Identity` | LSM | TC |
 | `exe_class` | HASH | `ExeKey` → `ExeClass` (present = trusted) | kavachd commits; LSM inserts placeholders, deletes on taint | LSM |
 | `uid_class` / `cgroup_class` | HASH | uid / cgroup id → `ClassVal` | kavachd | LSM, TC |
+| `wl_class` | HASH 16k | cgroup id → `ClassVal` (k8s / SPIFFE workload masks, §5a) | kavachd node agent | LSM, TC |
 | `policy_slots` | ARRAY[2] | slot → `Policy` | kavachd | LSM, TC |
 | `addr_sets` | LPM_TRIE | `{prefixlen, slot, addr}` → u64 set bitmap Δ | kavachd | LSM, TC |
 | `policy_gen` | ARRAY[1] | u32 generation | kavachd | LSM, TC |
@@ -188,6 +189,57 @@ A matching copy anywhere else is classified on its first exec. `[defaults] uncla
 classifiable binary without a committed hash is refused (`egress_unclassified`) until kavachd
 has hashed it, typically within milliseconds of exec.
 
+## 5a. Workload identity — k8s labels and SPIFFE IDs (v0.4 node agent)
+
+`who = { k8s = "app=db,ns=prod" }` and `who = { spiffe = "spiffe://td/ns/prod/*" }` are
+**cgroup-dimension** constraints: a selector with one has its bit cleared in `wild_cgroup`, and
+the policy header carries `KV_POL_F_WORKLOAD`. Only then do the LSM and the TC re-evaluation
+look at `wl_class`:
+
+```
+cg_mask = OR(cgroup_class[c] for c on the path)  |  wl_class[nearest classified c].mask[slot]
+          nearest = the task's own cgroup, else its deepest ancestor with an entry
+```
+
+* **Compiler** (`kavach-policy/src/workload.rs`). Label selectors are a subset of the
+  Kubernetes grammar (`k=v`, `k==v`, `k!=v`, `k in (…)`, `k notin (…)`, `k`, `!k`; `ns` = the
+  namespace), validated like the API server does. SPIFFE patterns are an exact ID or a trailing
+  `/*` (strictly below that path, on a segment boundary). Workload selectors are interned with
+  their exe/uid part, so `{user=1,k8s="a=b"}` and `{user=1}` are different bits. They cannot be
+  combined with `cgroup`. Bundle format 3 carries them in `CompiledPolicy::workloads` (next to
+  the gateway section; see the bundle format below); format 1 and 2 bundles still verify.
+* **Unknown identity and fail mode.** For each workload rule with `fail = "closed"` and a verdict
+  other than `log`, the compiler emits a `drop` twin in front of it whose selector is the
+  *unknown-identity* bit of that selector. kavachd sets the unknown bits on every kubepods root
+  cgroup and on pod cgroups whose metadata it does not have. A pod that is not resolved yet (or
+  that did not fit in the map, or whose metadata source is down) therefore hits the twin of a
+  fail-closed rule and skips a fail-open one, and the evaluator itself is unchanged
+  (`kavach-core` and the C mirror stay identical). Cost: one more selector bit per fail-closed
+  workload selector, and one more compiled rule per port range.
+* **Node agent** (`crates/kavachd/src/workload/`, `[k8s]` in kavachd.toml, off by default).
+  * `cgroup.rs` scans cgroupfs (`scan_ms`, default 500 ms) for kubepods roots (`kubepods`,
+    `kubepods.slice`, `kubelet-kubepods.slice`, up to 4 levels down) and pod cgroups
+    (`…-pod<uid_>.slice`, `pod<uid>`). Container scopes (`cri-containerd-`, `crio-`,
+    `crio-conmon-`, `docker-`, bare ids) inherit their pod's entry. cgroup v1 / hybrid hosts are
+    refused (`statfs` magic).
+  * `source.rs` lists pod metadata as a `PodList`: API server
+    (`/api/v1/pods?fieldSelector=spec.nodeName=<node>`, RBAC `pods: list`), kubelet (`/pods`,
+    RBAC `nodes/proxy: get`), or a file. It re-lists every `resync_secs` and at once (at most 1/s)
+    when a pod cgroup with an unknown UID appears. A failed fetch keeps the last metadata.
+  * `http.rs` is a small blocking HTTP/1.1 GET client on rustls (ring provider; the only new
+    dependencies are `rustls`, `rustls-webpki`, `rustls-pki-types`, `ring`, `untrusted`). It trusts only
+    `ca_file`, re-reads `token_file` per request (projected tokens rotate), and never sends the
+    token over plain http except to loopback (e.g. `kubectl proxy`). No kube-rs, hyper or tokio-rustls.
+  * `mod.rs` computes the wanted `wl_class` for both slots, diffs it against the map and
+    writes only the changes. `Daemon::stage` writes the staged slot's masks before the flip, so a
+    new policy never sees masks from the old selector numbering. The map holds 16 384 entries
+    (roots first); pods that do not fit count as unknown and are reported as
+    `kavach_k8s_wl_overflow_total`.
+* **SPIFFE.** IDs are derived from pod metadata with `spiffe_template` (placeholders
+  `{trust_domain}`, `{namespace}`, `{service_account}`, `{pod}`, `{uid}`, `{label:<key>}`). The
+  SPIFFE Workload API is not used: it attests the *calling* process and hands out its SVIDs,
+  so it cannot name other processes, and a SPIRE agent derives k8s IDs from the same metadata.
+
 ## 6. Rule evaluation
 
 `kv_evaluate(snapshot, dir, mask, remote, port, proto)` runs `bpf_loop` over `n_rules`
@@ -269,19 +321,26 @@ signature = Ed25519(sk, "kavach-bundle-v1\0" ‖ header ‖ payload)     key_id 
 | `version` | Payload | Written by |
 |---|---|---|
 | 1 | no `unclassified_deny` (`CompiledPolicyV1`) | releases before `unclassified`; still verified |
-| 2 | no gateway policies (`CompiledPolicyV2`) | today, for any policy without `[gateway.*]` |
-| 3 | `gateways` plus a per-rule gateway index (`CompiledPolicy`) | today, for policies with gateways |
+| 2 | no format-3 sections (`CompiledPolicyV2`) | today, for any policy with neither gateways nor k8s / SPIFFE selectors |
+| 3 | format 2 + a per-rule gateway index + two optional sections, `gateways` and `workloads` (`CompiledPolicy`) | today, for policies with gateways, k8s / SPIFFE selectors, or both |
+
+Format 3 is one payload layout: a section the policy does not use is an empty list. The
+`gateways` section holds the `[gateway.*]` L7 policies that punt rules index; `workloads` holds
+the k8s label / SPIFFE part of each workload selector (and the unknown-identity twins).
 
 `sign()` writes the oldest format that can hold the policy, so a host on an older release keeps
-accepting every gateway-free bundle. `verify()` decodes all three formats into today's
-`CompiledPolicy`. Golden 0.3.1 bundles in `crates/kavach-policy/testdata/` must keep verifying.
+accepting every bundle that uses neither section. Such a host refuses a format-3 bundle at the
+header (`unsupported bundle format 3`), before any decoding. `verify()` decodes all three
+formats into today's `CompiledPolicy`. Golden 0.3.1 bundles in `crates/kavach-policy/testdata/`
+must keep verifying.
 
 kavachd rejects a bundle when any of these hold:
 * The key is untrusted or revoked.
 * The signature fails.
 * The fleet differs.
 * `serial` ≤ the active serial (anti-rollback).
-* The payload fails structural decoding, or a rule references a gateway the payload lacks.
+* The payload fails structural decoding, a rule references a gateway the payload lacks, or a
+  workload selector references a selector the payload lacks.
 
 An **expired** bundle is refused on apply. One that expires while active keeps enforcing and is
 flagged in `status` and metrics, because silently dropping protection would be worse.
