@@ -1,0 +1,16 @@
+# kavachd host configuration for the L7 gateway flow (pairs with kavach.toml next to this file).
+# Everything not set here keeps the defaults documented in examples/kavachd.toml.
+
+interfaces = ["auto"]
+lsm        = true            # required: the BPF LSM makes the punt decision
+
+[gateway]
+enabled = true               # redirect punted TCP connects to the in-process L7 proxy
+listen  = "127.0.0.1:15001"  # loopback only; kavachd's own connects are never redirected
+listen6 = "[::1]:15001"      # IPv6 sockets (IPV6_V6ONLY ones included) land here; without it
+                             # dual-stack sockets go to ::ffff:127.0.0.1 and v6-only ones fail
+                             # through their rule's fail mode
+
+[gateway.proxy]
+max_connections = 1024
+idle_timeout_ms = 300000
