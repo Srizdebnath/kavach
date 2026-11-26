@@ -416,8 +416,10 @@ impl PolicySource for BundlePolicies {
     }
 }
 
-/// Run the L7 proxy on `[gateway] listen` until `shutdown`. The heartbeat notices the listener
-/// once it is bound, and redirecting starts then (not before).
+/// Run the L7 proxy on `[gateway] listen` (and `listen6`, when set) until `shutdown`. The
+/// heartbeat notices each listener once it is bound, and redirecting starts then (not before).
+/// A `listen6` that cannot be bound (e.g. IPv6 disabled on `lo`) is logged and skipped: the
+/// heartbeat then never reports it, and IPv6 sockets go to the IPv4-mapped `listen`.
 pub async fn serve_proxy(
     g: &GatewayConfig,
     orig: Arc<PinnedOrigDst>,
@@ -425,13 +427,40 @@ pub async fn serve_proxy(
     events: Arc<dyn EventSink>,
     shutdown: impl std::future::Future<Output = ()>,
 ) -> io::Result<()> {
-    let mut cfg = g.proxy.clone();
-    cfg.listen = g.listen;
-    let proxy =
-        kavach_gateway::Gateway::bind(cfg, orig, Arc::new(BundlePolicies(policies)), events)
-            .await?;
+    let policies: Arc<dyn PolicySource> = Arc::new(BundlePolicies(policies));
+    let bind = |listen: SocketAddr| {
+        let mut cfg = g.proxy.clone();
+        cfg.listen = listen;
+        kavach_gateway::Gateway::bind(cfg, orig.clone(), policies.clone(), events.clone())
+    };
+    let proxy = bind(g.listen).await?;
     info!(listen = %g.listen, "L7 gateway proxy listening");
-    proxy.serve_until(shutdown).await
+    let proxy6 = match g.listen6 {
+        Some(l6) => match bind(l6).await {
+            Ok(p) => {
+                info!(listen6 = %l6, "L7 gateway proxy listening (IPv6)");
+                Some(p)
+            }
+            Err(e) => {
+                warn!(listen6 = %l6, error = %e, "L7 gateway: cannot bind listen6; IPv6 sockets \
+                      use the IPv4-mapped listen (IPV6_V6ONLY ones their fail mode)");
+                None
+            }
+        },
+        None => None,
+    };
+    // Dropping the accept loops on shutdown stops accepting; open connections finish on their
+    // own (they run in tasks of their own), as with `serve_until`.
+    let serve = async move {
+        match proxy6 {
+            Some(p6) => tokio::try_join!(proxy.serve(), p6.serve()).map(|_| ()),
+            None => proxy.serve().await,
+        }
+    };
+    tokio::select! {
+        r = serve => r,
+        _ = shutdown => Ok(()),
+    }
 }
 
 /// Which gateway decisions go to the audit log: every deny, and allows up to `allows_per_sec`
