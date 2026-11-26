@@ -701,7 +701,7 @@ impl Kernel {
                             p.load().with_context(|| format!("loading {name}"))?;
                         }
                         let id = p
-                            .attach(&cg, CgroupAttachMode::AllowMultiple)
+                            .attach(&cg, CGROUP_LINK_MODE)
                             .with_context(|| format!("attaching {name}"))?;
                         p.take_link(id)?.try_into()?
                     }
@@ -710,7 +710,7 @@ impl Kernel {
                             p.load().with_context(|| format!("loading {name}"))?;
                         }
                         let id = p
-                            .attach(&cg, CgroupAttachMode::AllowMultiple)
+                            .attach(&cg, CGROUP_LINK_MODE)
                             .with_context(|| format!("attaching {name}"))?;
                         p.take_link(id)?.try_into()?
                     }
@@ -787,6 +787,11 @@ impl Kernel {
         })
     }
 }
+
+/// Attach mode for the cgroup redirect links. aya passes the mode as `link_create.flags`, and
+/// the kernel refuses any `BPF_F_ALLOW_*` there with EINVAL (`cgroup_bpf_link_attach`): a
+/// cgroup bpf_link is always multi-attach already, so the flags must be 0 (`Single`).
+const CGROUP_LINK_MODE: CgroupAttachMode = CgroupAttachMode::Single;
 
 /// The punt-redirect programs (bpf/gw_redirect.c), attached to the root cgroup.
 pub const GATEWAY_PROGS: &[&str] = &[

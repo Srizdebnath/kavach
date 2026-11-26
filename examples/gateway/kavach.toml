@@ -1,0 +1,49 @@
+# L7 gateway example policy (v0.4): an AI agent may use some MCP tools of a server, not others.
+#
+# The kernel punts the agent's TCP connects to the MCP server to the gateway kavachd runs on
+# loopback (see kavachd.toml next to this file); the agent keeps connecting to the server's
+# real address, with no proxy settings. The gateway decides every JSON-RPC frame with
+# [gateway.mcp-tools]: allowed calls are forwarded, denied ones get a JSON-RPC error
+# (code -32001) and never reach the server. Every decision is in the audit log.
+#
+#   kavachctl compile examples/gateway/kavach.toml
+#   kavachctl explain --policy examples/gateway/kavach.toml --to 198.51.100.10 --port 8080 \
+#       --user agent --tool github.delete_repo
+#   kavachctl sign examples/gateway/kavach.toml --key ci.key -o policy.kvb --fleet default
+#   kavachctl apply policy.kvb
+#
+# Exercised end to end (real kavachd, kernel redirect, MCP server in a netns) by
+# crates/kavachd/tests/gateway_e2e.rs (`scripts/priv-test.sh`).
+version = 1
+
+[defaults]
+egress  = "allow"
+ingress = "allow"
+fail    = "closed"
+
+[sets]
+mcp-servers = ["198.51.100.10", "2001:db8:100::10"]   # replace with your MCP server(s)
+
+[gateway.mcp-tools]
+allow_tools          = ["search", "github.*"]   # exact names, or a prefix ending in `*`
+deny_tools           = ["github.delete_*"]      # checked first
+allow_resources      = ["repo://acme/"]         # URI prefixes for resources/read
+allow_agent_messages = false                    # A2A message/send, message/stream
+allow_other          = false                    # any other JSON-RPC method (initialize, ping,
+                                                # */list, notifications/* always pass)
+tls                  = "deny"                   # TLS the gateway cannot read: deny | allow
+
+# The agent's MCP traffic goes through the gateway. While the gateway is down (kavachd stopped,
+# or dead for more than 3 s), `fail = "closed"` refuses the connect; "open" would let it go
+# straight to the server, unfiltered.
+[[rule]]
+id   = "agent-mcp-via-gateway"
+who  = { user = "agent" }       # or { cgroup = "system.slice/agent.service" }
+punt = { to = "@mcp-servers", port = 8080, proto = "tcp", gateway = "mcp-tools" }
+fail = "closed"
+
+# Ordinary rules are unaffected by the gateway.
+[[rule]]
+id   = "agent-no-other-egress-to-mcp-hosts"
+who  = { user = "agent" }
+deny = { to = "@mcp-servers" }

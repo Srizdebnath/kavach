@@ -51,8 +51,8 @@ enabled = false
 listen  = "127.0.0.1:15001"   # loopback only
 # listen6       = "[::1]:15001"   # else IPv6 sockets go to ::ffff:<listen> (v6-only ones cannot)
 # exempt_cgroup = "/sys/fs/cgroup/system.slice/kavach-gateway.service"  # out-of-process gateway
-# kavachd runs the L7 proxy itself on `listen` (it is exempt from redirection: no loops) and
-# writes its decisions to the audit log (every deny; allows sampled at 10/s).
+# kavachd runs the L7 proxy itself on `listen` and `listen6` (it is exempt from redirection: no
+# loops) and writes its decisions to the audit log (every deny; allows sampled at 10/s).
 # [gateway.proxy]
 # max_connections = 1024
 # idle_timeout_ms = 300000

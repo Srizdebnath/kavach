@@ -1623,7 +1623,8 @@ fn gateway_redirects_punted_connects_and_records_orig_dst() {
     assert!(f.k().gateway_attached());
 
     // Only TEST-NET-1 and 2001:db8::/32, port 9, are punted to gateway "mcp" (fail closed);
-    // port 10 is punted with no gateway named (never redirected).
+    // port 10 is punted with no gateway named (never redirected); UDP to port 9 is punted to
+    // "mcp" too, but UDP is never redirectable.
     let policy = f.apply_toml(
         r#"
 version = 1
@@ -1639,6 +1640,10 @@ fail = "closed"
 [[rule]]
 id = "punt-no-gateway"
 punt = { to = "192.0.2.0/24", port = 10, proto = "tcp" }
+fail = "closed"
+[[rule]]
+id = "punt-udp"
+punt = { to = "192.0.2.0/24", port = 9, proto = "udp", gateway = "mcp" }
 fail = "closed"
 "#,
     );
