@@ -234,6 +234,95 @@ static __always_inline void kv_emit_egress(const struct kv_identity *id, const _
 	bpf_ringbuf_submit(e, 0);
 }
 
+/*
+ * L7 gateway take-over of a punt (v0.4). Returns 1 when this connect will be redirected to the
+ * gateway listener: the LSM allows it and leaves a PENDING record in sk_punt that the
+ * cgroup/connect hook (gw_redirect.c) consumes in this same connect(). Returns 0 to enforce
+ * d->verdict (for a punt: the fail mode, or Allow for the gateway's own upstream leg).
+ *
+ * Any record left by an earlier connect() of this socket is voided first, so the connect hook
+ * can never act on a decision that was not made for this call.
+ */
+static __always_inline int kv_gw_take(struct sock *sk, const struct kv_identity *id,
+				      const __u32 *remote, __u16 port, __u8 family, __u8 proto,
+				      struct kv_decision *d, __u32 gen)
+{
+	struct kv_punt_record *pr = NULL;
+
+	if (proto == IPPROTO_TCP) {
+		pr = bpf_sk_storage_get(&sk_punt, sk, 0, 0);
+		/* sendmsg() with a name on a socket already connected to the gateway: TCP ignores
+		 * the name, the bytes go to the gateway either way. Keep the record intact. */
+		if (pr && (pr->flags & KV_PUNT_F_REDIRECTED) &&
+		    BPF_CORE_READ(sk, __sk_common.skc_state) != BPF_TCP_CLOSE)
+			return d->punted;
+		if (pr)
+			pr->flags &= ~KV_PUNT_F_PENDING;
+	}
+	if (!d->punted)
+		return 0;
+	if (!d->gateway) {
+		/* No gateway named: nobody could judge it at L7, so its fail mode decides. */
+		kv_gw_count(KV_GW_STAT_NO_GATEWAY);
+		return 0;
+	}
+
+	struct kv_gateway_cfg *g = kv_gw_live();
+	if (!g) {
+		kv_gw_count(KV_GW_STAT_DEAD);
+		return 0;
+	}
+	if (kv_gw_exempt(g, id->pid, id->cgroup_id)) {
+		/* The gateway forwarding a flow it already judged at L7: never loop it back. */
+		kv_gw_count(KV_GW_STAT_EXEMPT);
+		d->verdict = KV_VERDICT_ALLOW;
+		return 0;
+	}
+	if (proto != IPPROTO_TCP) {
+		kv_gw_count(KV_GW_STAT_UNREDIRECTABLE);
+		return 0;
+	}
+
+	__u32 target[4] = {};
+	__u16 tport = 0;
+	if (family == KV_AF_INET6 && (g->flags & KV_GW_F_V6)) {
+		target[0] = g->listen6[0];
+		target[1] = g->listen6[1];
+		target[2] = g->listen6[2];
+		target[3] = g->listen6[3];
+		tport = g->listen6_port;
+	} else if ((g->flags & KV_GW_F_V4) &&
+		   (family == KV_AF_INET ||
+		    !BPF_CORE_READ_BITFIELD_PROBED(&sk->__sk_common, skc_ipv6only))) {
+		kv_map_v4(target, g->listen4);
+		tport = g->listen4_port;
+	} else {
+		kv_gw_count(KV_GW_STAT_UNREDIRECTABLE);
+		return 0;
+	}
+
+	if (!pr)
+		pr = bpf_sk_storage_get(&sk_punt, sk, 0, BPF_SK_STORAGE_GET_F_CREATE);
+	if (!pr) {
+		kv_gw_count(KV_GW_STAT_UNREDIRECTABLE);
+		return 0;
+	}
+	pr->cgroup_id = id->cgroup_id;
+	__builtin_memcpy(pr->dst, remote, 16);
+	__builtin_memcpy(pr->target, target, 16);
+	pr->rule_id = d->rule_id;
+	pr->pid = id->pid;
+	pr->uid = id->uid;
+	pr->generation = gen;
+	pr->dport = bpf_htons(port);
+	pr->target_port = tport;
+	pr->gateway = d->gateway;
+	pr->family = family;
+	pr->verdict = 0;
+	pr->flags = KV_PUNT_F_PENDING;
+	return 1;
+}
+
 static __always_inline int kv_egress(struct socket *sock, struct sockaddr *addr, int addrlen)
 {
 	__u32 remote[4] = {};
@@ -292,6 +381,15 @@ static __always_inline int kv_egress(struct socket *sock, struct sockaddr *addr,
 		bpf_sk_storage_get(&sk_ident, sk, 0, BPF_SK_STORAGE_GET_F_CREATE);
 	if (slot_id)
 		*slot_id = id;
+
+	if (kv_gw_take(sk, &id, remote, port, family, proto, &d, s.gen)) {
+		struct kv_decision p = d;
+		p.verdict = KV_VERDICT_PUNT;
+		kv_gw_count(KV_GW_STAT_REDIRECT);
+		kv_count(KV_STAT_EGRESS_LOG);
+		kv_emit_egress(&id, remote, port, family, proto, &p, s.gen, KV_STAT_EGRESS_LOG);
+		return 0;
+	}
 
 	switch (d.verdict) {
 	case KV_VERDICT_DROP:

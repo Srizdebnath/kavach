@@ -92,13 +92,42 @@ async fn main() -> Result<()> {
         }
     }
 
+    // The active bundle's gateway policies (published by the daemon on every apply/restore);
+    // the redirect resolves gateway names from it.
+    let gateways = kavachd::gateway_policies::GatewayPolicies::new();
+    let gateways_handle = gateways.clone();
+    let gw_cfg = cfg.gateway.clone();
+    // L7 gateway redirect for punted TCP connects. Lives until kavachd exits; on exit (or a
+    // crash) the liveness deadline lapses and punts fall back to their fail mode. The proxy
+    // resolves original destinations through `gateway.orig` (kavach_gateway::OrigDst).
+    let _gateway = if cfg.gateway.enabled {
+        match kavachd::gateway::start(&mut k, &cfg.gateway, std::process::id(), gateways.clone()) {
+            Ok(g) => {
+                info!(listen = %cfg.gateway.listen, listen6 = ?cfg.gateway.listen6,
+                      "L7 gateway redirect attached (active while the listener is up)");
+                Some(g)
+            }
+            Err(e) => {
+                error!(error = %format!("{e:#}"), "L7 gateway redirect not started; punts use their fail mode");
+                None
+            }
+        }
+    } else {
+        kavachd::gateway::disable(&mut k);
+        None
+    };
+
     // Opt-in AF_XDP gateway backend; lives until kavachd exits (its sockets close with it).
     let _afxdp = start_afxdp(&mut k, &cfg, &xdp_modes);
 
     let rb = k.take_events()?;
     let xdp_mode = cfg.xdp_mode.clone();
     let scan_dirs = cfg.hash_scan_dirs.clone();
-    let state = Arc::new(Mutex::new(Daemon::new(cfg, k)));
+    let state = Arc::new(Mutex::new({
+        let mut d = Daemon::new(cfg, k);
+        d.gateways = gateways; // shared with the redirect's OrigDst
+        d
+    }));
     let (tx, _) = broadcast::channel(4096);
     let (jobs_tx, jobs_rx) = mpsc::channel(8192);
     let (prewarm_tx, prewarm_rx) = mpsc::channel(4096);
@@ -180,6 +209,43 @@ async fn main() -> Result<()> {
         move || housekeeping(st.clone())
     });
 
+    // The in-process L7 proxy. kavachd's own tgid is exempt from redirection, so the proxy's
+    // upstream connects are never looped back to itself. Decisions go to the audit log.
+    let proxy_stop = Arc::new(Notify::new());
+    if let Some(g) = &_gateway {
+        let (etx, mut erx) = mpsc::channel::<kavach_gateway::DecisionEvent>(4096);
+        let sink: Arc<dyn kavach_gateway::EventSink> =
+            Arc::new(kavach_gateway::proxy::ChannelSink::new(etx));
+        let st = state.clone();
+        tokio::spawn(async move {
+            let mut throttle = kavachd::gateway::AuditThrottle::new(10);
+            while let Some(ev) = erx.recv().await {
+                if !throttle.admit(&ev) {
+                    continue;
+                }
+                if let Ok(mut s) = st.lock() {
+                    s.audit.record(
+                        "gateway_decision",
+                        serde_json::to_value(&ev).unwrap_or_default(),
+                    );
+                }
+            }
+        });
+        let (gcfg, orig, pols, stop) = (
+            gw_cfg.clone(),
+            g.orig.clone(),
+            gateways_handle.clone(),
+            proxy_stop.clone(),
+        );
+        tokio::spawn(async move {
+            let r = kavachd::gateway::serve_proxy(&gcfg, orig, pols, sink, stop.notified()).await;
+            if let Err(e) = r {
+                // The heartbeat sees no listener: punts keep using their fail mode.
+                error!(error = %e, listen = %gcfg.listen, "L7 gateway proxy stopped");
+            }
+        });
+    }
+
     let api = tokio::spawn(api::serve(state.clone(), tx.clone(), shutdown.clone()));
 
     tokio::select! {
@@ -188,6 +254,9 @@ async fn main() -> Result<()> {
         _ = shutdown.notified() => info!("kill-switch: exiting"),
         r = api => error!(result = ?r, "control API stopped"),
     }
+    // Stop redirecting first (the heartbeat zeroes the deadline), then close the proxy.
+    drop(_gateway);
+    proxy_stop.notify_one();
     Ok(())
 }
 
@@ -238,8 +307,10 @@ fn start_afxdp(
             let modes: Vec<String> = b.modes().iter().map(|(q, m)| format!("{q}:{m}")).collect();
             warn!(
                 iface = %a.iface, ?ports, ?modes, watchdog_ms = a.watchdog_ms,
-                "AF_XDP gateway backend ON: these ports now terminate in the gateway (preview \
-                 consumer counts and drops them) and bypass TC ingress policy"
+                "AF_XDP gateway backend ON: frames to these ports are consumed (counted, then \
+                 dropped) in user space, because AF_XDP cannot hand a frame back to the kernel \
+                 stack; they bypass TC ingress policy. Punted connections do not use this path \
+                 ([gateway] enabled redirects them at connect())"
             );
             Some(b)
         }

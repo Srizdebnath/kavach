@@ -462,8 +462,9 @@ The compiler treats these as errors:
 It warns about unused gateways, an empty `allow_tools`, duplicate or redundant entries, and
 `punt` rules without a gateway. `[defaults]` cannot be `punt`.
 
-Until the gateway proxy runs, punted flows still resolve through the rule's fail mode. You can
-check a policy offline:
+With `[gateway] enabled = true` in kavachd.toml, kavachd redirects punted TCP connects to its
+in-process proxy; while it is off or not listening, punted flows resolve through the rule's fail
+mode. You can check a policy offline:
 
 ```sh
 kavachctl explain --policy kavach.toml --to 203.0.113.10 --port 443 --user agent --tool github.delete_repo
@@ -514,13 +515,13 @@ scripts/priv-test.sh     # real-kernel suite (sudo)
 | v0.1 | XDP blocklist + per-source rate limiting | ✅ kernel-tested |
 | v0.2 | Identity-aware egress via BPF-LSM: binary hash/path, uid, cgroup; tamper revocation | ✅ kernel-tested |
 | v0.3 | `kavach.toml` policy-as-code, `kavachctl`, signed bundles, A/B hot-swap, audit log, `top`, anomaly detection | ✅ kernel-tested |
-| v0.4 | Agent gateway (MCP / A2A), k8s/SPIFFE identity, `kavach.ko` kfunc; AF_XDP RX backend | 🧪 policy core + AF_XDP backend (kernel-tested); L7 proxy (loopback-tested); kernel redirect pending |
+| v0.4 | Agent gateway (MCP / A2A), k8s/SPIFFE identity, `kavach.ko` kfunc; AF_XDP RX backend | 🧪 policy core + AF_XDP backend (kernel-tested); L7 proxy (loopback-tested); kernel redirect of punted TCP connects (cgroup connect + sockops) |
 | v0.5 | FreeBSD pfil shim, macOS Network Extension | planned |
 
 Honest limits today: kavachd must run in the host PID namespace for identity rules; k8s-label and SPIFFE selectors are rejected by the compiler until the v0.4
 node agent exists; the QUIC parser handles a ClientHello that fits in one Initial packet;
 anomaly detection sees only `drop`/`log` events; the AF_XDP backend has a counting consumer only
-(redirected ports are dropped until the v0.4 proxy lands), and zero-copy is untested on real NICs.
+(frames on its selected ports are consumed in user space: AF_XDP cannot hand them back to the stack), and zero-copy is untested on real NICs.
 
 ## Contributing
 

@@ -9,7 +9,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use aya::maps::lpm_trie::{Key, LpmTrie};
 use aya::maps::{Array, ArrayOfMaps, HashMap, MapData, MapError, PerCpuArray, RingBuf, XskMap};
 use aya::programs::links::{FdLink, PinnedLink};
-use aya::programs::{Iter, Lsm, SchedClassifier, TcAttachType, Xdp, XdpMode};
+use aya::programs::{CgroupAttachMode, Iter, Lsm, SchedClassifier, TcAttachType, Xdp, XdpMode};
 use aya::{Btf, Ebpf, EbpfLoader};
 use ipnet::IpNet;
 use kavach_common::abi::*;
@@ -17,11 +17,11 @@ use kavach_common::addr::{from_mapped, mapped_prefix, mask_addr, to_mapped};
 use tracing::{info, warn};
 
 /// Bump whenever a map layout changes: pins live under `/sys/fs/bpf/kavach/v<ABI_VERSION>`.
-pub const ABI_VERSION: u32 = 2;
+pub const ABI_VERSION: u32 = 3;
 
 /// Fingerprint of every shared struct size (`kavach_common::abi::LAYOUT`) that `ABI_VERSION`
 /// was last bumped for; the test below fails when the layout changes without a bump.
-pub const ABI_LAYOUT_FINGERPRINT: u64 = 14051614165168947846;
+pub const ABI_LAYOUT_FINGERPRINT: u64 = 1359382574871012577;
 
 /// FNV-1a over (name, size) of every ABI type.
 pub fn layout_fingerprint() -> u64 {
@@ -641,7 +641,127 @@ impl Kernel {
             alive: Array::try_from(aya::maps::Map::Array(open("xsk_alive")?))?,
         })
     }
+
+    // ---------------------------------------------------------------------------------------
+    // L7 gateway redirect (punt data path; see crate::gateway and bpf/gw_redirect.c)
+    // ---------------------------------------------------------------------------------------
+
+    /// Attach the redirect programs to the cgroup v2 directory `cgroup` (the root, so every
+    /// process is covered). Multi-attach, then the pin is replaced: attach-before-detach, as for
+    /// the LSM. All or nothing: on any failure every gateway link is removed again.
+    pub fn attach_gateway(&mut self, cgroup: &Path) -> Result<()> {
+        let res = (|| -> Result<()> {
+            for name in GATEWAY_PROGS {
+                let cg = std::fs::File::open(cgroup)
+                    .with_context(|| format!("opening cgroup {}", cgroup.display()))?;
+                let pin = self
+                    .link_pin(name)
+                    .ok_or_else(|| anyhow!("gateway redirect needs a pin directory"))?;
+                let prog = self
+                    .bpf
+                    .program_mut(name)
+                    .ok_or_else(|| anyhow!("{name} missing"))?;
+                let link: FdLink = match prog {
+                    aya::programs::Program::CgroupSockAddr(p) => {
+                        if p.fd().is_err() {
+                            p.load().with_context(|| format!("loading {name}"))?;
+                        }
+                        let id = p
+                            .attach(&cg, CgroupAttachMode::AllowMultiple)
+                            .with_context(|| format!("attaching {name}"))?;
+                        p.take_link(id)?.try_into()?
+                    }
+                    aya::programs::Program::SockOps(p) => {
+                        if p.fd().is_err() {
+                            p.load().with_context(|| format!("loading {name}"))?;
+                        }
+                        let id = p
+                            .attach(&cg, CgroupAttachMode::AllowMultiple)
+                            .with_context(|| format!("attaching {name}"))?;
+                        p.take_link(id)?.try_into()?
+                    }
+                    _ => bail!("{name}: unexpected program type"),
+                };
+                if pin.exists() {
+                    std::fs::remove_file(&pin)?;
+                }
+                link.pin(&pin)
+                    .with_context(|| format!("pinning {name} link"))?;
+            }
+            Ok(())
+        })();
+        if res.is_err() {
+            self.detach_gateway();
+        }
+        res
+    }
+
+    /// Remove the redirect links (their pins are the only reference: unlinking detaches).
+    pub fn detach_gateway(&mut self) -> usize {
+        let mut n = 0;
+        for name in GATEWAY_PROGS {
+            if let Some(pin) = self.link_pin(name).filter(|p| p.exists())
+                && std::fs::remove_file(&pin).is_ok()
+            {
+                n += 1;
+            }
+        }
+        n
+    }
+
+    /// Whether every redirect link is pinned (attached).
+    pub fn gateway_attached(&self) -> bool {
+        GATEWAY_PROGS
+            .iter()
+            .all(|n| self.link_pin(n).is_some_and(|p| p.exists()))
+    }
+
+    pub fn set_gateway_cfg(&mut self, cfg: GatewayCfg) -> Result<()> {
+        let mut a: Array<_, GatewayCfg> = Array::try_from(self.map("gw_cfg")?)?;
+        a.set(0, &cfg, 0)?;
+        Ok(())
+    }
+
+    pub fn gateway_cfg(&mut self) -> Result<GatewayCfg> {
+        let a: Array<_, GatewayCfg> = Array::try_from(self.map("gw_cfg")?)?;
+        Ok(a.get(&0, 0)?)
+    }
+
+    /// `gw_stats`, summed over CPUs (`KV_GW_STAT_*`).
+    pub fn gw_stats(&mut self) -> Result<Vec<u64>> {
+        let a: PerCpuArray<_, u64> = PerCpuArray::try_from(self.map("gw_stats")?)?;
+        let mut out = Vec::with_capacity(KV_GW_STAT_MAX as usize);
+        for i in 0..KV_GW_STAT_MAX {
+            out.push(a.get(&i, 0)?.iter().sum());
+        }
+        Ok(out)
+    }
+
+    /// Independent handles on `orig_dst` / `gw_cfg` (from their pins) for the gateway proxy and
+    /// the liveness heartbeat, which must not take the daemon lock.
+    pub fn gateway_maps(&self) -> Result<crate::gateway::GatewayMaps> {
+        let dir = self
+            .pin_dir
+            .as_ref()
+            .ok_or_else(|| anyhow!("gateway redirect needs pinned maps"))?;
+        let open = |name: &str| {
+            MapData::from_pin(dir.join(name)).with_context(|| format!("opening pinned {name}"))
+        };
+        Ok(crate::gateway::GatewayMaps {
+            orig: HashMap::try_from(aya::maps::Map::LruHashMap(open("orig_dst")?))?,
+            cfg: Array::try_from(aya::maps::Map::Array(open("gw_cfg")?))?,
+        })
+    }
 }
+
+/// The punt-redirect programs (bpf/gw_redirect.c), attached to the root cgroup.
+pub const GATEWAY_PROGS: &[&str] = &[
+    "kavach_gw_connect4",
+    "kavach_gw_connect6",
+    "kavach_gw_getpeername4",
+    "kavach_gw_getpeername6",
+    "kavach_gw_sockops",
+];
 
 /// `xsk_sockets` + `xsk_alive`, driven by the gateway's AF_XDP watchdog.
 pub struct XskMaps {

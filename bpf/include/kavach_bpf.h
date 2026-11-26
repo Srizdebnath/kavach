@@ -212,6 +212,48 @@ struct {
 } xsk_stats SEC(".maps");
 
 /*
+ * L7 gateway redirect (punt data path, bpf/gw_redirect.c).
+ * gw_cfg:   listener + exemptions + liveness deadline (kavachd-owned).
+ * sk_punt:  per-socket punt record: LSM writes (PENDING), connect hook consumes (REDIRECTED).
+ * orig_dst: client 4-tuple -> punt record for the gateway's lookup; sockops inserts it when the
+ *           client port is bound and deletes it when the client socket closes. LRU so a lost
+ *           close can never pin the map.
+ */
+#define KV_ORIG_MAX 65536
+
+struct {
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, struct kv_gateway_cfg);
+} gw_cfg SEC(".maps");
+
+struct {
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+	__uint(type, BPF_MAP_TYPE_SK_STORAGE);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+	__type(key, int);
+	__type(value, struct kv_punt_record);
+} sk_punt SEC(".maps");
+
+struct {
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
+	__uint(max_entries, KV_ORIG_MAX);
+	__type(key, struct kv_orig_key);
+	__type(value, struct kv_punt_record);
+} orig_dst SEC(".maps");
+
+struct {
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, KV_GW_STAT_MAX);
+	__type(key, __u32);
+	__type(value, __u64);
+} gw_stats SEC(".maps");
+
+/*
  * RCU barrier: updating any element of a map-in-map from user space makes the kernel call
  * synchronize_rcu() (maybe_wait_bpf_programs), i.e. wait for every in-flight non-sleepable BPF
  * program. kavachd does this after flipping policy_gen and before reusing the old slot.
@@ -241,6 +283,32 @@ static __always_inline void kv_count(__u32 reason)
 	__u64 *v = bpf_map_lookup_elem(&stats, &reason);
 	if (v)
 		*v += 1;
+}
+
+static __always_inline void kv_gw_count(__u32 idx)
+{
+	__u64 *v = bpf_map_lookup_elem(&gw_stats, &idx);
+	if (v)
+		*v += 1;
+}
+
+/* Gateway config if the gateway is alive right now, else NULL (punts use their fail mode). */
+static __always_inline struct kv_gateway_cfg *kv_gw_live(void)
+{
+	__u32 zero = 0;
+	struct kv_gateway_cfg *g = bpf_map_lookup_elem(&gw_cfg, &zero);
+	if (!g || !(g->flags & (KV_GW_F_V4 | KV_GW_F_V6)))
+		return NULL;
+	if (READ_ONCE(g->alive_until_ns) <= bpf_ktime_get_boot_ns())
+		return NULL;
+	return g;
+}
+
+/* Is (tgid, cgroup) the gateway itself? Its upstream leg must never be redirected. */
+static __always_inline bool kv_gw_exempt(const struct kv_gateway_cfg *g, __u32 tgid, __u64 cgid)
+{
+	return (g->exempt_tgid && g->exempt_tgid == tgid) ||
+	       (g->exempt_cgroup && g->exempt_cgroup == cgid);
 }
 
 /* Write an IPv4 address (network order) into a 16-byte IPv4-mapped slot. */

@@ -29,6 +29,25 @@ fn version(rel: &str) -> (u32, u32) {
     (maj, min)
 }
 
+/// Is anything listening on 127.0.0.1:15001 (or 0.0.0.0:15001)? `/proc/net/tcp` prints the
+/// address as the kernel's native-endian u32 and the port in host order, both hex.
+fn default_gateway_listening() -> bool {
+    let local = format!(
+        "{:08X}:{:04X}",
+        u32::from_ne_bytes([127, 0, 0, 1]),
+        15001u16
+    );
+    let any = format!("{:08X}:{:04X}", 0u32, 15001u16);
+    std::fs::read_to_string("/proc/net/tcp")
+        .unwrap_or_default()
+        .lines()
+        .skip(1)
+        .any(|l| {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            f.len() > 3 && f[3] == "0A" && (f[1] == local || f[1] == any)
+        })
+}
+
 pub fn checks() -> Vec<Check> {
     // PROC_PID_INIT_INO: the initial PID namespace's fixed inode.
     let host_pidns = std::fs::read_link("/proc/self/ns/pid")
@@ -100,6 +119,21 @@ pub fn checks() -> Vec<Check> {
             required: false,
             detail: "/sys/fs/cgroup".into(),
             fix: "cgroup selectors need the unified hierarchy (systemd.unified_cgroup_hierarchy=1)",
+        },
+        Check {
+            name: "L7 gateway redirect (punt)",
+            ok: lsm.split(',').any(|m| m.trim() == "bpf") && cg2,
+            required: false,
+            detail: format!(
+                "BPF LSM + cgroup v2 connect/sockops hooks; default listener 127.0.0.1:15001 {}",
+                if default_gateway_listening() {
+                    "is listening"
+                } else {
+                    "is not listening (punts use their fail mode)"
+                }
+            ),
+            fix: "`[gateway] enabled = true` in kavachd.toml needs the BPF LSM and the cgroup v2 \
+                  hierarchy (see the two checks above), and a gateway listening on `listen`",
         },
         Check {
             name: "TC ingress (kernel >= 6.6 uses TCX)",

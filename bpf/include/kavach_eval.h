@@ -118,7 +118,8 @@ static long kv_eval_cb(__u64 i, void *data)
 struct kv_decision {
 	__u32 rule_id;
 	__u8 verdict; /* final: Allow / Drop / Log (Punt already resolved through fail mode) */
-	__u8 punted;
+	__u8 punted;  /* the rule said Punt: an L7 gateway may take over (lsm_egress.c) */
+	__u16 gateway; /* punting rule's gateway index */
 };
 
 static __always_inline void kv_evaluate(const struct kv_snapshot *s, __u8 dir, __u64 mask,
@@ -141,13 +142,16 @@ static __always_inline void kv_evaluate(const struct kv_snapshot *s, __u8 dir, _
 	bpf_loop(n, kv_eval_cb, &c, 0);
 
 	d->punted = 0;
+	d->gateway = 0;
 	if (c.match >= 0) {
 		struct kv_rule *r = &s->pol->rules[c.match & (KV_MAX_RULES - 1)];
 		d->rule_id = r->id;
 		d->verdict = r->verdict;
 		if (d->verdict == KV_VERDICT_PUNT) {
-			/* v0.3: no L7 consumer yet, so the rule's fail mode decides (SR-8). */
+			/* The fail mode decides unless a live gateway takes the connection over
+			 * (kv_egress, SR-8): every other caller enforces this verdict. */
 			d->punted = 1;
+			d->gateway = r->gateway;
 			d->verdict = r->fail == KV_FAIL_CLOSED ? KV_VERDICT_DROP : KV_VERDICT_LOG;
 		}
 	} else {

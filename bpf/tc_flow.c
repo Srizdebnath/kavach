@@ -64,6 +64,28 @@ static __always_inline __u64 kv_skb_mask(struct __sk_buff *skb, const struct kv_
 	return m;
 }
 
+/*
+ * A punted flow owned by the gateway itself is its upstream leg, already judged at L7: the LSM
+ * allowed it at connect, so a policy swap must not cut it through the fail mode either.
+ */
+static __always_inline void kv_tc_gw_exempt(struct __sk_buff *skb, struct kv_decision *d)
+{
+	struct kv_gateway_cfg *g = kv_gw_live();
+	if (!g)
+		return;
+	struct bpf_sock *bsk = skb->sk;
+	if (!bsk)
+		return;
+	bsk = bpf_sk_fullsock(bsk);
+	if (!bsk)
+		return;
+	struct kv_identity *id = bpf_sk_storage_get(&sk_ident, bsk, 0, 0);
+	if (id && kv_gw_exempt(g, id->pid, id->cgroup_id)) {
+		kv_gw_count(KV_GW_STAT_EXEMPT);
+		d->verdict = KV_VERDICT_ALLOW;
+	}
+}
+
 static __always_inline void kv_emit_ingress(struct __sk_buff *skb, const struct kv_pkt *p,
 					    const struct kv_decision *d, __u32 gen)
 {
@@ -132,6 +154,8 @@ int kavach_tc_egress(struct __sk_buff *skb)
 		} else {
 			kv_evaluate(&s, KV_DIR_EGRESS, mask, p.key.dst, bpf_ntohs(p.key.dport),
 				    p.key.proto, &d);
+			if (d.punted && d.gateway)
+				kv_tc_gw_exempt(skb, &d);
 		}
 		v->verdict = d.verdict == KV_VERDICT_DROP ? KV_VERDICT_DROP : KV_VERDICT_ALLOW;
 		v->rule_id = d.rule_id;

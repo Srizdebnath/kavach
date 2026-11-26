@@ -5,19 +5,22 @@
 //! sent?" This crate holds that decision logic. It is deliberately transport-free, so the
 //! v0.4 proxy (which terminates the agent's HTTP/WebSocket/stdio stream) and the tests share it.
 //!
-//! The planned data path:
-//! 1. The LSM punts the connect.
-//! 2. kavachd redirects the flow to the gateway via `sk_assign`/TPROXY.
-//! 3. The gateway parses each JSON-RPC frame with [`classify`] and decides with
-//!    [`ToolPolicy::decide`].
-//! 4. The verdict is written back to `flow_cache` for the connection.
+//! The data path (`[gateway] enabled = true` in kavachd.toml):
+//! 1. The LSM punts the TCP connect (rule verdict `punt`, gateway alive).
+//! 2. A `cgroup/connect4|6` program rewrites its destination to the gateway listener; sockops
+//!    records the original destination under the client's 4-tuple (`orig_dst`).
+//! 3. The proxy accepts, resolves the original destination with an [`OrigDst`], parses
+//!    each JSON-RPC frame with [`classify`] and decides with [`ToolPolicy::decide`].
+//! 4. The proxy enforces its decision in-path; kavachd may record a connection-level verdict
+//!    in the `orig_dst` entry (informational, see docs/ARCHITECTURE.md).
 //!
 //! [`proxy`] is that transport: a TCP listener that relays redirected flows (HTTP/1.1, SSE,
-//! WebSocket, raw NDJSON) and enforces the decision per frame. Until kavachd redirects to it,
-//! punted flows resolve through the rule's fail mode.
+//! WebSocket, raw NDJSON) and enforces the decision per frame. With the gateway off or dead
+//! (liveness deadline lapsed), punted flows resolve through the rule's fail mode.
 //!
 //! [`afxdp`] is an optional, opt-in RX backend: the XDP program redirects frames for
-//! gateway-selected ports straight to per-queue AF_XDP sockets, guarded by a watchdog.
+//! gateway-selected ports straight to per-queue AF_XDP sockets, guarded by a watchdog. It is
+//! not part of the punt path (that is socket-level, above).
 //!
 //! `unsafe` is denied crate-wide; only `afxdp::sys` (raw syscalls, mmap) and `afxdp::ring`
 //! (shared-memory ring indices) opt out, each block with a `SAFETY:` justification.

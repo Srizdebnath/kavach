@@ -41,10 +41,28 @@ min_new_ports    = 3        # floor for new_dst_ports
 cooldown_secs    = 600      # per identity and metric
 max_identities   = 1024
 
-# Optional AF_XDP RX backend for the L7 gateway (v0.4 preview). OFF unless enabled: a redirected
+# L7 gateway (v0.4 preview). With `enabled = true`, a TCP connect that an egress rule punts is
+# redirected to the gateway listener (cgroup connect hooks on the root cgroup v2; needs the BPF
+# LSM). While nothing listens on `listen`, punts resolve through the rule's fail mode as before
+# (kavachd renews a liveness deadline only while the listener is up). UDP/ICMP punts always use
+# the fail mode.
+[gateway]
+enabled = false
+listen  = "127.0.0.1:15001"   # loopback only
+# listen6       = "[::1]:15001"   # else IPv6 sockets go to ::ffff:<listen> (v6-only ones cannot)
+# exempt_cgroup = "/sys/fs/cgroup/system.slice/kavach-gateway.service"  # out-of-process gateway
+# kavachd runs the L7 proxy itself on `listen` (it is exempt from redirection: no loops) and
+# writes its decisions to the audit log (every deny; allows sampled at 10/s).
+# [gateway.proxy]
+# max_connections = 1024
+# idle_timeout_ms = 300000
+
+# Optional AF_XDP RX backend (not part of the punt path). OFF unless enabled: a redirected
 # queue depends on the gateway process, so only the listed ports are redirected (everything else,
 # SSH included, stays on the kernel stack) and a watchdog detaches a queue whose consumer stalls.
-# Redirected frames bypass TC ingress policy (XDP blocklist and rate limit still apply).
+# Redirected frames bypass TC ingress policy (XDP blocklist and rate limit still apply), and they
+# are consumed (counted, then dropped) in user space: AF_XDP cannot hand a frame back to the
+# kernel stack, so only list ports nothing else on this host must receive.
 # [gateway.afxdp]
 # enabled     = false
 # iface       = "eth0"        # must be one of `interfaces` (needs the Kavach XDP program)
