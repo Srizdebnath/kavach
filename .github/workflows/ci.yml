@@ -27,6 +27,8 @@ jobs:
         run: |
           rustup target add thumbv7em-none-eabihf
           cargo build -p kavach-common -p kavach-core -p kavach-parsers --target thumbv7em-none-eabihf
+      - name: kavach.ko Rust half compiles and matches kavach-core (stub kernel crate, no VM)
+        run: ./kernel/kavach-ko/host-check.sh
 
   test:
     runs-on: ubuntu-24.04
