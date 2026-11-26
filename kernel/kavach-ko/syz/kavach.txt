@@ -1,0 +1,231 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# syzkaller descriptions for kavach.ko's `kavach_evaluate` kfunc (SRS SR-6).
+#
+# Copy into syzkaller's sys/linux/ next to bpf.txt / bpf_prog.txt / bpf_trace.txt (it reuses
+# their types and resources), together with kavach.txt.const, then `make descriptions`.
+# kernel/kavach-ko/ci.sh does all of this; see README.md "Fuzzing".
+#
+# The fuzz kernel links kavach.ko *into vmlinux* (ci.sh kernel --fuzz): stock syzkaller resolves
+# BTF ids from /sys/kernel/btf/vmlinux only (syz_btf_id_by_name) and its kfunc call encodes
+# off = 0 (vmlinux BTF), so a loadable module's split-BTF id would be unreachable.
+#
+# What is fuzzed:
+#   * BPF_PROG_LOAD of TC and LSM programs that call kavach_evaluate with verifier-valid
+#     arguments, with the size argument, the request fields and the program type fuzzed (the
+#     verifier's kfunc argument checks and the BTF_KFUNC_HOOK_LSM / SCHED_CLS registration);
+#   * BPF_MAP_UPDATE_ELEM of whole fuzzed policy tables (struct kv_policy: header + rules, any
+#     bit pattern) into the array map the programs read the slot from;
+#   * BPF_PROG_TEST_RUN of the TC programs, i.e. the kfunc body (kavach-core) on those tables;
+#   * attaching the LSM programs (BPF_RAW_TRACEPOINT_OPEN), after which every hooked call
+#     (e.g. connect(2) for bpf_lsm_socket_connect) runs the kfunc on the fuzzed table.
+# The generic bpf_insn `kfunc` variant (bpf_prog.txt) keeps fuzzing arbitrary programs against
+# every kfunc in vmlinux, which now includes this one.
+
+include <uapi/linux/bpf.h>
+
+# sizeof(struct kv_policy): 64-byte header + KV_MAX_RULES (1024) rules of 48 bytes.
+define KAVACH_POLICY_SIZE	49216
+
+resource kavach_kfunc_btf_id[bpf_btf_id]
+resource fd_kavach_policy_map[fd_bpf_map]
+resource fd_kavach_tc_prog[fd_bpf_prog]
+resource fd_kavach_lsm_prog[fd_bpf_prog_with_btfid]
+
+syz_btf_id_by_name$kavach_evaluate(name ptr[in, string["kavach_evaluate"]]) kavach_kfunc_btf_id
+
+bpf$MAP_CREATE_kavach_policy(cmd const[BPF_MAP_CREATE], arg ptr[in, kavach_policy_map_create], size len[arg]) fd_kavach_policy_map
+bpf$MAP_UPDATE_ELEM_kavach_policy(cmd const[BPF_MAP_UPDATE_ELEM], arg ptr[in, kavach_policy_update], size len[arg])
+bpf$PROG_LOAD_kavach_tc(cmd const[BPF_PROG_LOAD], arg ptr[in, kavach_tc_prog], size len[arg]) fd_kavach_tc_prog (timeout[500])
+bpf$PROG_LOAD_kavach_lsm(cmd const[BPF_PROG_LOAD], arg ptr[in, kavach_lsm_prog], size len[arg]) fd_kavach_lsm_prog (timeout[500])
+# Attach to the program's LSM hook (bpf_lsm_btf_id). Unlike arbitrary raw-tracepoint programs
+# this one always returns 0, so it cannot kill the executor: no snapshot mode needed.
+bpf$BPF_RAW_TRACEPOINT_OPEN_kavach(cmd const[BPF_RAW_TRACEPOINT_OPEN], arg ptr[in, kavach_raw_tp_open], size len[arg]) fd_perf_base (timeout[500])
+bpf$BPF_PROG_TEST_RUN_kavach(cmd const[BPF_PROG_TEST_RUN], arg ptr[in, kavach_test_run], size len[arg]) (timeout[500])
+
+# --- policy table ---------------------------------------------------------------------------
+
+# The leading fields of union bpf_attr for BPF_MAP_CREATE (the kernel zero-extends the rest):
+# kavachd's policy_slots. map_flags also tries BPF_F_RDONLY_PROG (0x80: the verifier must then
+# refuse the kfunc, whose memory arguments are checked for write access) and BPF_F_MMAPABLE.
+kavach_policy_map_create {
+	type	const[BPF_MAP_TYPE_ARRAY, int32]
+	ksize	const[4, int32]
+	vsize	const[KAVACH_POLICY_SIZE, int32]
+	max	const[2, int32]
+	flags	flags[kavach_map_flags, int32]
+}
+
+kavach_map_flags = 0, 128, 1024
+
+kavach_policy_update {
+	map	fd_kavach_policy_map
+	key	ptr64[in, int32[0:1]]
+	val	ptr64[in, kavach_policy]
+	flags	const[0, int64]
+}
+
+# The kernel copies KAVACH_POLICY_SIZE bytes; rules past the described ones come from the
+# (zeroed) data area after the argument, so a fuzzed n_rules > len(rules) reads zero rules.
+kavach_policy {
+	hdr	kavach_policy_hdr
+	rules	array[kavach_rule, 0:24]
+} [packed]
+
+kavach_policy_hdr {
+	n_rules		int32[0:1100]
+	flags		flags[kavach_policy_flags, int32]
+	default_egress	int8[0:4]
+	default_ingress	int8[0:4]
+	pad		array[const[0, int8], 6]
+	wild_exe	int64
+	wild_uid	int64
+	wild_cgroup	int64
+	serial		int64
+	generation	int32
+	pad2		const[0, int32]
+	sel_used	int64
+} [packed, size[64]]
+
+kavach_rule {
+	sel		int64
+	id		int32
+	remote_set	int32[0:66]
+	port_lo		int16
+	port_hi		int16
+	proto		flags[kavach_protos, int8]
+	dir		flags[kavach_dirs, int8]
+	verdict		int8[0:4]
+	fail		int8[0:1]
+	not_after_ns	int64
+	gateway		int16
+	pad		array[const[0, int8], 6]
+	reserved	const[0, int64]
+} [packed, size[48]]
+
+# KV_POL_F_VALID = 1 (the kfunc answers -ENOENT without it), STRICT_INGRESS, NO_LOOPBACK_BYPASS,
+# UNCLASSIFIED_DENY.
+kavach_policy_flags = 1, 2, 4, 8
+# KV_PROTO_ANY / ICMP / TCP / UDP / ICMPV6
+kavach_protos = 0, 1, 6, 17, 58
+# KV_DIR_EGRESS / KV_DIR_INGRESS (and an invalid one)
+kavach_dirs = 1, 2, 0
+
+# --- programs -------------------------------------------------------------------------------
+#
+# Both programs run the same body (offsets relative to r10, the frame pointer):
+#
+#   *(u32 *)(fp - 4) = 0; r2 = fp - 4; r1 = policy map; call bpf_map_lookup_elem
+#   if r0 == 0 goto out
+#   r1 = r0 (pol); r2 = SIZE (pol__sz)
+#   struct kavach_eval_req at fp - 40 (mask, sets, now_ns, port|proto|dir), fuzzed immediates
+#   struct kavach_eval_res at fp - 48 = 0
+#   r3 = fp - 40; r4 = fp - 48; call kavach_evaluate
+#   RET; exit
+#   out: r0 = 0; exit
+#
+# RET is "r0 = res.verdict" for TC and "r0 = 0" for LSM (whose return value must be <= 0).
+
+type kavach_tc_prog kavach_prog_t[BPF_PROG_TYPE_SCHED_CLS, const[0, int32], const[0, int32], kavach_ret_verdict]
+type kavach_lsm_prog kavach_prog_t[BPF_PROG_TYPE_LSM, const[BPF_LSM_MAC, int32], bpf_lsm_btf_id, kavach_ret_zero]
+
+# The leading fields of union bpf_attr for BPF_PROG_LOAD, up to attach_prog_fd (the kernel
+# zero-extends a shorter attr). bpf_prog_t (bpf_prog.txt) is not reused because its `insns`
+# is fixed to the generic bpf_instructions; kfuncs need a GPL-compatible license.
+type kavach_prog_t[TYPE, ATTACH_TYPE, BTF_ID, RET] {
+	type			const[TYPE, int32]
+	ninsn			bytesize8[insns, int32]
+	insns			ptr64[in, kavach_prog_body[RET]]
+	license			ptr64[in, string["GPL"]]
+	loglev			int32[0:2]
+	logsize			len[log, int32]
+	log			ptr64[out, array[int8], opt]
+	kern_version		const[0, int32]
+	flags			const[0, int32]
+	prog_name		array[const[0, int8], BPF_OBJ_NAME_LEN]
+	prog_ifindex		const[0, int32]
+	expected_attach_type	ATTACH_TYPE
+	btf_fd			const[0, int32]
+	func_info_rec_size	const[0, int32]
+	func_info		const[0, int64]
+	func_info_cnt		const[0, int32]
+	line_info_rec_size	const[0, int32]
+	line_info		const[0, int64]
+	line_info_cnt		const[0, int32]
+	attach_btf_id		BTF_ID
+	attach_prog_fd		const[0, int32]
+} [packed]
+
+type kavach_insn[CODE, DST, SRC, OFF, IMM] {
+	code	const[CODE, int8]
+	dst	const[DST, int8:4]
+	src	const[SRC, int8:4]
+	off	const[OFF, int16]
+	imm	IMM
+} [packed]
+
+# BPF_ST | BPF_MEM | BPF_DW (0x7a): *(u64 *)(r10 + OFF) = (s32)IMM
+type kavach_st_dw[OFF, IMM] kavach_insn[0x7a, 10, 0, OFF, IMM]
+
+kavach_req_tail {
+	port	int16
+	proto	flags[kavach_protos, int8]
+	dir	flags[kavach_dirs, int8]
+} [packed]
+
+# pol__sz: exact, too small by one rule / to a header, oversized (verifier rejects), zero.
+kavach_policy_sizes = 49216, 49168, 64, 1, 49217, 0
+
+type kavach_prog_body[RET] {
+	key	kavach_insn[0x62, 10, 0, -4, const[0, int32]]
+	key_r2	kavach_insn[0xbf, 2, 10, 0, const[0, int32]]
+	key_add	kavach_insn[0x07, 2, 0, 0, const[-4, int32]]
+	map	bpf_insn_map_fd_t[const[1, int8:4], fd_kavach_policy_map]
+	lookup	kavach_insn[0x85, 0, 0, 0, const[1, int32]]
+	null	kavach_insn[0x15, 0, 0, 14, const[0, int32]]
+	pol	kavach_insn[0xbf, 1, 0, 0, const[0, int32]]
+	size	kavach_insn[0xb7, 2, 0, 0, flags[kavach_policy_sizes, int32]]
+	mask	kavach_st_dw[-40, int32]
+	sets	kavach_st_dw[-32, int32]
+	now	kavach_st_dw[-24, int32]
+	tail	kavach_st_dw[-16, kavach_req_tail]
+	res	kavach_st_dw[-48, const[0, int32]]
+	req_r3	kavach_insn[0xbf, 3, 10, 0, const[0, int32]]
+	req_add	kavach_insn[0x07, 3, 0, 0, const[-40, int32]]
+	res_r4	kavach_insn[0xbf, 4, 10, 0, const[0, int32]]
+	res_add	kavach_insn[0x07, 4, 0, 0, const[-48, int32]]
+	call	kavach_insn[0x85, 0, BPF_PSEUDO_KFUNC_CALL, 0, kavach_kfunc_btf_id]
+	ret	RET
+	exit	kavach_insn[0x95, 0, 0, 0, const[0, int32]]
+	out	kavach_insn[0xb7, 0, 0, 0, const[0, int32]]
+	exit2	kavach_insn[0x95, 0, 0, 0, const[0, int32]]
+} [packed]
+
+# BPF_LDX | BPF_MEM | BPF_B (0x71): r0 = *(u8 *)(r10 - 44), kavach_eval_res.verdict
+type kavach_ret_verdict kavach_insn[0x71, 0, 10, -44, const[0, int32]]
+# BPF_ALU64 | BPF_MOV | BPF_K: r0 = 0
+type kavach_ret_zero kavach_insn[0xb7, 0, 0, 0, const[0, int32]]
+
+kavach_raw_tp_open {
+	name	const[0, int64]
+	prog_fd	fd_kavach_lsm_prog
+} [align[8]]
+
+# --- test run -------------------------------------------------------------------------------
+
+kavach_test_run {
+	prog		fd_kavach_tc_prog
+	retval		const[0, int32]
+	insizedata	len[indata, int32]
+	outsizedata	len[outdata, int32]
+	indata		ptr64[in, array[int8, 14:128]]
+	outdata		ptr64[out, array[int8, 128]]
+	repeat		int32[0:8]
+	dur		const[0, int32]
+	insizectx	const[0, int32]
+	outsizectx	const[0, int32]
+	inctx		const[0, int64]
+	outctx		const[0, int64]
+	flags		const[0, int32]
+	cpu		const[0, int32]
+	batch_size	const[0, int32]
+}

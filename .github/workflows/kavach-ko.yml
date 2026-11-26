@@ -1,0 +1,96 @@
+name: kavach-ko
+# kavach.ko (kernel/kavach-ko) on a Rust-enabled kernel built from source, booted under
+# virtme-ng: module build + BTF check, the differential self-test (kavach_evaluate vs the C
+# kv_evaluate) and the privileged eBPF suite with the module loaded; optionally syzkaller on a
+# KASAN kernel with kavach built in (SRS SR-6). Each run compiles one or two kernels, so it is
+# manual only: no push, pull_request or schedule triggers (Actions minutes).
+# Everything runs through kernel/kavach-ko/ci.sh, which also works locally.
+on:
+  workflow_dispatch:
+    inputs:
+      kernel:
+        description: "stable kernel tag to build (Rust support must be usable with stable rustc)"
+        required: false
+        default: "v7.1.9"
+      fuzz_minutes:
+        description: "syzkaller run length in minutes (0 = skip fuzzing)"
+        required: false
+        default: "0"
+permissions:
+  contents: read
+concurrency:
+  group: kavach-ko-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  CARGO_TERM_COLOR: always
+  VIRTME_NG_VERSION: "1.42"
+  KAVACH_KO_KERNEL: ${{ inputs.kernel }}
+  KAVACH_KO_WORK: ${{ github.workspace }}/target/kavach-ko
+
+jobs:
+  module:
+    name: build + self-test (${{ inputs.kernel }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: ./scripts/ci-deps.sh
+      - run: ./kernel/kavach-ko/ci.sh deps
+      - name: install virtme-ng + qemu
+        run: |
+          sudo apt-get install -y -qq --no-install-recommends qemu-system-x86 udev iproute2 \
+            busybox-static coreutils kmod python3-requests python3-argcomplete file zstd virtiofsd
+          if [ -x /usr/bin/gnuenv ]; then sudo ln -sf gnuenv /usr/bin/env; fi
+          pipx install "virtme-ng==${VIRTME_NG_VERSION}"
+      - name: enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - run: ./kernel/kavach-ko/host-check.sh
+      - run: ./kernel/kavach-ko/ci.sh kernel
+      - run: ./kernel/kavach-ko/ci.sh module
+      - run: ./kernel/kavach-ko/ci.sh selftest
+      - name: upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kavach-ko-logs
+          path: ${{ env.KAVACH_KO_WORK }}/results
+          if-no-files-found: ignore
+          retention-days: 14
+
+  syzkaller:
+    name: syzkaller (${{ inputs.fuzz_minutes }} min)
+    if: inputs.fuzz_minutes != '0'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - run: ./kernel/kavach-ko/ci.sh deps
+      - run: sudo apt-get install -y -qq --no-install-recommends qemu-system-x86 debootstrap
+      - name: enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - run: ./kernel/kavach-ko/ci.sh kernel --fuzz
+      - run: ./kernel/kavach-ko/ci.sh syz "$FUZZ_MINUTES"
+        env:
+          FUZZ_MINUTES: ${{ inputs.fuzz_minutes }}
+      - name: upload crashes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: syzkaller-crashes
+          path: ${{ env.KAVACH_KO_WORK }}/syz-workdir/crashes
+          if-no-files-found: ignore
+          retention-days: 30
