@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Policy evaluation shared by the LSM and TC programs. The Rust reference implementation in
- * crates/kavach-core/src/eval.rs MUST implement exactly the same semantics; the differential test
+ * crates/kavach-core/src/lib.rs MUST implement exactly the same semantics; the differential test
  * suite feeds identical tables and flows to both and asserts equal verdicts.
  *
  * Protocol (FR-HS-2): read policy_gen ONCE, derive slot = gen & 1, and use that slot for every
@@ -11,6 +11,15 @@
 #define KAVACH_EVAL_H
 
 #include "kavach_bpf.h"
+#include "kavach_kfunc.h"
+
+/*
+ * kavach.ko (kernel/kavach-ko) exports the Rust kavach-core evaluator as this kfunc. Declared
+ * weak: without the module the loader resolves it to 0, bpf_ksym_exists() is a constant false and
+ * the verifier removes the call as dead code, so the object still loads on 6.1+ kernels.
+ */
+extern int kavach_evaluate(const void *pol, __u32 pol__sz, const struct kavach_eval_req *req,
+			   struct kavach_eval_res *res) __ksym __weak;
 
 struct kv_snapshot {
 	struct kv_policy *pol;
@@ -126,11 +135,34 @@ static __always_inline void kv_evaluate(const struct kv_snapshot *s, __u8 dir, _
 					const __u32 *remote, __u16 port_host, __u8 proto,
 					struct kv_decision *d)
 {
+	__u64 sets = kv_remote_sets(s->slot, remote);
+	__u64 now = bpf_ktime_get_boot_ns();
+
+	if (bpf_ksym_exists(kavach_evaluate)) {
+		struct kavach_eval_req req = {
+			.mask = mask,
+			.sets = sets,
+			.now_ns = now,
+			.port = port_host,
+			.proto = proto,
+			.dir = dir,
+		};
+		struct kavach_eval_res res = {};
+
+		if (kavach_evaluate(s->pol, sizeof(*s->pol), &req, &res) == 0) {
+			d->rule_id = res.rule_id;
+			d->verdict = res.verdict;
+			d->punted = res.punted;
+			return;
+		}
+		/* Size mismatch (module built for another ABI): fall through to the C mirror. */
+	}
+
 	struct kv_eval_ctx c = {
 		.pol = s->pol,
 		.mask = mask,
-		.sets = kv_remote_sets(s->slot, remote),
-		.now = bpf_ktime_get_boot_ns(),
+		.sets = sets,
+		.now = now,
 		.port = port_host,
 		.proto = proto,
 		.dir = dir,
@@ -159,6 +191,10 @@ static __always_inline void kv_evaluate(const struct kv_snapshot *s, __u8 dir, _
 		d->verdict = dir == KV_DIR_EGRESS ? s->pol->hdr.default_egress
 						  : s->pol->hdr.default_ingress;
 	}
+	/* An out-of-range verdict fails closed, as Verdict::from_u8(..).unwrap_or(Drop) does in
+	 * kavach-core (found by kernel/kavach-ko/selftest.py). */
+	if (d->verdict > KV_VERDICT_PUNT)
+		d->verdict = KV_VERDICT_DROP;
 }
 
 #endif /* KAVACH_EVAL_H */
