@@ -14,6 +14,9 @@ kavach-parsers = { path = "../crates/kavach-parsers" }
 kavach-policy = { path = "../crates/kavach-policy" }
 kavach-api = { path = "../crates/kavach-api" }
 kavach-gateway = { path = "../crates/kavach-gateway" }
+kavach-common = { path = "../crates/kavach-common" }
+kavach-core = { path = "../crates/kavach-core" }
+bytemuck = "1"
 serde_json = "1"
 
 [workspace]
@@ -63,6 +66,13 @@ bench = false
 [[bin]]
 name = "gateway_framing"
 path = "fuzz_targets/gateway_framing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "kfunc_evaluate"
+path = "fuzz_targets/kfunc_evaluate.rs"
 test = false
 doc = false
 bench = false
