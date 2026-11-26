@@ -35,6 +35,8 @@ rustls-pki-types = { version = "1", features = ["std"] }
 [dev-dependencies]
 tempfile = "3"
 hex = "0.4"
+# Same version and features aya-obj already pulls in (no new crate): ELF symbol checks in tests.
+object = { version = "0.40", default-features = false, features = ["elf", "read_core"] }
 
 [lints]
 workspace = true

@@ -457,7 +457,8 @@ fn differential_tc_ingress_vs_core() {
 }
 
 /// The same 400 flows with kavach.ko loaded (v0.4): the verdicts must not change. Skipped when
-/// the module is not loaded (`make -C kernel/kavach-ko && insmod kernel/kavach-ko/kavach.ko`).
+/// the module is not loaded; `kernel/kavach-ko/ci.sh selftest` runs this suite with it loaded,
+/// inside a virtme-ng guest (never insmod it on the host).
 #[test]
 #[ignore = "needs root + kavach.ko: scripts/priv-test.sh"]
 fn differential_tc_ingress_vs_core_with_kavach_ko() {
@@ -472,6 +473,254 @@ fn differential_tc_ingress_vs_core_with_kavach_ko() {
         ),
     }
     differential_tc_ingress(&mut Fixture::new());
+}
+
+/// Differential corpus over *raw* policy tables (not only what the compiler emits): random
+/// rule mixes incl. Punt with both fail modes, out-of-range and Punt verdicts and defaults, expired and
+/// unexpired TTLs, address sets that are empty or out of the 64-bit range, protocol/port
+/// edges, and an `n_rules` above `KV_MAX_RULES`. The C `kv_evaluate` (whichever evaluator the
+/// loaded programs use) must give kavach-core's verdict on every flow; kavach-core is also
+/// what kavach.ko runs, so this pins the evaluator kavach.ko replaces.
+#[test]
+#[ignore = "needs root: scripts/priv-test.sh"]
+fn differential_random_policy_tables_vs_core() {
+    let mut f = Fixture::new();
+    // Compiled policy only for its address sets (two sets in the active slot).
+    let p = f.apply_toml(INGRESS_POLICY);
+    let generation = f.d().generation;
+    let slot = generation & 1;
+    let offline = OfflineTables::new(&p, &Facts::default(), &[], slot);
+
+    let mut seed: u64 = 0x0dd5_eed5;
+    let mut rnd = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    let pick = |r: u64, xs: &[u64]| xs[(r % xs.len() as u64) as usize];
+    let srcs: [[u8; 4]; 5] = [
+        [10, 1, 2, 0],
+        [192, 0, 2, 0],
+        [8, 8, 8, 0],
+        [172, 16, 0, 0],
+        [203, 0, 113, 0],
+    ];
+    let ports = [0u64, 1, 22, 53, 80, 443, 3306, 8080, 65535];
+    let mut table: Box<Policy> = Box::default();
+    let mut sport = 1024u16;
+    let (mut flows, mut drops) = (0u32, 0u32);
+    for round in 0..24u32 {
+        let n = match round {
+            0 => 0,
+            1 => KV_MAX_RULES as usize,
+            _ => 1 + (rnd() % 48) as usize,
+        };
+        *table = Policy::default();
+        table.hdr.n_rules = if round == 1 { 5000 } else { n as u32 };
+        table.hdr.flags = KV_POL_F_VALID;
+        table.hdr.default_egress = pick(rnd(), &[0, 1, 2, 3, 9]) as u8;
+        table.hdr.default_ingress = pick(rnd(), &[0, 1, 2, 3, 9]) as u8;
+        table.hdr.generation = generation;
+        for (i, r) in table.rules[..n].iter_mut().enumerate() {
+            let lo = pick(rnd(), &ports) as u16;
+            *r = Rule {
+                sel: pick(rnd(), &[0, 0, 0, 1]),
+                id: 1000 + i as u32,
+                remote_set: pick(rnd(), &[0, 0, 1, 2, 3, 65]) as u32,
+                port_lo: lo,
+                port_hi: pick(rnd(), &[lo as u64, lo as u64, 65535, 443]).max(lo as u64) as u16,
+                proto: pick(rnd(), &[0, 0, 6, 17, 1]) as u8,
+                dir: if rnd() % 5 == 0 {
+                    KV_DIR_EGRESS
+                } else {
+                    KV_DIR_INGRESS
+                },
+                verdict: pick(rnd(), &[0, 0, 1, 2, 3, 7]) as u8,
+                fail: if rnd() & 1 == 0 {
+                    KV_FAIL_OPEN
+                } else {
+                    KV_FAIL_CLOSED
+                },
+                // 1 ns after boot is long past; u64::MAX never comes.
+                not_after_ns: pick(rnd(), &[0, 0, 1, u64::MAX]),
+                gateway: pick(rnd(), &[0, 1]) as u16,
+                ..Rule::default()
+            };
+        }
+        f.k().write_slot(slot, &table).unwrap();
+        let snap = Snapshot::new(&table, generation).unwrap();
+        for _ in 0..60 {
+            let r = rnd();
+            let mut src = srcs[(r % 5) as usize];
+            src[3] = ((r >> 8) % 250) as u8 + 1;
+            let dport = pick(r >> 16, &ports[2..]) as u16;
+            let proto = if (r >> 32) & 1 == 0 { 6 } else { 17 };
+            sport = sport.wrapping_add(1).max(1024); // unique 5-tuple => always a new flow
+            let pkt = v4_pkt(
+                Ipv4Addr::from(src),
+                Ipv4Addr::new(10, 9, 9, 9),
+                proto,
+                sport,
+                dport,
+                TCP_SYN,
+                &[],
+            );
+            let kernel_verdict = f.tc("kavach_tc_ingress", &pkt);
+            let q = FlowQuery {
+                dir: KV_DIR_INGRESS,
+                mask: 0,
+                remote: to_mapped(IpAddr::V4(Ipv4Addr::from(src))),
+                port: dport,
+                proto,
+            };
+            let d = kavach_core::evaluate(&offline, &snap, &q, kernel::boot_ns());
+            let core_verdict = if d.verdict == Verdict::Drop {
+                TC_SHOT
+            } else {
+                TC_OK
+            };
+            assert_eq!(
+                kernel_verdict, core_verdict,
+                "round {round}: divergence on {src:?} {proto}/{dport}: core={d:?}"
+            );
+            flows += 1;
+            drops += u32::from(core_verdict == TC_SHOT);
+        }
+    }
+    eprintln!("{flows} flows over 24 raw tables, {drops} dropped: C == kavach-core");
+    assert!(drops > 0 && drops < flows, "corpus exercises both outcomes");
+}
+
+/// Fallback (v0.4) on a kernel without kavach.ko: the weak `kavach_evaluate` ksym stays
+/// unresolved, every caller of `kv_evaluate` (LSM connect/sendmsg, TC ingress/egress) passes the
+/// verifier with the kfunc call eliminated as dead code, kavachd reports the built-in
+/// evaluator, and the C evaluator's verdicts equal kavach-core's.
+#[test]
+#[ignore = "needs root: scripts/priv-test.sh"]
+fn evaluator_falls_back_to_c_without_kavach_ko() {
+    use aya::programs::Lsm;
+    if std::path::Path::new(kernel::KAVACH_KO_BTF).exists() {
+        eprintln!("skipping: kavach.ko is loaded (this test checks the fallback)");
+        return;
+    }
+    assert_eq!(kernel::evaluator(), kernel::Evaluator::Builtin);
+
+    let mut f = Fixture::new();
+    let btf = aya::Btf::from_sys_fs().unwrap();
+    for (name, hook) in [
+        ("kavach_connect", "socket_connect"),
+        ("kavach_sendmsg", "socket_sendmsg"),
+    ] {
+        let prog: &mut Lsm = f
+            .k()
+            .bpf_mut()
+            .program_mut(name)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        prog.load(hook, &btf)
+            .unwrap_or_else(|e| panic!("verifier rejected {name}: {e:?}"));
+        assert_no_kfunc_call(name, prog.fd().unwrap());
+    }
+    for name in ["kavach_tc_ingress", "kavach_tc_egress"] {
+        let prog: &mut SchedClassifier = f
+            .k()
+            .bpf_mut()
+            .program_mut(name)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        prog.load()
+            .unwrap_or_else(|e| panic!("verifier rejected {name}: {e:?}"));
+        assert_no_kfunc_call(name, prog.fd().unwrap());
+    }
+    differential_tc_ingress(&mut f);
+}
+
+/// The verifier-translated instructions of `fd` contain no kfunc call (`BPF_PSEUDO_KFUNC_CALL`).
+fn assert_no_kfunc_call(name: &str, fd: &aya::programs::ProgramFd) {
+    let insns = xlated_insns(fd);
+    assert!(!insns.is_empty(), "{name}: no translated instructions");
+    const CALL: u8 = 0x85; // BPF_JMP | BPF_CALL
+    const PSEUDO_KFUNC_CALL: u8 = 2;
+    let kfunc_calls = insns
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .filter(|i| i[0] == CALL && i[1] >> 4 == PSEUDO_KFUNC_CALL)
+        .count();
+    // Sanity check of the decoding: every caller makes helper calls (map lookups, ...).
+    let helper_calls = insns
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .filter(|i| i[0] == CALL && i[1] >> 4 == 0)
+        .count();
+    assert!(helper_calls > 0, "{name}: no helper calls decoded");
+    assert_eq!(
+        kfunc_calls, 0,
+        "{name}: kfunc call survived without kavach.ko"
+    );
+}
+
+/// `BPF_OBJ_GET_INFO_BY_FD` → `xlated_prog_insns` (aya does not expose them).
+fn xlated_insns(fd: &aya::programs::ProgramFd) -> Vec<u8> {
+    use std::os::fd::{AsFd, AsRawFd};
+    // The leading fields of `struct bpf_prog_info`; the kernel fills min(info_len, its size).
+    #[repr(C)]
+    #[derive(Default)]
+    struct ProgInfo {
+        prog_type: u32,
+        id: u32,
+        tag: [u8; 8],
+        jited_prog_len: u32,
+        xlated_prog_len: u32,
+        jited_prog_insns: u64,
+        xlated_prog_insns: u64,
+    }
+    #[repr(C)]
+    struct InfoAttr {
+        bpf_fd: u32,
+        info_len: u32,
+        info: u64,
+    }
+    const BPF_OBJ_GET_INFO_BY_FD: nix::libc::c_long = 15;
+    let raw = fd.as_fd().as_raw_fd() as u32;
+    let get = |info: &mut ProgInfo| {
+        let mut attr = InfoAttr {
+            bpf_fd: raw,
+            info_len: size_of::<ProgInfo>() as u32,
+            info: info as *mut ProgInfo as u64,
+        };
+        // SAFETY: bpf(2) with a valid attr for this command; the kernel writes at most
+        // `info_len` bytes to `info` and `xlated_prog_len` bytes to `xlated_prog_insns`.
+        let r = unsafe {
+            nix::libc::syscall(
+                nix::libc::SYS_bpf,
+                BPF_OBJ_GET_INFO_BY_FD,
+                &mut attr as *mut InfoAttr,
+                size_of::<InfoAttr>() as u32,
+            )
+        };
+        assert_eq!(
+            r,
+            0,
+            "BPF_OBJ_GET_INFO_BY_FD: {}",
+            std::io::Error::last_os_error()
+        );
+    };
+    let mut info = ProgInfo::default();
+    get(&mut info);
+    let mut buf = vec![0u8; info.xlated_prog_len as usize];
+    let mut info = ProgInfo {
+        xlated_prog_len: buf.len() as u32,
+        xlated_prog_insns: buf.as_mut_ptr() as u64,
+        ..ProgInfo::default()
+    };
+    get(&mut info);
+    buf.truncate(info.xlated_prog_len as usize);
+    buf
 }
 
 fn differential_tc_ingress(f: &mut Fixture) {

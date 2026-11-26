@@ -67,15 +67,62 @@ pub enum Evaluator {
 
 /// Detect `kavach.ko` and report which evaluator the loaded programs use.
 pub fn evaluator() -> Evaluator {
-    if Path::new(KAVACH_KO_BTF).exists() {
+    evaluator_from(Path::new(KAVACH_KO_BTF))
+}
+
+/// [`evaluator`] for a given module-BTF path (tests point it elsewhere).
+pub fn evaluator_from(module_btf: &Path) -> Evaluator {
+    if module_btf.exists() {
         Evaluator::ModuleUnbound
     } else {
         Evaluator::Builtin
     }
 }
 
+impl Evaluator {
+    /// The line kavachd logs after loading the programs.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Evaluator::Builtin => "policy evaluator: built-in (kavach.ko not loaded)",
+            Evaluator::ModuleUnbound => {
+                "policy evaluator: built-in; kavach.ko is loaded but the eBPF loader cannot bind \
+                 module kfuncs yet, so kavach_evaluate is unused (verdicts are identical)"
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod abi_tests {
+    use super::{Evaluator, OBJECT, evaluator_from};
+
+    #[test]
+    fn evaluator_reports_the_module_only_when_its_btf_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let btf = dir.path().join("kavach");
+        assert_eq!(evaluator_from(&btf), Evaluator::Builtin);
+        assert!(Evaluator::Builtin.describe().contains("not loaded"));
+        std::fs::write(&btf, b"").unwrap();
+        assert_eq!(evaluator_from(&btf), Evaluator::ModuleUnbound);
+        assert!(Evaluator::ModuleUnbound.describe().contains("unused"));
+    }
+
+    /// The fallback is real only if the object references the kfunc *weakly*: a strong ksym
+    /// would make every load fail without kavach.ko, no reference would mean the module is never
+    /// used. (The privileged suite checks the verifier removed the call: bpf.rs
+    /// `evaluator_falls_back_to_c_without_kavach_ko`.)
+    #[test]
+    fn object_references_kavach_evaluate_as_a_weak_ksym() {
+        use object::{Object, ObjectSymbol};
+        let obj = object::File::parse(OBJECT).expect("parse kavach.bpf.o");
+        let sym = obj
+            .symbols()
+            .find(|s| s.name() == Ok("kavach_evaluate"))
+            .expect("kavach.bpf.o references kavach_evaluate");
+        assert!(sym.is_undefined(), "kavach_evaluate is an extern");
+        assert!(sym.is_weak(), "kavach_evaluate must be __weak");
+    }
+
     #[test]
     fn abi_version_tracks_the_layout() {
         assert_eq!(
@@ -161,13 +208,7 @@ impl Kernel {
                 return Err(e).context("loading eBPF object");
             }
         };
-        match evaluator() {
-            Evaluator::Builtin => info!("policy evaluator: built-in (kavach.ko not loaded)"),
-            Evaluator::ModuleUnbound => info!(
-                "policy evaluator: built-in; kavach.ko is loaded but the eBPF loader cannot bind \
-                 module kfuncs yet, so kavach_evaluate is unused (verdicts are identical)"
-            ),
-        }
+        info!("{}", evaluator().describe());
         let sync_inner = bpf.take_map("sync_inner").and_then(|m| match m {
             aya::maps::Map::Array(d) => Some(d),
             _ => None,

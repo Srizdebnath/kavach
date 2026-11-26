@@ -1035,6 +1035,7 @@ dependencies = [
  "kavach-gateway",
  "kavach-policy",
  "nix",
+ "object",
  "postcard",
  "rustls",
  "rustls-pki-types",
