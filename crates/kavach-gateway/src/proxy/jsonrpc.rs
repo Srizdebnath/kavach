@@ -11,6 +11,8 @@ use crate::{Action, Decision, ParseError, ToolPolicy, classify};
 
 /// JSON-RPC error code for a policy denial.
 pub const DENIED: i64 = -32001;
+/// JSON-RPC error code for a rate/spend budget denial (`FR-GW-3`).
+pub const BUDGET_EXCEEDED: i64 = -32003;
 /// JSON-RPC parse error.
 pub const PARSE_ERROR: i64 = -32700;
 /// JSON-RPC invalid request.
@@ -47,6 +49,12 @@ pub enum Reason {
     TlsPassthrough,
     /// The first bytes are no protocol the gateway speaks.
     UnknownProtocol,
+    /// No valid agent credential for a gateway that requires one (`FR-GW-1`).
+    Unauthenticated,
+    /// The authenticated agent has been disabled with the kill-switch (`FR-GW-4`).
+    AgentDisabled,
+    /// A calls/min or USD/day limit would be exceeded (`FR-GW-3`).
+    Budget,
 }
 
 impl Reason {
@@ -73,6 +81,8 @@ pub struct Inspection {
     pub target: Option<String>,
     /// The request id; `None` for notifications and unparseable frames.
     pub id: Option<Value>,
+    /// Authenticated agent id (`FR-GW-1`), carried into the audit event.
+    pub agent_id: Option<String>,
 }
 
 impl Inspection {
@@ -83,6 +93,7 @@ impl Inspection {
             method: None,
             target: None,
             id: None,
+            agent_id: None,
         }
     }
 }
@@ -154,6 +165,7 @@ pub fn inspect(policy: Option<&ToolPolicy>, frame: &[u8], max: usize) -> Inspect
         method,
         target,
         id,
+        agent_id: None,
     }
 }
 
@@ -175,6 +187,18 @@ pub fn error_body(i: &Inspection, gateway: &str, rule_id: u32) -> Vec<u8> {
             INVALID_REQUEST
         };
         (code, format!("kavach: frame refused ({:?})", i.reason))
+    } else if i.reason == Reason::Budget {
+        (
+            BUDGET_EXCEEDED,
+            format!("budget exceeded for gateway {gateway}"),
+        )
+    } else if i.reason == Reason::Unauthenticated {
+        (
+            DENIED,
+            format!("agent authentication required by kavach policy {gateway}"),
+        )
+    } else if i.reason == Reason::AgentDisabled {
+        (DENIED, "agent is disabled by kavach kill-switch".into())
     } else {
         (DENIED, format!("denied by kavach policy {gateway}"))
     };
@@ -190,6 +214,7 @@ pub fn error_body(i: &Inspection, gateway: &str, rule_id: u32) -> Vec<u8> {
                 "reason": i.reason,
                 "method": i.method,
                 "target": i.target,
+                "agent": i.agent_id,
             },
         },
     });

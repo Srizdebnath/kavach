@@ -264,7 +264,10 @@ pub struct RuleSpec {
     pub comment: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+/// `[[agent]]` — an L7 agent identity (FR-GW-1/3/4). All credential fields are optional so
+/// policies written before v0.4 keep parsing unchanged; an agent with `require_auth = true` but
+/// no credential is refused at compile time (it could never be satisfied).
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct AgentSpec {
     pub id: String,
@@ -272,6 +275,29 @@ pub struct AgentSpec {
     pub mcp: Option<McpSpec>,
     #[serde(default)]
     pub budget: Option<BudgetSpec>,
+    /// Lowercase hex SHA-256 of the bearer token the agent presents to the gateway.
+    #[serde(default)]
+    pub token_sha256: Option<String>,
+    /// Exact SPIFFE ID or ID pattern ending in `/*`, resolved from the connection's cgroup.
+    #[serde(default)]
+    pub spiffe_id: Option<String>,
+    /// Refuse every frame unless a configured credential identifies this agent.
+    #[serde(default)]
+    pub require_auth: bool,
+    /// Optional binding to a `[gateway.<name>]` policy; an authenticated agent can only reach
+    /// that gateway.
+    #[serde(default)]
+    pub gateway: Option<String>,
+}
+
+impl AgentSpec {
+    /// Whether this agent needs the format-3 credential extension in a signed bundle.
+    pub fn uses_credentials(&self) -> bool {
+        self.token_sha256.is_some()
+            || self.spiffe_id.is_some()
+            || self.require_auth
+            || self.gateway.is_some()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -280,11 +306,19 @@ pub struct McpSpec {
     pub tools: Vec<String>,
 }
 
+/// Default price of one tool call, in USD (FR-GW-3).
+pub fn default_usd_per_call() -> f64 {
+    0.001
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct BudgetSpec {
     pub calls_per_min: Option<u32>,
     pub usd_per_day: Option<f64>,
+    /// Price charged per tool call; used by the UTC-day spend accumulator.
+    #[serde(default = "default_usd_per_call")]
+    pub usd_per_call: f64,
 }
 
 impl PolicyFile {

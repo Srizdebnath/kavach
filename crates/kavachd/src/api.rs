@@ -16,7 +16,8 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Notify, broadcast};
 use tracing::{info, warn};
 
-use crate::daemon::Daemon;
+use crate::daemon::{Audit, Daemon};
+use crate::gateway_policies::GatewayPolicies;
 use crate::kernel;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,6 +127,44 @@ async fn client(
                         Err(_) => return Ok(()),
                     }
                 }
+            }
+            Request::AgentKillSwitch { id, disabled } => {
+                let resp = if role != Role::Root {
+                    Response::Error {
+                        message: "agent kill-switch requires root".into(),
+                    }
+                } else {
+                    let r = (|| -> Result<()> {
+                        let mut st = state.lock().map_err(|_| anyhow!("state poisoned"))?;
+                        let gateways = st.gateways.clone();
+                        set_agent_disabled(&gateways, &mut st.audit, &id, disabled)
+                    })();
+                    match r {
+                        Ok(()) => {
+                            warn!(%id, disabled, "per-agent kill-switch changed (BPF untouched)");
+                            Response::Ok
+                        }
+                        Err(e) => Response::Error {
+                            message: e.to_string(),
+                        },
+                    }
+                };
+                wr.write_all(&encode(&resp)).await?;
+            }
+            Request::AgentStatus => {
+                let resp = {
+                    let st = state.lock().map_err(|_| anyhow!("state poisoned"))?;
+                    Response::AgentStatus {
+                        disabled: st.gateways.disabled_agents(),
+                        known: {
+                            let mut v: Vec<_> =
+                                st.gateways.snapshot().agents.keys().cloned().collect();
+                            v.sort();
+                            v
+                        },
+                    }
+                };
+                wr.write_all(&encode(&resp)).await?;
             }
             Request::KillSwitch => {
                 let resp = if role != Role::Root {
@@ -295,8 +334,30 @@ fn handle_inner(st: &mut Daemon, req: Request) -> Result<Response> {
             serial: st.serial,
             generation: st.generation,
         },
-        Request::Events | Request::KillSwitch => unreachable!("handled by the async client loop"),
+        Request::Events
+        | Request::KillSwitch
+        | Request::AgentKillSwitch { .. }
+        | Request::AgentStatus => unreachable!("handled by the async client loop"),
     })
+}
+
+/// The state change behind `Request::AgentKillSwitch` (FR-GW-4): gate on a known agent id,
+/// flip the shared runtime set, and write an audit record. No BPF operation is involved.
+fn set_agent_disabled(
+    gateways: &GatewayPolicies,
+    audit: &mut Audit,
+    id: &str,
+    disabled: bool,
+) -> Result<()> {
+    if !gateways.snapshot().agents.contains_key(id) {
+        anyhow::bail!("unknown agent {id:?}");
+    }
+    gateways.set_agent_disabled(id, disabled);
+    audit.record(
+        "agent_kill_switch",
+        json!({ "id": id, "disabled": disabled }),
+    );
+    Ok(())
 }
 
 fn parse_net(s: &str) -> Result<IpNet> {
@@ -304,4 +365,39 @@ fn parse_net(s: &str) -> Result<IpNet> {
         .or_else(|_| std::net::IpAddr::from_str(s).map(IpNet::from))
         .map(|n| n.trunc())
         .map_err(|_| anyhow!("{s:?} is not an IP or CIDR"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_kill_switch_updates_runtime_state_and_audits() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut audit = Audit::open(&dir.path().join("audit.log"));
+        let gateways = GatewayPolicies::new();
+        let p = kavach_policy::compile(
+            r#"
+version = 1
+[[agent]]
+id = "bot"
+require_auth = true
+token_sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+"#,
+            0,
+        )
+        .unwrap()
+        .policy;
+        gateways.publish(&p, 1);
+
+        assert!(set_agent_disabled(&gateways, &mut audit, "missing", true).is_err());
+        set_agent_disabled(&gateways, &mut audit, "bot", true).unwrap();
+        assert!(gateways.agent_disabled("bot"));
+        set_agent_disabled(&gateways, &mut audit, "bot", false).unwrap();
+        assert!(!gateways.agent_disabled("bot"));
+
+        let text = std::fs::read_to_string(dir.path().join("audit.log")).unwrap();
+        assert!(text.contains("agent_kill_switch"), "{text}");
+        assert!(text.contains("\"disabled\":true"), "{text}");
+    }
 }

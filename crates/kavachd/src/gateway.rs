@@ -94,6 +94,7 @@ pub fn orig_info(r: &PuntRecord, gateways: &GatewaySnapshot) -> OrigInfo {
         gateway: gateways.rules.get(&r.rule_id).cloned().unwrap_or_default(),
         cgroup_id: r.cgroup_id,
         pid: r.pid,
+        agent_id: None,
     }
 }
 
@@ -446,6 +447,19 @@ impl PolicySource for BundlePolicies {
         }
         snap.policy(&info.gateway).cloned().map(Arc::new)
     }
+
+    fn agents(&self) -> Vec<(String, Arc<kavach_gateway::AgentPolicy>)> {
+        self.0
+            .snapshot()
+            .agents
+            .iter()
+            .map(|(id, p)| (id.clone(), Arc::new(p.clone())))
+            .collect()
+    }
+
+    fn agent_disabled(&self, id: &str) -> bool {
+        self.0.agent_disabled(id)
+    }
 }
 
 /// Run the L7 proxy on `[gateway] listen` (and `listen6`, when set) until `shutdown`. The
@@ -457,13 +471,22 @@ pub async fn serve_proxy(
     orig: Arc<PinnedOrigDst>,
     policies: GatewayPolicies,
     events: Arc<dyn EventSink>,
+    agent_resolver: Option<Arc<dyn kavach_gateway::AgentResolver>>,
     shutdown: impl std::future::Future<Output = ()>,
 ) -> io::Result<()> {
     let policies: Arc<dyn PolicySource> = Arc::new(BundlePolicies(policies));
     let bind = |listen: SocketAddr| {
         let mut cfg = g.proxy.clone();
         cfg.listen = listen;
-        kavach_gateway::Gateway::bind(cfg, orig.clone(), policies.clone(), events.clone())
+        let resolver = agent_resolver.clone();
+        let (orig, policies, events) = (orig.clone(), policies.clone(), events.clone());
+        async move {
+            let gw = kavach_gateway::Gateway::bind(cfg, orig, policies, events).await?;
+            Ok::<_, io::Error>(match resolver {
+                Some(r) => gw.with_agent_resolver(r),
+                None => gw,
+            })
+        }
     };
     let proxy = bind(g.listen).await?;
     info!(listen = %g.listen, "L7 gateway proxy listening");
@@ -658,6 +681,7 @@ punt = { to = "203.0.113.0/24", port = 443, proto = "tcp", gateway = "other" }
             gateway: gw.into(),
             cgroup_id: 1,
             pid: 1,
+            agent_id: None,
         };
         assert!(src_.policy_for(&info(1, "mcp")).is_none(), "no bundle yet");
         h.publish(&kavach_policy::compile(src, 0).unwrap().policy, 1);
@@ -685,6 +709,7 @@ punt = { to = "203.0.113.0/24", port = 443, proto = "tcp", gateway = "other" }
             gateway: "mcp".into(),
             rule_id: 1,
             pid: 1,
+            agent_id: None,
             cgroup_id: 1,
             peer: "127.0.0.1:1".parse().unwrap(),
             dst: "198.51.100.1:443".parse().unwrap(),

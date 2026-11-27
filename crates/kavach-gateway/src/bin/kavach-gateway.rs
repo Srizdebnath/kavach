@@ -93,6 +93,7 @@ async fn main() -> Result<()> {
         gateway: file.upstream.gateway,
         cgroup_id: 0,
         pid: 0,
+        agent_id: None,
     }));
     let (tx, mut rx) = tokio::sync::mpsc::channel(4096);
     let sink = Arc::new(ChannelSink::new(tx));

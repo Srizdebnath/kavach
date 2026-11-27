@@ -28,7 +28,7 @@ pub mod http;
 pub mod jsonrpc;
 pub mod ws;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
@@ -40,7 +40,7 @@ use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 
-use crate::{Decision, ToolPolicy};
+use crate::{AgentPolicy, AgentResolver, Budgets, Decision, ToolPolicy};
 pub use jsonrpc::Reason;
 
 /// Where a redirected flow was going, and which rule sent it here.
@@ -56,6 +56,8 @@ pub struct OrigInfo {
     pub cgroup_id: u64,
     /// pid of the connecting process.
     pub pid: u32,
+    /// Agent id resolved by the caller from identity tables (audit attribution).
+    pub agent_id: Option<String>,
 }
 
 /// Recovers the original destination of a redirected connection.
@@ -105,11 +107,28 @@ impl OrigDst for MapOrigDst {
 pub trait PolicySource: Send + Sync {
     /// The policy for the flow described by `info`, or `None` (every frame is then denied).
     fn policy_for(&self, info: &OrigInfo) -> Option<Arc<ToolPolicy>>;
+
+    /// Agent identities and budgets currently enforced (`FR-GW-1/3`). The default empty set
+    /// preserves the behaviour of sources written before v0.4.
+    fn agents(&self) -> Vec<(String, Arc<AgentPolicy>)> {
+        Vec::new()
+    }
+
+    /// Whether this agent is disabled by the per-agent kill-switch (`FR-GW-4`).
+    fn agent_disabled(&self, id: &str) -> bool {
+        let _ = id;
+        false
+    }
 }
 
-/// Policies keyed by gateway name, replaced atomically as a whole.
+/// Policies keyed by gateway name, replaced atomically as a whole. Agent identities and the
+/// kill-switch set are independent, so a policy reload cannot re-enable a disabled agent.
 #[derive(Debug, Default)]
-pub struct PolicyStore(RwLock<Arc<HashMap<String, Arc<ToolPolicy>>>>);
+pub struct PolicyStore {
+    policies: RwLock<Arc<HashMap<String, Arc<ToolPolicy>>>>,
+    agents: RwLock<Arc<HashMap<String, AgentPolicy>>>,
+    disabled: RwLock<HashSet<String>>,
+}
 
 impl PolicyStore {
     /// A store holding `policies`.
@@ -125,13 +144,41 @@ impl PolicyStore {
             .into_iter()
             .map(|(k, v)| (k, Arc::new(v)))
             .collect();
-        *self.0.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(map);
+        *self.policies.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(map);
+    }
+
+    /// Swap in agent identities and budgets.
+    pub fn replace_agents(&self, agents: HashMap<String, AgentPolicy>) {
+        *self.agents.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(agents);
+    }
+
+    /// Disable (`true`) or re-enable (`false`) one agent immediately.
+    pub fn set_agent_disabled(&self, id: &str, disabled: bool) {
+        let mut set = self.disabled.write().unwrap_or_else(|e| e.into_inner());
+        if disabled {
+            set.insert(id.to_owned());
+        } else {
+            set.remove(id);
+        }
+    }
+
+    /// Agents currently disabled.
+    pub fn disabled_agents(&self) -> Vec<String> {
+        let mut v: Vec<_> = self
+            .disabled
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .cloned()
+            .collect();
+        v.sort();
+        v
     }
 
     /// The names currently loaded.
     pub fn names(&self) -> Vec<String> {
         let mut v: Vec<_> = self
-            .0
+            .policies
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .keys()
@@ -140,12 +187,10 @@ impl PolicyStore {
         v.sort();
         v
     }
-}
 
-impl PolicyStore {
     /// The policy named `gateway`.
     pub fn get(&self, gateway: &str) -> Option<Arc<ToolPolicy>> {
-        self.0
+        self.policies
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .get(gateway)
@@ -156,6 +201,22 @@ impl PolicyStore {
 impl PolicySource for PolicyStore {
     fn policy_for(&self, info: &OrigInfo) -> Option<Arc<ToolPolicy>> {
         self.get(&info.gateway)
+    }
+
+    fn agents(&self) -> Vec<(String, Arc<AgentPolicy>)> {
+        self.agents
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|(id, p)| (id.clone(), Arc::new(p.clone())))
+            .collect()
+    }
+
+    fn agent_disabled(&self, id: &str) -> bool {
+        self.disabled
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(id)
     }
 }
 
@@ -184,6 +245,8 @@ pub struct DecisionEvent {
     pub rule_id: u32,
     /// Process id of the agent.
     pub pid: u32,
+    /// Authenticated agent id, when the flow carried a recognised credential.
+    pub agent_id: Option<String>,
     /// cgroup of the agent.
     pub cgroup_id: u64,
     /// The agent's socket address.
@@ -341,6 +404,8 @@ pub(crate) struct Shared {
     policies: Arc<dyn PolicySource>,
     events: Arc<dyn EventSink>,
     stats: Arc<Stats>,
+    agent_resolver: Option<Arc<dyn AgentResolver>>,
+    budgets: Arc<Budgets>,
 }
 
 /// A bound gateway listener.
@@ -376,8 +441,25 @@ impl Gateway {
                 policies,
                 events,
                 stats: Arc::default(),
+                agent_resolver: None,
+                budgets: Arc::new(Budgets::default()),
             }),
         })
+    }
+
+    /// Supply a resolver that derives SPIFFE IDs from connection cgroups. Without one,
+    /// SPIFFE authentication is unavailable (bearer tokens still work).
+    pub fn with_agent_resolver(mut self, resolver: Arc<dyn AgentResolver>) -> Self {
+        let shared = Arc::get_mut(&mut self.shared).expect("gateway not serving yet");
+        shared.agent_resolver = Some(resolver);
+        self
+    }
+
+    /// Supply the shared call/spend counters (tests and custom clocks).
+    pub fn with_budgets(mut self, budgets: Arc<Budgets>) -> Self {
+        let shared = Arc::get_mut(&mut self.shared).expect("gateway not serving yet");
+        shared.budgets = budgets;
+        self
     }
 
     /// The bound address.

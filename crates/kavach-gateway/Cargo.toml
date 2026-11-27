@@ -13,6 +13,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 kavach-common = { workspace = true }
 kavach-parsers = { workspace = true }
+sha2 = { workspace = true }
 tokio = { workspace = true }
 libc = "0.2"
 tracing = { workspace = true }

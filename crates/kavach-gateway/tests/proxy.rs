@@ -10,8 +10,12 @@ use kavach_gateway::proxy::{
     DecisionEvent, FnSink, Gateway, MapOrigDst, OrigDst, OrigInfo, PolicyStore, Protocol,
     ProxyConfig, Reason, StaticOrigDst, ws,
 };
-use kavach_gateway::{Decision, TlsMode, ToolPolicy};
+use kavach_gateway::{
+    AgentPolicy, AgentResolver, Budgets, Decision, FnAgentResolver, ManualClock, TlsMode,
+    ToolPolicy,
+};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
@@ -246,6 +250,7 @@ fn info(dst: SocketAddr) -> OrigInfo {
         gateway: "dev".into(),
         cgroup_id: 7,
         pid: 1234,
+        agent_id: None,
     }
 }
 
@@ -1136,4 +1141,204 @@ async fn hostile_upstream_responses() {
     let mut s = h.connect().await;
     post(&mut s, "/mcp", &call(1, "search")).await;
     assert_eq!(read_response(&mut s, &mut Vec::new()).await.status, 502);
+}
+
+// --- FR-GW-1/3/4: agent identity, budgets, kill-switch ------------------------------------------
+
+/// A gateway with agent policies, optional budgets and an optional SPIFFE resolver.
+async fn secure_harness(
+    agents: HashMap<String, AgentPolicy>,
+    budgets: Option<Arc<Budgets>>,
+    resolver: Option<Arc<dyn AgentResolver>>,
+) -> Harness {
+    let seen: Seen = Arc::default();
+    let dst = http_upstream(seen.clone()).await;
+    let events: Arc<Mutex<Vec<DecisionEvent>>> = Arc::default();
+    let sink = {
+        let events = events.clone();
+        FnSink(move |e| events.lock().unwrap().push(e))
+    };
+    let policies = Arc::new(PolicyStore::new(policy()));
+    policies.replace_agents(agents);
+    let mut gw = Gateway::bind(
+        ProxyConfig {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            ..Default::default()
+        },
+        Arc::new(StaticOrigDst(info(dst))),
+        policies.clone(),
+        Arc::new(sink),
+    )
+    .await
+    .unwrap();
+    if let Some(b) = budgets {
+        gw = gw.with_budgets(b);
+    }
+    if let Some(r) = resolver {
+        gw = gw.with_agent_resolver(r);
+    }
+    let addr = gw.local_addr();
+    tokio::spawn(gw.serve());
+    Harness {
+        addr,
+        seen,
+        events,
+        policies,
+    }
+}
+
+async fn post_auth(s: &mut TcpStream, body: &str, auth: Option<&str>) {
+    let auth = auth
+        .map(|t| format!("Authorization: Bearer {t}\r\n"))
+        .unwrap_or_default();
+    let req = format!(
+        "POST /mcp HTTP/1.1\r\nHost: mcp.example\r\n{auth}Content-Type: application/json\r\nAccept: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    s.write_all(req.as_bytes()).await.unwrap();
+}
+
+fn token_policy() -> AgentPolicy {
+    AgentPolicy {
+        token_sha256: vec![Sha256::digest(b"secret").into()],
+        require_auth: true,
+        gateway: Some("dev".into()),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn bearer_token_accepts_only_the_configured_hash_and_is_attributed() {
+    let h = secure_harness(
+        HashMap::from([("bot".to_owned(), token_policy())]),
+        None,
+        None,
+    )
+    .await;
+
+    let mut s = h.connect().await;
+    post_auth(&mut s, &call(1, "search"), Some("wrong")).await;
+    let r = read_response(&mut s, &mut Vec::new()).await;
+    assert_eq!(r.status, 200);
+    assert_eq!(r.json()["error"]["code"], -32001);
+    assert_eq!(r.json()["error"]["data"]["reason"], "unauthenticated");
+    assert!(
+        h.seen().is_empty(),
+        "an unauthenticated call must not be forwarded"
+    );
+
+    let mut s = h.connect().await;
+    post_auth(&mut s, &call(2, "search"), Some("secret")).await;
+    let r = read_response(&mut s, &mut Vec::new()).await;
+    assert_eq!(r.status, 200);
+    assert_eq!(r.json()["result"]["echo"], "tools/call");
+    assert_eq!(h.seen().len(), 1);
+
+    let ev = h.events();
+    assert_eq!(
+        (ev[0].decision, ev[0].reason),
+        (Decision::Deny, Reason::Unauthenticated)
+    );
+    assert_eq!(ev[0].agent_id, None);
+    assert_eq!(
+        (ev[1].decision, ev[1].reason),
+        (Decision::Allow, Reason::Policy)
+    );
+    assert_eq!(ev[1].agent_id.as_deref(), Some("bot"));
+}
+
+#[tokio::test]
+async fn spiffe_resolver_identifies_an_agent_without_a_token() {
+    let policy = AgentPolicy {
+        token_sha256: Vec::new(),
+        spiffe_id: vec!["spiffe://td/ns/prod/*".into()],
+        require_auth: true,
+        gateway: Some("dev".into()),
+        ..Default::default()
+    };
+    let resolver: Arc<dyn AgentResolver> = Arc::new(FnAgentResolver(|cgroup, _pid| {
+        (cgroup == 7).then(|| "spiffe://td/ns/prod/sa/bot".to_owned())
+    }));
+    let h = secure_harness(
+        HashMap::from([("bot".to_owned(), policy)]),
+        None,
+        Some(resolver),
+    )
+    .await;
+    let mut s = h.connect().await;
+    post_auth(&mut s, &call(1, "search"), None).await;
+    let r = read_response(&mut s, &mut Vec::new()).await;
+    assert_eq!(r.status, 200);
+    assert_eq!(r.json()["result"]["echo"], "tools/call");
+    assert_eq!(h.events()[0].agent_id.as_deref(), Some("bot"));
+}
+
+#[tokio::test]
+async fn budgets_deny_over_limit_and_reset_on_window_and_day() {
+    let clock = ManualClock::new(10_000);
+    let budgets = Arc::new(Budgets::new(Arc::new(clock.clone())));
+    let policy = AgentPolicy {
+        calls_per_min: Some(1),
+        usd_per_day_micros: Some(2_000),
+        usd_per_call_micros: 1_000,
+        ..token_policy()
+    };
+    let h = secure_harness(
+        HashMap::from([("bot".to_owned(), policy)]),
+        Some(budgets.clone()),
+        None,
+    )
+    .await;
+    let mut s = h.connect().await;
+    post_auth(&mut s, &call(1, "search"), Some("secret")).await;
+    assert_eq!(read_response(&mut s, &mut Vec::new()).await.status, 200);
+    assert_eq!(budgets.calls_in_window("bot"), 1);
+    assert_eq!(budgets.spend_micros_today("bot"), 1_000);
+
+    post_auth(&mut s, &call(2, "search"), Some("secret")).await;
+    let r = read_response(&mut s, &mut Vec::new()).await;
+    assert_eq!(r.status, 200);
+    assert_eq!(r.json()["error"]["code"], -32003);
+    assert_eq!(r.json()["error"]["data"]["reason"], "budget");
+    assert_eq!(
+        budgets.spend_micros_today("bot"),
+        1_000,
+        "refusals are not charged"
+    );
+    assert_eq!(h.seen().len(), 1);
+
+    clock.advance(61); // next sliding window, same UTC day
+    post_auth(&mut s, &call(3, "search"), Some("secret")).await;
+    assert_eq!(read_response(&mut s, &mut Vec::new()).await.status, 200);
+    assert_eq!(budgets.spend_micros_today("bot"), 2_000);
+
+    clock.advance(86_400); // next UTC day resets spend
+    post_auth(&mut s, &call(4, "search"), Some("secret")).await;
+    assert_eq!(read_response(&mut s, &mut Vec::new()).await.status, 200);
+    assert_eq!(budgets.spend_micros_today("bot"), 1_000);
+    assert!(h.events().iter().any(|e| e.reason == Reason::Budget));
+}
+
+#[tokio::test]
+async fn agent_kill_switch_denies_then_allows() {
+    let h = secure_harness(
+        HashMap::from([("bot".to_owned(), token_policy())]),
+        None,
+        None,
+    )
+    .await;
+    h.policies.set_agent_disabled("bot", true);
+    let mut s = h.connect().await;
+    post_auth(&mut s, &call(1, "search"), Some("secret")).await;
+    let r = read_response(&mut s, &mut Vec::new()).await;
+    assert_eq!(r.status, 200);
+    assert_eq!(r.json()["error"]["data"]["reason"], "agent_disabled");
+    assert!(h.seen().is_empty());
+    assert_eq!(h.events()[0].reason, Reason::AgentDisabled);
+
+    h.policies.set_agent_disabled("bot", false);
+    post_auth(&mut s, &call(2, "search"), Some("secret")).await;
+    assert_eq!(read_response(&mut s, &mut Vec::new()).await.status, 200);
+    assert_eq!(h.seen().len(), 1);
+    assert_eq!(h.events()[1].reason, Reason::Policy);
 }

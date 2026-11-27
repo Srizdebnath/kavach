@@ -28,8 +28,14 @@
 #![deny(missing_docs)]
 
 pub mod afxdp;
+pub mod agent;
+pub mod budget;
 pub mod proxy;
 
+pub use agent::{
+    AgentPolicy, AgentResolver, AuthFailure, Credentials, FnAgentResolver, resolve_agent,
+};
+pub use budget::{BudgetClock, Budgets, ManualClock, SystemClock};
 pub use proxy::{
     DecisionEvent, EventSink, Gateway, OrigDst, OrigInfo, PolicySource, PolicyStore, ProxyConfig,
     run,

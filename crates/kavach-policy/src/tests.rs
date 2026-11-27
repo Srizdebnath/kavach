@@ -3,7 +3,7 @@ use kavach_common::addr::{to_mapped, v4};
 use kavach_core::{FlowQuery, Snapshot, Tables};
 
 use crate::bundle::{self, BundleError, TrustPolicy};
-use crate::compile::{Severity, compile, parse_duration};
+use crate::compile::{AgentSpecV3, Severity, compile, parse_duration};
 use crate::kernel::{Clocks, Facts, OfflineTables, flatten_sets};
 
 const SHA_A: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -286,7 +286,7 @@ fn format_v1_bundles_still_verify_and_strict_mode_compiles() {
         selectors: p.selectors.clone(),
         sets: p.sets.clone(),
         rules: p.rules.iter().map(Into::into).collect(),
-        agents: p.agents.clone(),
+        agents: p.agents.iter().map(AgentSpecV3::from).collect(),
     };
     let sk = bundle::generate_key();
     let b = bundle::sign_v1(&v1, &sk, 2, 1_000, "prod").unwrap();
@@ -651,6 +651,56 @@ fn signed_bundle_with_dangling_gateway_index_is_refused() {
         bundle::verify(&b, &trust(sk.verifying_key()), true),
         Err(BundleError::Decode(m)) if m.contains("gateway #9")
     ));
+}
+
+#[test]
+fn agent_credentials_and_budgets_survive_bundles_and_old_bundles_still_decode() {
+    const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let src = format!(
+        "{GATEWAY}\n[[agent]]\nid = \"support-bot\"\nrequire_auth = true\n\
+         gateway = \"support\"\ntoken_sha256 = \"{TOKEN}\"\n\
+         spiffe_id = \"spiffe://td/ns/prod/*\"\n\
+         budget = {{ calls_per_min = 10, usd_per_day = 2.5, usd_per_call = 0.25 }}\n"
+    );
+    let p = compile(&src, 50).unwrap().policy;
+    assert!(p.uses_agent_credentials() && p.needs_format_3() && p.to_v2().is_none());
+    let a = &p.agents[0];
+    assert_eq!(a.token_sha256.as_deref(), Some(TOKEN));
+    assert_eq!(a.spiffe_id.as_deref(), Some("spiffe://td/ns/prod/*"));
+    assert_eq!(a.budget.as_ref().unwrap().usd_per_call, 0.25);
+
+    let sk = bundle::generate_key();
+    let t = trust(sk.verifying_key());
+    let b = bundle::sign(&p, &sk, 2, 0, "prod").unwrap();
+    assert_eq!(bundle::peek_format(&b), Ok(bundle::FORMAT));
+    let v = bundle::verify(&b, &t, true).unwrap();
+    assert_eq!(
+        v.policy, p,
+        "credentials round-trip through the signed extension"
+    );
+
+    // A format-3 bundle written before FR-GW-1 has no extension: it decodes with defaults.
+    let mut old = p.clone();
+    for agent in &mut old.agents {
+        agent.token_sha256 = None;
+        agent.spiffe_id = None;
+        agent.require_auth = false;
+        agent.gateway = None;
+        if let Some(budget) = &mut agent.budget {
+            budget.usd_per_call = crate::schema::default_usd_per_call();
+        }
+    }
+    let b = bundle::sign(&old, &sk, 3, 0, "prod").unwrap();
+    let v = bundle::verify(&b, &t, true).unwrap();
+    assert_eq!(v.policy, old);
+    assert_eq!(
+        v.policy.agents[0].budget.as_ref().unwrap().usd_per_call,
+        0.001
+    );
+
+    // Bad credential syntax is rejected at compile time.
+    let bad = src.replace(TOKEN, "not-hex");
+    assert!(errors(&bad).iter().any(|e| e.contains("token_sha256")));
 }
 
 /// Format-3 policy with only the workload-selector section.

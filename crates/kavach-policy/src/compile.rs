@@ -213,6 +213,117 @@ pub struct CompiledGateway {
     pub tls: GatewayTls,
 }
 
+/// Agent fields as encoded by bundle formats 1–3 before FR-GW-1. Kept separate from
+/// [`AgentSpec`] so a signed bundle from an older build still decodes: its payload has no
+/// credential fields, and postcard is a positional format.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentSpecV3 {
+    pub id: String,
+    pub mcp: Option<McpSpec>,
+    pub budget: Option<BudgetSpecV3>,
+}
+
+/// Budget fields as encoded before `usd_per_call` existed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BudgetSpecV3 {
+    pub calls_per_min: Option<u32>,
+    pub usd_per_day: Option<f64>,
+}
+
+impl From<&AgentSpec> for AgentSpecV3 {
+    fn from(a: &AgentSpec) -> Self {
+        Self {
+            id: a.id.clone(),
+            mcp: a.mcp.clone(),
+            budget: a.budget.as_ref().map(|b| BudgetSpecV3 {
+                calls_per_min: b.calls_per_min,
+                usd_per_day: b.usd_per_day,
+            }),
+        }
+    }
+}
+
+/// Upgrade a legacy agent to today's schema (new fields take their defaults).
+pub(crate) fn upgrade_agent(old: AgentSpecV3) -> AgentSpec {
+    let mut a = AgentSpec::default();
+    a.apply_legacy(old);
+    a
+}
+
+impl AgentSpec {
+    pub(crate) fn apply_legacy(&mut self, old: AgentSpecV3) {
+        self.id = old.id;
+        self.mcp = old.mcp;
+        self.budget = old.budget.map(|b| BudgetSpec {
+            calls_per_min: b.calls_per_min,
+            usd_per_day: b.usd_per_day,
+            usd_per_call: crate::schema::default_usd_per_call(),
+        });
+    }
+}
+
+/// Compiled policy as encoded in a format-3 bundle. The credential extension (if any) is
+/// appended after this struct inside the signed payload; older readers ignore the trailing
+/// bytes, so old bundles and new bundles are readable by this build.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CompiledPolicyV3 {
+    pub version: u32,
+    pub created_unix: u64,
+    pub source_sha256: [u8; 32],
+    pub defaults: CompiledDefaults,
+    pub selectors: Vec<Selector>,
+    pub sets: Vec<AddrSet>,
+    pub rules: Vec<CompiledRule>,
+    pub agents: Vec<AgentSpecV3>,
+    pub gateways: Vec<CompiledGateway>,
+    pub workloads: Vec<WorkloadSel>,
+}
+
+impl From<&CompiledPolicy> for CompiledPolicyV3 {
+    fn from(p: &CompiledPolicy) -> Self {
+        Self {
+            version: p.version,
+            created_unix: p.created_unix,
+            source_sha256: p.source_sha256,
+            defaults: p.defaults.clone(),
+            selectors: p.selectors.clone(),
+            sets: p.sets.clone(),
+            rules: p.rules.clone(),
+            agents: p.agents.iter().map(AgentSpecV3::from).collect(),
+            gateways: p.gateways.clone(),
+            workloads: p.workloads.clone(),
+        }
+    }
+}
+
+impl From<CompiledPolicyV3> for CompiledPolicy {
+    fn from(p: CompiledPolicyV3) -> Self {
+        Self {
+            version: p.version,
+            created_unix: p.created_unix,
+            source_sha256: p.source_sha256,
+            defaults: p.defaults,
+            selectors: p.selectors,
+            sets: p.sets,
+            rules: p.rules,
+            agents: p
+                .agents
+                .into_iter()
+                .map(|a| {
+                    let mut spec = AgentSpec {
+                        id: a.id.clone(),
+                        ..Default::default()
+                    };
+                    spec.apply_legacy(a);
+                    spec
+                })
+                .collect(),
+            gateways: p.gateways,
+            workloads: p.workloads,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompiledDefaults {
     pub egress: u8,
@@ -271,10 +382,21 @@ impl CompiledPolicy {
         !self.workloads.is_empty()
     }
 
+    /// True when any agent carries credentials, a gateway binding, or a non-default call price.
+    /// Those fields live in a format-3 extension and must not be dropped into a format-2 payload.
+    pub fn uses_agent_credentials(&self) -> bool {
+        self.agents.iter().any(|a| {
+            a.uses_credentials()
+                || a.budget.as_ref().is_some_and(|b| {
+                    (b.usd_per_call - crate::schema::default_usd_per_call()).abs() > f64::EPSILON
+                })
+        })
+    }
+
     /// True when the policy needs bundle format 3: it carries gateway policies, workload
-    /// selectors, or both.
+    /// selectors, agent credentials, or a combination.
     pub fn needs_format_3(&self) -> bool {
-        self.uses_gateways() || self.uses_workloads()
+        self.uses_gateways() || self.uses_workloads() || self.uses_agent_credentials()
     }
 
     /// The format-2 payload for this policy, or `None` when it needs format 3.
@@ -287,7 +409,7 @@ impl CompiledPolicy {
             selectors: self.selectors.clone(),
             sets: self.sets.clone(),
             rules: self.rules.iter().map(CompiledRuleV2::from).collect(),
-            agents: self.agents.clone(),
+            agents: self.agents.iter().map(AgentSpecV3::from).collect(),
         })
     }
 }
@@ -319,6 +441,36 @@ impl CompiledPolicy {
             .map(|g| (g.name.clone(), g.to_tool_policy()))
             .collect()
     }
+
+    /// Every agent identity/budget as the proxy consumes it, keyed by agent id.
+    pub fn agent_policies(&self) -> std::collections::HashMap<String, kavach_gateway::AgentPolicy> {
+        let micros = |usd: f64| (usd * 1_000_000.0).round().max(0.0) as u64;
+        self.agents
+            .iter()
+            .map(|a| {
+                let token = a.token_sha256.as_deref().and_then(|t| {
+                    hex::decode(t)
+                        .ok()
+                        .and_then(|v| <[u8; 32]>::try_from(v).ok())
+                });
+                let p = kavach_gateway::AgentPolicy {
+                    token_sha256: token.into_iter().collect(),
+                    spiffe_id: a.spiffe_id.clone().into_iter().collect(),
+                    require_auth: a.require_auth,
+                    gateway: a.gateway.clone(),
+                    calls_per_min: a.budget.as_ref().and_then(|b| b.calls_per_min),
+                    usd_per_day_micros: a.budget.as_ref().and_then(|b| b.usd_per_day).map(&micros),
+                    usd_per_call_micros: a
+                        .budget
+                        .as_ref()
+                        .map_or(micros(crate::schema::default_usd_per_call()), |b| {
+                            micros(b.usd_per_call)
+                        }),
+                };
+                (a.id.clone(), p)
+            })
+            .collect()
+    }
 }
 
 /// Bundle format 2 payload (before gateway policies and workload selectors); decoded and upgraded
@@ -332,7 +484,7 @@ pub struct CompiledPolicyV2 {
     pub selectors: Vec<Selector>,
     pub sets: Vec<AddrSet>,
     pub rules: Vec<CompiledRuleV2>,
-    pub agents: Vec<AgentSpec>,
+    pub agents: Vec<AgentSpecV3>,
 }
 
 impl From<CompiledPolicyV2> for CompiledPolicy {
@@ -345,7 +497,7 @@ impl From<CompiledPolicyV2> for CompiledPolicy {
             selectors: p.selectors,
             sets: p.sets,
             rules: p.rules.into_iter().map(CompiledRule::from).collect(),
-            agents: p.agents,
+            agents: p.agents.into_iter().map(upgrade_agent).collect(),
             gateways: Vec::new(),
             workloads: Vec::new(),
         }
@@ -362,7 +514,7 @@ pub struct CompiledPolicyV1 {
     pub selectors: Vec<Selector>,
     pub sets: Vec<AddrSet>,
     pub rules: Vec<CompiledRuleV2>,
-    pub agents: Vec<AgentSpec>,
+    pub agents: Vec<AgentSpecV3>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -592,6 +744,7 @@ pub fn compile_file(
     let mut rules: Vec<CompiledRule> = Vec::new();
     let mut seen_ids: BTreeMap<&str, usize> = BTreeMap::new();
     let gateways = compile_gateways(file, &mut d);
+    compile_agents(file, &gateways, &mut d);
     let mut gateways_used = vec![false; gateways.len()];
 
     for (idx, r) in file.rules.iter().enumerate() {
@@ -955,6 +1108,60 @@ pub fn compile_file(
 // ---------------------------------------------------------------------------------------------
 // Gateway policies
 // ---------------------------------------------------------------------------------------------
+
+/// Validate `[[agent]]` identities and budgets (FR-GW-1/3). Diagnostics are errors: an agent
+/// whose credentials can never match must not silently disable enforcement.
+fn compile_agents(file: &PolicyFile, gateways: &[CompiledGateway], d: &mut Diags) {
+    let mut seen = BTreeMap::new();
+    for a in &file.agents {
+        let rid = Some(a.id.as_str());
+        if a.id.is_empty() || a.id.len() > 128 {
+            d.err(rid, "agent id must be 1..=128 bytes");
+        }
+        if seen.insert(a.id.as_str(), ()).is_some() {
+            d.err(rid, "duplicate agent id");
+        }
+        if let Some(t) = &a.token_sha256 {
+            let bytes = hex::decode(t).ok();
+            if !bytes.is_some_and(|v| v.len() == 32) {
+                d.err(
+                    rid,
+                    format!("agent token_sha256 {t:?} must be 64 hex digits"),
+                );
+            }
+        }
+        if let Some(s) = &a.spiffe_id
+            && let Err(e) = crate::workload::SpiffePattern::parse(s)
+        {
+            d.err(rid, format!("agent spiffe_id: {e}"));
+        }
+        if a.require_auth && a.token_sha256.is_none() && a.spiffe_id.is_none() {
+            d.err(rid, "require_auth needs token_sha256 or spiffe_id");
+        }
+        if let Some(g) = &a.gateway
+            && !gateways.iter().any(|x| x.name == *g)
+        {
+            d.err(
+                rid,
+                format!("agent gateway {g:?} is not a [gateway.<name>] policy"),
+            );
+        }
+        if let Some(b) = &a.budget {
+            let finite = |v: f64| v.is_finite() && v >= 0.0;
+            if let Some(n) = b.calls_per_min
+                && n == 0
+            {
+                d.err(rid, "calls_per_min must be > 0");
+            }
+            if b.usd_per_day.is_some_and(|v| !finite(v)) {
+                d.err(rid, "usd_per_day must be a non-negative finite number");
+            }
+            if !finite(b.usd_per_call) || b.usd_per_call > 1_000_000.0 {
+                d.err(rid, "usd_per_call must be between 0 and 1000000");
+            }
+        }
+    }
+}
 
 fn valid_gateway_name(n: &str) -> bool {
     !n.is_empty()

@@ -97,6 +97,9 @@ enum Cmd {
     /// L7 gateway policies (`[gateway.<name>]` in kavach.toml).
     #[command(subcommand)]
     Gateway(GatewayCmd),
+    /// Per-agent gateway kill-switch (root only; does not detach BPF programs).
+    #[command(subcommand)]
+    Agent(AgentCmd),
     /// Verify the hash-chained audit log.
     Audit {
         #[arg(default_value = "/var/log/kavach/audit.log")]
@@ -134,6 +137,22 @@ enum GatewayCmd {
         #[arg(long)]
         policy: Option<PathBuf>,
     },
+}
+
+#[derive(Subcommand)]
+enum AgentCmd {
+    /// Disable one agent at the gateway (takes effect on the next frame).
+    Kill {
+        /// Agent id from `[[agent]]` in the active policy.
+        id: String,
+    },
+    /// Re-enable one agent at the gateway.
+    Enable {
+        /// Agent id from `[[agent]]` in the active policy.
+        id: String,
+    },
+    /// Show disabled agents and the ids known from the active policy.
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -602,6 +621,46 @@ fn run(cli: Cli) -> Result<()> {
                 println!("{l}");
             }
         }
+        Cmd::Agent(cmd) => {
+            let (id, disabled) = match cmd {
+                AgentCmd::Kill { id } => (id, true),
+                AgentCmd::Enable { id } => (id, false),
+                AgentCmd::Status => {
+                    match Conn::open(sock)?.call(&Request::AgentStatus)? {
+                        Response::AgentStatus { disabled, known } if !cli.json => {
+                            println!(
+                                "agents:    {}",
+                                if known.is_empty() {
+                                    "-".into()
+                                } else {
+                                    known.join(", ")
+                                }
+                            );
+                            println!(
+                                "disabled:  {}",
+                                if disabled.is_empty() {
+                                    "-".into()
+                                } else {
+                                    disabled.join(", ")
+                                }
+                            );
+                        }
+                        other => print_json(&other),
+                    }
+                    return Ok(());
+                }
+            };
+            Conn::open(sock)?.call(&Request::AgentKillSwitch {
+                id: id.clone(),
+                disabled,
+            })?;
+            if !cli.json {
+                println!(
+                    "agent {id}: {}",
+                    if disabled { "disabled" } else { "enabled" }
+                );
+            }
+        }
         Cmd::Audit { log } => {
             let f =
                 std::fs::File::open(&log).with_context(|| format!("opening {}", log.display()))?;
@@ -953,6 +1012,27 @@ allow = { to = "1.1.1.1", port = 53, proto = "udp" }
 id   = "mcp"
 punt = { to = "203.0.113.0/24", port = 443, proto = "tcp", gateway = "github-agent" }
 "#;
+
+    #[test]
+    fn agent_kill_switch_cli_and_request() {
+        let cli = Cli::try_parse_from(["kavachctl", "agent", "kill", "support-bot"]).unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Agent(AgentCmd::Kill { ref id }) if id == "support-bot"
+        ));
+        let cli = Cli::try_parse_from(["kavachctl", "agent", "enable", "support-bot"]).unwrap();
+        assert!(matches!(cli.cmd, Cmd::Agent(AgentCmd::Enable { .. })));
+        let req = Request::AgentKillSwitch {
+            id: "support-bot".into(),
+            disabled: true,
+        };
+        let line = String::from_utf8(encode(&req)).unwrap();
+        assert_eq!(
+            line,
+            "{\"op\":\"agent_kill_switch\",\"id\":\"support-bot\",\"disabled\":true}\n"
+        );
+        assert_eq!(serde_json::from_str::<Request>(line.trim()).unwrap(), req);
+    }
 
     fn args(to: &str, port: u16) -> ExplainArgs {
         ExplainArgs {

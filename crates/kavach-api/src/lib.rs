@@ -44,6 +44,14 @@ pub enum Request {
     Events,
     /// Detach every program and remove all pins (root only).
     KillSwitch,
+    /// Disable (`true`) or re-enable (`false`) one gateway agent without detaching BPF
+    /// programs. Observed by the in-process proxy on its next frame. Root only.
+    AgentKillSwitch {
+        id: String,
+        disabled: bool,
+    },
+    /// Per-agent disabled state, plus the agent ids known from the active policy.
+    AgentStatus,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -70,6 +78,12 @@ pub enum Response {
         generation: u32,
     },
     Event(EventRecord),
+    AgentStatus {
+        /// Disabled agent ids.
+        disabled: Vec<String>,
+        /// Agent ids present in the active signed policy.
+        known: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -157,6 +171,26 @@ mod tests {
         );
         let back: Request = serde_json::from_str(s.trim()).unwrap();
         assert_eq!(back, r);
+    }
+
+    #[test]
+    fn agent_kill_switch_wire_format() {
+        let r = Request::AgentKillSwitch {
+            id: "support-bot".into(),
+            disabled: true,
+        };
+        let line = String::from_utf8(encode(&r)).unwrap();
+        assert_eq!(
+            line,
+            "{\"op\":\"agent_kill_switch\",\"id\":\"support-bot\",\"disabled\":true}\n"
+        );
+        assert_eq!(serde_json::from_str::<Request>(line.trim()).unwrap(), r);
+        let resp = Response::AgentStatus {
+            disabled: vec!["support-bot".into()],
+            known: vec!["support-bot".into()],
+        };
+        let line = encode(&resp);
+        assert_eq!(serde_json::from_slice::<Response>(&line).unwrap(), resp);
     }
 
     /// Regression: the response tag must not collide with payload fields (EventRecord.kind).

@@ -328,7 +328,12 @@ signature = Ed25519(sk, "kavach-bundle-v1\0" ‖ header ‖ payload)     key_id 
 
 Format 3 is one payload layout: a section the policy does not use is an empty list. The
 `gateways` section holds the `[gateway.*]` L7 policies that punt rules index; `workloads` holds
-the k8s label / SPIFFE part of each workload selector (and the unknown-identity twins).
+the k8s label / SPIFFE part of each workload selector (and the unknown-identity twins). FR-GW-1/3
+add an optional, self-delimiting *agent* section **after** the compiled policy inside the signed
+format-3 payload (`u32 marker` + postcard `Vec<AgentSpec>`: token digest, SPIFFE ID pattern,
+`require_auth`, gateway binding, budgets). Bundles written before it have no trailing bytes and
+still decode; older readers ignore the extra bytes. Agent policy needs format 3, so a format-2
+bundle never silently drops credentials.
 
 `sign()` writes the oldest format that can hold the policy, so a host on an older release keeps
 accepting every bundle that uses neither section. Such a host refuses a format-3 bundle at the
@@ -431,8 +436,26 @@ XDP: parse → blocklist → GCRA → [flag] xsk_ports[(proto,dport)]? → xsk_a
 `kavach-gateway` binary (explicit-proxy mode, one static upstream).
 
 * **Original destination.** `OrigDst::lookup(peer, local) -> OrigInfo { dst, rule_id, gateway,
-  cgroup_id, pid }`; kavachd implements it over the redirect map. An unknown flow, or one
+  cgroup_id, pid, agent_id }`; kavachd implements it over the redirect map. An unknown flow, or one
   whose destination is the listener itself, is closed (fail closed).
+* **Per-agent identity (FR-GW-1).** `[[agent]]` in `kavach.toml` may carry `token_sha256`
+  (hex SHA-256 of a bearer token), `spiffe_id` (exact ID or `.../*` prefix), `require_auth` and a
+  `gateway` binding. The gateway hashes `Authorization: Bearer …` with SHA-256 and compares
+  digests in constant time; SPIFFE IDs come from `AgentResolver` (kavachd supplies one backed by
+  its `[k8s]` node agent's cgroup → pod → SPIFFE tables; the standalone proxy has none, so SPIFFE
+  auth is unavailable there). With no agent policy requiring authentication the old behaviour is
+  unchanged; otherwise a flow with no valid credential is denied with reason `unauthenticated`.
+  Raw NDJSON has no header, so it can only authenticate via the SPIFFE resolver.
+* **Budgets (FR-GW-3).** A tool call consumes a sliding 60-second call counter and a UTC-day
+  spend accumulator, both keyed by agent id and stored in a `Mutex<HashMap<…>>` in the gateway's
+  shared state. Spend uses integer micro-USD (`usd_per_call`, default 0.001); breaching either
+  limit denies the call with JSON-RPC code `-32003` and a `budget` audit reason. Refusals are never
+  charged; the clock is injectable for tests.
+* **Per-agent kill-switch (FR-GW-4).** `kavachctl agent kill|enable <id>` sends
+  `agent_kill_switch` to kavachd (root only, `SO_PEERCRED`), which updates a runtime disabled set
+  shared with the gateway snapshot and writes an audit record. No BPF program is detached. The
+  proxy denies every frame of a disabled agent with reason `agent_disabled`; a reload of policy
+  cannot silently re-enable it.
 * **Sniffing** (first bytes, under `header_timeout_ms`): `0x16` → TLS ClientHello (SNI via
   `kavach-parsers`; the policy's `tls = "deny"` closes, `"allow"` relays uninspected), an upper-case
   method token → HTTP/1.1, `{`/`[` → newline-delimited JSON-RPC, anything else → closed.
@@ -446,8 +469,9 @@ XDP: parse → blocklist → GCRA → [flag] xsk_ports[(proto,dport)]? → xsk_a
   in the protocol's framing (HTTP 200 JSON body, a WebSocket text frame or an NDJSON line,
   spliced in only at a server message boundary); it is never forwarded. Malformed frames,
   batches and oversized frames get a parse / invalid-request error and the connection closes.
-  Each decision is a `DecisionEvent` (gateway, rule id, pid, cgroup, method, tool/URI,
-  verdict, reason) handed to an `EventSink` that must not block (`ChannelSink` drops and
+  Each decision is a `DecisionEvent` (gateway, rule id, authenticated agent id, pid, cgroup,
+  method, tool/URI, verdict, reason) handed to an `EventSink` that must not block
+  (`ChannelSink` drops and
   counts when full).
 * **HTTP strictness (anti-smuggling).** CRLF only, no obs-fold, no whitespace before a colon,
   exactly one `Host`, at most one `Content-Length` (digits only), `Transfer-Encoding` only as

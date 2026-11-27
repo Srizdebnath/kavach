@@ -5,10 +5,10 @@
 //! per connection (or per frame) and decides with the `kavach_gateway::ToolPolicy` it finds.
 //! A snapshot is immutable: a policy swap never changes a decision half-way through a lookup.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, PoisonError, RwLock};
 
-use kavach_gateway::ToolPolicy;
+use kavach_gateway::{AgentPolicy, ToolPolicy};
 use kavach_policy::compile::CompiledPolicy;
 
 /// One applied bundle's gateway policies.
@@ -21,6 +21,8 @@ pub struct GatewaySnapshot {
     /// Numeric rule id (as carried in events and flow verdicts) → gateway name, for every
     /// `punt` rule that names a gateway.
     pub rules: HashMap<u32, String>,
+    /// Agent identities and budgets from `[[agent]]` in the signed policy.
+    pub agents: HashMap<String, AgentPolicy>,
 }
 
 impl GatewaySnapshot {
@@ -35,6 +37,7 @@ impl GatewaySnapshot {
             serial,
             policies: policy.tool_policies(),
             rules,
+            agents: policy.agent_policies(),
         }
     }
 
@@ -49,9 +52,14 @@ impl GatewaySnapshot {
     }
 }
 
-/// Shared handle on the active gateway policies.
+/// Shared handle on the active gateway policies. The disabled-agent set is deliberately kept
+/// outside the immutable snapshot: a kill-switch takes effect on the next frame, and a policy
+/// reload must not re-enable an agent.
 #[derive(Debug, Default, Clone)]
-pub struct GatewayPolicies(Arc<RwLock<Arc<GatewaySnapshot>>>);
+pub struct GatewayPolicies {
+    policies: Arc<RwLock<Arc<GatewaySnapshot>>>,
+    disabled: Arc<RwLock<HashSet<String>>>,
+}
 
 impl GatewayPolicies {
     pub fn new() -> Self {
@@ -60,7 +68,7 @@ impl GatewayPolicies {
 
     /// The current policies. Holds no lock after returning.
     pub fn snapshot(&self) -> Arc<GatewaySnapshot> {
-        self.0
+        self.policies
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
@@ -70,8 +78,45 @@ impl GatewayPolicies {
     pub fn publish(&self, policy: &CompiledPolicy, serial: u64) -> usize {
         let snap = Arc::new(GatewaySnapshot::from_policy(policy, serial));
         let n = snap.policies.len();
-        *self.0.write().unwrap_or_else(PoisonError::into_inner) = snap;
+        *self
+            .policies
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = snap;
         n
+    }
+
+    /// Enable or disable one agent immediately (FR-GW-4). Does not touch BPF programs.
+    pub fn set_agent_disabled(&self, id: &str, disabled: bool) {
+        let mut set = self
+            .disabled
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
+        if disabled {
+            set.insert(id.to_owned());
+        } else {
+            set.remove(id);
+        }
+    }
+
+    /// Whether `id` is currently disabled.
+    pub fn agent_disabled(&self, id: &str) -> bool {
+        self.disabled
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(id)
+    }
+
+    /// All disabled agent ids, sorted.
+    pub fn disabled_agents(&self) -> Vec<String> {
+        let mut v: Vec<_> = self
+            .disabled
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .cloned()
+            .collect();
+        v.sort();
+        v
     }
 }
 
@@ -117,5 +162,41 @@ punt = { to = "203.0.113.0/24", port = [443, 8443], proto = "tcp", gateway = "gi
         let empty = kavach_policy::compile("version = 1\n", 0).unwrap().policy;
         assert_eq!(h.publish(&empty, 8), 0);
         assert!(proxy_side.snapshot().policy_for_rule(2).is_none());
+    }
+
+    #[test]
+    fn agents_are_published_and_kill_switch_survives_reload() {
+        let src = r#"
+version = 1
+[gateway.dev]
+allow_tools = ["search"]
+[[rule]]
+id = "mcp"
+punt = { to = "203.0.113.0/24", port = 443, proto = "tcp", gateway = "dev" }
+[[agent]]
+id = "bot"
+require_auth = true
+gateway = "dev"
+token_sha256 = "0000000000000000000000000000000000000000000000000000000000000001"
+budget = { calls_per_min = 2, usd_per_day = 1.0, usd_per_call = 0.5 }
+"#;
+        let h = GatewayPolicies::new();
+        let p = kavach_policy::compile(src, 0).unwrap().policy;
+        h.publish(&p, 1);
+        let snap = h.snapshot();
+        let a = snap.agents.get("bot").expect("agent published");
+        assert!(a.require_auth);
+        assert_eq!(a.calls_per_min, Some(2));
+        assert_eq!(a.usd_per_day_micros, Some(1_000_000));
+        assert_eq!(a.usd_per_call_micros, 500_000);
+        h.set_agent_disabled("bot", true);
+        assert!(h.agent_disabled("bot"));
+        h.publish(&p, 2);
+        assert!(
+            h.agent_disabled("bot"),
+            "reload must not re-enable an agent"
+        );
+        h.set_agent_disabled("bot", false);
+        assert!(!h.agent_disabled("bot"));
     }
 }
