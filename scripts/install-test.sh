@@ -24,15 +24,14 @@ image=${3:-$default_image}
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 out=${4:-}
-out_args=()
+# POSIX sh: build the docker arguments with `set --` (no bash arrays in this #!/bin/sh script).
+set -- -v "$dir:/dist:ro" \
+       -v "$root/packaging/install-test/container.sh:/container.sh:ro"
 if [ -n "$out" ]; then
     mkdir -p "$out"
     out=$(cd "$out" && pwd)
-    out_args=(-v "$out:/out")
+    set -- "$@" -v "$out:/out"
 fi
-exec docker run --rm \
-    -v "$dir:/dist:ro" \
-    -v "$root/packaging/install-test/container.sh:/container.sh:ro" \
-    "${out_args[@]}" \
+exec docker run --rm "$@" \
     -e "KAVACH_VERSION=${KAVACH_VERSION:-0.4.0}" \
     "$image" sh /container.sh "$distro"
