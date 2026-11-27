@@ -1,5 +1,5 @@
 {
-  "_comment": "CI perf gate (scripts/perf-gate.py). Ceilings are ~5-10x the reference numbers in bench-*.json so shared CI runners don't flake; verifier counts are deterministic per kernel and gated at ~1.5x. kavach_xdp grew 4528 -> 7064 with the AF_XDP redirect step (verified even when the flag is off).",
+  "_comment": "CI perf gate (scripts/perf-gate.py). Ceilings are ~5-10x the reference numbers in bench-*.json so shared CI runners don't flake. Verifier instruction counts are kernel-dependent (they count paths explored, not just instructions in the ELF): on GitHub's 7.0.0-azure runner with BPF-LSM active the LSM connect/sendmsg programs report ~13.7k, while the compiled object is ~1.5k static instructions (v0.3.1: ~1.0k). The previous 5500 ceiling came from a kernel where LSM was not attached, so the gate skipped it; 15000 still catches a real code-size regression. kavach_xdp grew 4528 -> 7064 with the AF_XDP redirect step.",
   "max": {
     "xdp_pass_empty_blocklist_ns": 400,
     "xdp_blocklist_drop_10k_entries_ns": 500,
@@ -14,8 +14,8 @@
     "kavach_xdp": 10000,
     "kavach_tc_ingress": 8000,
     "kavach_tc_egress": 10000,
-    "kavach_connect": 5500,
-    "kavach_sendmsg": 5500,
+    "kavach_connect": 15000,
+    "kavach_sendmsg": 15000,
     "kavach_exec": 1000,
     "kavach_file_open": 1000
   }

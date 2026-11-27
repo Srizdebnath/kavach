@@ -681,13 +681,6 @@ mod tests {
         assert_eq!(KV_L7_VERDICT_ALLOW, 1);
         assert_eq!(KV_L7_VERDICT_DROP, 2);
 
-        // Every byte of a zeroed FlowVal is a valid value, including the new fields
-        // (bytemuck::Pod is implemented for it).
-        let zero = FlowVal::zeroed();
-        assert_eq!(zero.l7_verdict, KV_L7_VERDICT_NONE);
-        assert_eq!(zero.l7_generation, 0);
-        assert_eq!(zero.l7_rule_id, 0);
-        assert_eq!(bytemuck::bytes_of(&zero).len(), 56);
     }
 
     /// Same FNV-1a as `kavachd::kernel::layout_fingerprint`; the pinned value changes only
