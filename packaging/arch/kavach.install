@@ -1,0 +1,15 @@
+post_install() {
+    echo "Kavach installed: kavachd, kavachctl and kavach-gateway in /usr/bin."
+    echo "Configure /etc/kavach/kavachd.toml, then: systemctl enable --now kavachd"
+    systemctl daemon-reload >/dev/null 2>&1 || :
+}
+
+post_upgrade() {
+    post_install
+}
+
+pre_remove() {
+    # Enforcement lives in the kernel: stop the unit and detach explicitly.
+    systemctl disable --now kavachd.service >/dev/null 2>&1 || :
+    /usr/bin/kavachctl kill-switch --yes >/dev/null 2>&1 || :
+}

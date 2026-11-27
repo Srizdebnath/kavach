@@ -1,0 +1,58 @@
+# Maintainer: The Kavach Authors <noreply@github.com>
+# Binary-only package: repackages the static musl release tarball. No Rust toolchain, kernel
+# headers or eBPF build is needed. Run `abuild checksum` once for a new release tarball;
+# prepare() also verifies the download against the release's Sigstore-signed SHA256SUMS.
+pkgname=kavach
+pkgver=0.4.0
+pkgrel=0
+pkgdesc="Kernel-native eBPF firewall with identity-aware egress and the L7 agent gateway"
+url="https://github.com/Srizdebnath/kavach"
+# musl binaries are statically linked; OpenRC provides the service management.
+arch="x86_64 aarch64"
+license="GPL-2.0-only AND (Apache-2.0 OR MIT)"
+depends="openrc"
+subpackages="$pkgname-doc"
+options="!strip"
+builddir="$srcdir/kavach-$pkgver-$CARCH-linux-musl"
+source="kavach-$pkgver-$CARCH-linux-musl.tar.gz::https://github.com/Srizdebnath/kavach/releases/download/v$pkgver/kavach-$pkgver-$CARCH-linux-musl.tar.gz
+	SHA256SUMS::https://github.com/Srizdebnath/kavach/releases/download/v$pkgver/SHA256SUMS
+	kavachd.initd"
+
+# Regenerate with `abuild checksum` when the release tarball changes.
+sha512sums="0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000  kavach-$pkgver-$CARCH-linux-musl.tar.gz
+0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000  SHA256SUMS
+80aa763a74b659ce729b101652f550967a76ee28fdbdd8ffe8793b043ba6e0b0928e476d8f4ab5ba6a14ee13f02374eeb1b39d963eec155bb217eb5840d3d497  kavachd.initd"
+
+prepare() {
+	local tarball="kavach-$pkgver-$CARCH-linux-musl.tar.gz"
+	local line
+	line=$(grep -E "  ${tarball}$" "$srcdir/SHA256SUMS" || true)
+	[ -n "$line" ] || die "no checksum for $tarball in SHA256SUMS"
+	(cd "$srcdir" && printf '%s\n' "$line" | sha256sum -c -)
+}
+
+build() {
+	return 0
+}
+
+check() {
+	local bin
+	for bin in kavachd kavachctl kavach-gateway; do
+		"$builddir/bin/$bin" --version | grep -q "^$bin $pkgver$"
+	done
+}
+
+package() {
+	install -Dm755 "$builddir/bin/kavachd" "$pkgdir/usr/bin/kavachd"
+	install -Dm755 "$builddir/bin/kavachctl" "$pkgdir/usr/bin/kavachctl"
+	install -Dm755 "$builddir/bin/kavach-gateway" "$pkgdir/usr/bin/kavach-gateway"
+	install -Dm0640 "$builddir/etc/kavachd.toml" "$pkgdir/etc/kavach/kavachd.toml"
+	install -Dm0644 "$startdir/kavachd.initd" "$pkgdir/etc/init.d/kavachd"
+	install -d -m0750 "$pkgdir/etc/kavach/trusted_keys" \
+		"$pkgdir/var/lib/kavach" "$pkgdir/var/log/kavach"
+}
+
+doc() {
+	install -d -m0755 "$subpkgdir/usr/share/doc/kavach"
+	cp -r "$builddir/doc/." "$subpkgdir/usr/share/doc/kavach/"
+}

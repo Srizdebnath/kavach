@@ -17,7 +17,8 @@ if [ "${1:-}" = "--uninstall" ]; then
     fi
     # Detach enforcement explicitly (stopping the daemon alone keeps it in the kernel).
     "$PREFIX/bin/kavachctl" kill-switch --yes 2>/dev/null || true
-    rm -f "$PREFIX/bin/kavachd" "$PREFIX/bin/kavachctl" /etc/systemd/system/kavachd.service
+    rm -f "$PREFIX/bin/kavachd" "$PREFIX/bin/kavachctl" "$PREFIX/bin/kavach-gateway" \
+        /etc/systemd/system/kavachd.service
     command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload || true
     echo "removed binaries and unit; kept /etc/kavach, /var/lib/kavach and /var/log/kavach"
     exit 0
@@ -26,7 +27,7 @@ fi
 "$HERE/bin/kavachctl" doctor || die "host does not meet a required check (see above)"
 
 install -d -m 0755 "$PREFIX/bin"
-install -m 0755 "$HERE/bin/kavachd" "$HERE/bin/kavachctl" "$PREFIX/bin/"
+install -m 0755 "$HERE/bin/kavachd" "$HERE/bin/kavachctl" "$HERE/bin/kavach-gateway" "$PREFIX/bin/"
 install -d -m 0750 /etc/kavach /etc/kavach/trusted_keys /var/lib/kavach /var/log/kavach
 if [ ! -e /etc/kavach/kavachd.toml ]; then
     install -m 0640 "$HERE/etc/kavachd.toml" /etc/kavach/kavachd.toml

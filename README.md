@@ -278,7 +278,7 @@ Pick the asset for your distro from [Releases](https://github.com/Srizdebnath/ka
 `.deb` (Debian/Ubuntu), `.rpm` (Fedora/RHEL/openSUSE), or the `linux-musl.tar.gz` (any distro).
 
 ```sh
-gh attestation verify kavach_0.3.1-1_amd64.deb --repo Srizdebnath/kavach   # SLSA provenance
+gh attestation verify kavach_0.4.0-1_amd64.deb --repo Srizdebnath/kavach   # SLSA provenance
 cosign verify-blob SHA256SUMS --bundle SHA256SUMS.sigstore.json \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   --certificate-identity-regexp '^https://github\.com/Srizdebnath/kavach/\.github/workflows/release\.yml@refs/tags/v'
@@ -288,9 +288,9 @@ sha256sum --check --ignore-missing SHA256SUMS
 ### 3. Install
 
 ```sh
-sudo apt install ./kavach_0.3.1-1_amd64.deb            # Debian / Ubuntu
-sudo dnf install ./kavach-0.3.1-1.x86_64.rpm           # Fedora / RHEL (zypper on openSUSE)
-tar xzf kavach-0.3.1-x86_64-linux-musl.tar.gz && cd kavach-0.3.1-x86_64-linux-musl \
+sudo apt install ./kavach_0.4.0-1_amd64.deb            # Debian / Ubuntu
+sudo dnf install ./kavach-0.4.0-1.x86_64.rpm           # Fedora / RHEL (zypper on openSUSE)
+tar xzf kavach-0.4.0-x86_64-linux-musl.tar.gz && cd kavach-0.4.0-x86_64-linux-musl \
   && sudo ./install.sh                                 # any distro
 ```
 
@@ -431,7 +431,7 @@ PodList file. A pod whose metadata is not known yet has *unknown* identity: rule
 `fail = "closed"` (the default) refuse it, `fail = "open"` rules skip it. Each fail-closed
 workload selector uses a second selector bit for that.
 
-### Gateway policies (v0.4 preview)
+### Gateway policies (v0.4)
 
 A `punt` rule names a gateway policy. The gateway decides each JSON-RPC frame of the punted
 connection with that policy:
@@ -527,7 +527,7 @@ scripts/priv-test.sh     # real-kernel suite (sudo)
 | v0.1 | XDP blocklist + per-source rate limiting | ✅ kernel-tested |
 | v0.2 | Identity-aware egress via BPF-LSM: binary hash/path, uid, cgroup; tamper revocation | ✅ kernel-tested |
 | v0.3 | `kavach.toml` policy-as-code, `kavachctl`, signed bundles, A/B hot-swap, audit log, `top`, anomaly detection | ✅ kernel-tested |
-| v0.4 | Agent gateway (MCP / A2A), k8s/SPIFFE identity, `kavach.ko` kfunc; AF_XDP RX backend | 🧪 policy core, AF_XDP backend, k8s/SPIFFE identity (kernel-tested); L7 proxy (loopback-tested); kernel redirect of punted TCP connects (cgroup connect + sockops) |
+| v0.4 | Agent gateway (MCP / A2A), k8s/SPIFFE identity, `kavach.ko` kfunc; AF_XDP RX backend | ✅ released 2026-11-27: `kavach-gateway` in every package; policy core, AF_XDP backend and k8s/SPIFFE identity kernel-tested; L7 proxy loopback-tested; kernel redirect of punted TCP connects (cgroup connect + sockops); `kavach.ko` built from source per kernel |
 | v0.5 | FreeBSD pfil shim, macOS Network Extension | planned |
 
 Honest limits today: kavachd must run in the host PID namespace for identity rules (and see
