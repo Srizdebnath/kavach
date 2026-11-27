@@ -122,6 +122,17 @@ jobs:
           pattern: dist-*
           path: dist
           merge-multiple: true
+      - name: native manifests and checksums for the container tests
+        run: |
+          # The release is not published yet, so the Arch/Alpine manifests verify their
+          # tarball against a checksum list generated here (the publish job makes its own).
+          cp packaging/arch/PKGBUILD packaging/arch/kavach.install \
+             packaging/alpine/APKBUILD packaging/alpine/kavachd.initd dist/
+          cd dist
+          for f in *; do
+            case "$f" in SHA256SUMS*) continue ;; esac
+            sha256sum "$f"
+          done > SHA256SUMS
       - name: install / verify / remove (${{ matrix.distro }})
         run: |
           v=${GITHUB_REF_NAME#v}; v=${v%%-*}
