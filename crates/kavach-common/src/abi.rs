@@ -680,7 +680,6 @@ mod tests {
         assert_eq!(KV_L7_VERDICT_NONE, 0);
         assert_eq!(KV_L7_VERDICT_ALLOW, 1);
         assert_eq!(KV_L7_VERDICT_DROP, 2);
-
     }
 
     /// Same FNV-1a as `kavachd::kernel::layout_fingerprint`; the pinned value changes only
