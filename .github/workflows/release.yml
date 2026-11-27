@@ -136,7 +136,20 @@ jobs:
       - name: install / verify / remove (${{ matrix.distro }})
         run: |
           v=${GITHUB_REF_NAME#v}; v=${v%%-*}
-          KAVACH_VERSION="$v" ./scripts/install-test.sh "${{ matrix.distro }}" dist
+          case "${{ matrix.distro }}" in
+            arch|alpine)
+              mkdir -p native
+              KAVACH_VERSION="$v" ./scripts/install-test.sh "${{ matrix.distro }}" dist "$PWD/native"
+              ;;
+            *) KAVACH_VERSION="$v" ./scripts/install-test.sh "${{ matrix.distro }}" dist ;;
+          esac
+      - name: publish the native packages built by the container test
+        if: matrix.distro == 'arch' || matrix.distro == 'alpine'
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.distro }}
+          path: native/*
+          if-no-files-found: error
 
   publish:
     needs: [build, install-test]
@@ -150,6 +163,11 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           pattern: dist-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: native-*
           path: dist
           merge-multiple: true
       - name: native package manifests (ships as release assets too)

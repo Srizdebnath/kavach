@@ -52,6 +52,8 @@ case "$distro" in
             /build/PKGBUILD
         chown -R builder /build
         (cd /build && su builder -c 'makepkg --noconfirm --force')
+        # Keep the built package so CI can publish it as a release asset (signed via SHA256SUMS).
+        mkdir -p /out && cp /build/kavach-*.pkg.tar.zst /out/
         pacman -U --noconfirm --needed /build/kavach-*.pkg.tar.zst >/dev/null
         verify_installed /usr/lib/systemd/system/kavachd.service
         pacman -Rs --noconfirm kavach >/dev/null
@@ -74,6 +76,8 @@ case "$distro" in
         su builder -c 'abuild-keygen -n -a' >/dev/null
         cp /home/builder/.abuild/*.pub /etc/apk/keys/
         (cd /build && su builder -c 'abuild checksum && abuild -r')
+        # Keep the built packages (main + doc) so CI can publish them as release assets.
+        mkdir -p /out && find /home/builder/packages -name 'kavach*.apk' -exec cp {} /out/ \;
         apk_path=$(find /home/builder/packages -name "kavach-$v-r0.apk" | head -1)
         [ -n "$apk_path" ] || { echo "no built apk found" >&2; exit 1; }
         apk add --allow-untrusted "$apk_path" >/dev/null

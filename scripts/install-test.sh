@@ -1,8 +1,9 @@
 #!/bin/sh
 # Install-test a release artifact inside a container.
-#   scripts/install-test.sh <debian|ubuntu|fedora|opensuse|arch|alpine> [dist-dir] [image]
+#   scripts/install-test.sh <distro> [dist-dir] [image] [out-dir]
 # dist-dir must contain the artifacts (build them with .github/workflows/release.yml, or see
 # docs/RELEASING.md). The optional third argument overrides the default container image.
+# The optional fourth directory receives native packages built by the arch/alpine tests.
 set -eu
 
 distro=${1:?usage: $0 <distro> [dist-dir] [image]}
@@ -22,8 +23,16 @@ esac
 image=${3:-$default_image}
 
 root=$(cd "$(dirname "$0")/.." && pwd)
+out=${4:-}
+out_args=()
+if [ -n "$out" ]; then
+    mkdir -p "$out"
+    out=$(cd "$out" && pwd)
+    out_args=(-v "$out:/out")
+fi
 exec docker run --rm \
     -v "$dir:/dist:ro" \
     -v "$root/packaging/install-test/container.sh:/container.sh:ro" \
+    "${out_args[@]}" \
     -e "KAVACH_VERSION=${KAVACH_VERSION:-0.4.0}" \
     "$image" sh /container.sh "$distro"
