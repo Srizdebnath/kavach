@@ -139,7 +139,8 @@ jobs:
           case "${{ matrix.distro }}" in
             arch|alpine)
               mkdir -p native
-              KAVACH_VERSION="$v" ./scripts/install-test.sh "${{ matrix.distro }}" dist "$PWD/native"
+              # third argument is the optional image override; pass "" to use the default
+              KAVACH_VERSION="$v" ./scripts/install-test.sh "${{ matrix.distro }}" dist "" "$PWD/native"
               ;;
             *) KAVACH_VERSION="$v" ./scripts/install-test.sh "${{ matrix.distro }}" dist ;;
           esac
