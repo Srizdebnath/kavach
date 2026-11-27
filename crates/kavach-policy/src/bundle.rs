@@ -11,6 +11,10 @@
 //!           `gateways`  — `[gateway.*]` L7 policies referenced by punt rules
 //!           `workloads` — k8s label / SPIFFE parts of selectors
 //!           A section the policy does not use is an empty list (one zero byte).
+//!           FR-GW-1/3 append an optional, self-delimiting agent-credential section after the
+//!           compiled policy: `u32 magic` + postcard `Vec<AgentSpec>`. Old readers ignore the
+//!           trailing bytes (postcard `from_bytes` does not require a full consume), so a bundle
+//!           written before that section still verifies here.
 //!
 //! signature = Ed25519(sk, "kavach-bundle-v1\0" || header || payload)   (pure Ed25519)
 //! key_id    = SHA-256(public key)[..8]
@@ -29,7 +33,8 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::compile::CompiledPolicy;
+use crate::compile::{CompiledPolicy, CompiledPolicyV1, CompiledPolicyV2, CompiledPolicyV3};
+use crate::schema::AgentSpec;
 
 pub const MAGIC: &[u8; 4] = b"KVB1";
 /// Newest bundle format: format 2 plus the optional gateway-policy and workload-selector
@@ -41,6 +46,8 @@ pub const FORMAT_V2: u16 = 2;
 /// Bundles signed before `CompiledDefaults::unclassified_deny` existed; still accepted.
 pub const FORMAT_V1: u16 = 1;
 pub const DOMAIN: &[u8] = b"kavach-bundle-v1\0";
+/// Marker of the optional format-3 agent section (`"KVAG"`).
+const AGENT_EXT_MAGIC: u32 = 0x4b56_4147;
 pub const HEADER_LEN: usize = 4 + 2 + 2 + 8 + 8 + 8 + 8 + 32 + 4;
 pub const SIG_LEN: usize = 64;
 /// Hard cap on payload size, checked before anything else.
@@ -171,10 +178,19 @@ pub fn sign(
         return Err(BundleError::Encode("fleet id longer than 32 bytes".into()));
     }
     let enc = |e: postcard::Error| BundleError::Encode(e.to_string());
-    let (format, payload) = match policy.to_v2() {
+    let (format, mut payload) = match policy.to_v2() {
         Some(v2) => (FORMAT_V2, postcard::to_allocvec(&v2).map_err(enc)?),
-        None => (FORMAT, postcard::to_allocvec(policy).map_err(enc)?),
+        None => (
+            FORMAT,
+            postcard::to_allocvec(&CompiledPolicyV3::from(policy)).map_err(enc)?,
+        ),
     };
+    // Appended after the compiled policy, not inside it: formats 1–3 written by older builds
+    // have no agent section and still decode, and readers that predate this build ignore it.
+    if format == FORMAT && policy.uses_agent_credentials() {
+        let ext = postcard::to_allocvec(&(AGENT_EXT_MAGIC, &policy.agents)).map_err(enc)?;
+        payload.extend_from_slice(&ext);
+    }
     sign_payload(
         format,
         &payload,
@@ -315,13 +331,38 @@ pub fn verify(
     }
     let decode_err = |e: postcard::Error| BundleError::Decode(e.to_string());
     let policy: CompiledPolicy = match format {
-        FORMAT_V1 => postcard::from_bytes::<crate::compile::CompiledPolicyV1>(payload)
+        FORMAT_V1 => postcard::from_bytes::<CompiledPolicyV1>(payload)
             .map_err(decode_err)?
             .into(),
-        FORMAT_V2 => postcard::from_bytes::<crate::compile::CompiledPolicyV2>(payload)
+        FORMAT_V2 => postcard::from_bytes::<CompiledPolicyV2>(payload)
             .map_err(decode_err)?
             .into(),
-        _ => postcard::from_bytes(payload).map_err(decode_err)?,
+        _ => {
+            let (v3, rest) =
+                postcard::take_from_bytes::<CompiledPolicyV3>(payload).map_err(decode_err)?;
+            let mut p = CompiledPolicy::from(v3);
+            if !rest.is_empty() {
+                let (magic, agents): (u32, Vec<AgentSpec>) =
+                    postcard::from_bytes(rest).map_err(decode_err)?;
+                if magic != AGENT_EXT_MAGIC {
+                    return Err(BundleError::Decode(
+                        "bad agent-credential section marker".into(),
+                    ));
+                }
+                if agents.len() != p.agents.len()
+                    || agents
+                        .iter()
+                        .zip(&p.agents)
+                        .any(|(new, old)| new.id != old.id)
+                {
+                    return Err(BundleError::Decode(
+                        "agent-credential section does not match the policy agents".into(),
+                    ));
+                }
+                p.agents = agents;
+            }
+            p
+        }
     };
     if let Some(r) = policy
         .rules

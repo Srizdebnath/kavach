@@ -255,8 +255,37 @@ async fn main() -> Result<()> {
             gateways_handle.clone(),
             proxy_stop.clone(),
         );
+        // SPIFFE credentials for the proxy come from the existing k8s/SPIFFE node agent: cgroup
+        // id → pod UID → rendered SPIFFE ID. The lock is held only for this short lookup.
+        let st = state.clone();
+        let agent_resolver: Arc<dyn kavach_gateway::AgentResolver> =
+            Arc::new(kavach_gateway::FnAgentResolver(move |cgroup, _pid| {
+                let st = st.lock().unwrap_or_else(|e| e.into_inner());
+                if !st.workloads.enabled {
+                    return None;
+                }
+                let uid = st
+                    .workloads
+                    .view
+                    .pods
+                    .iter()
+                    .find(|(id, _)| *id == cgroup)
+                    .map(|(_, uid)| uid.clone())?;
+                st.workloads
+                    .pods
+                    .get(&uid)
+                    .and_then(|p| p.spiffe_id.clone())
+            }));
         tokio::spawn(async move {
-            let r = kavachd::gateway::serve_proxy(&gcfg, orig, pols, sink, stop.notified()).await;
+            let r = kavachd::gateway::serve_proxy(
+                &gcfg,
+                orig,
+                pols,
+                sink,
+                Some(agent_resolver),
+                stop.notified(),
+            )
+            .await;
             if let Err(e) = r {
                 // The heartbeat sees no listener: punts keep using their fail mode.
                 error!(error = %e, listen = %gcfg.listen, "L7 gateway proxy stopped");

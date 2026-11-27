@@ -17,7 +17,7 @@ use super::http::{self, ChunkedDecoder, Framing, HttpError, RequestHead};
 use super::jsonrpc::{self, Inspection, Reason};
 use super::ws::{self, Assembler, FrameTracker, Step};
 use super::{DecisionEvent, OrigInfo, Protocol, Shared};
-use crate::{Decision, TlsMode, ToolPolicy};
+use crate::{AuthFailure, Credentials, Decision, TlsMode, ToolPolicy, agent as identities};
 
 const READ_CHUNK: usize = 16 * 1024;
 /// A ClientHello fits one TLS record (≤ 16 KiB + header) in practice.
@@ -29,6 +29,8 @@ struct Ctx {
     shared: Arc<Shared>,
     peer: SocketAddr,
     info: OrigInfo,
+    /// SPIFFE ID resolved from the connection's cgroup (only when a policy can use it).
+    spiffe: Option<String>,
 }
 
 impl Ctx {
@@ -40,6 +42,16 @@ impl Ctx {
         self.shared.policies.policy_for(&self.info)
     }
 
+    /// Credentials for one request: a per-request bearer header plus the connection's SPIFFE ID.
+    fn credentials(&self, authorization: Option<&[u8]>) -> Credentials {
+        Credentials {
+            bearer: authorization
+                .and_then(Credentials::bearer_token)
+                .map(str::to_owned),
+            spiffe_id: self.spiffe.clone(),
+        }
+    }
+
     fn emit(
         &self,
         protocol: Protocol,
@@ -47,6 +59,7 @@ impl Ctx {
         target: Option<String>,
         decision: Decision,
         reason: Reason,
+        agent_id: Option<String>,
     ) {
         let s = &self.shared.stats;
         match decision {
@@ -55,12 +68,13 @@ impl Ctx {
         };
         tracing::debug!(
             peer = %self.peer, dst = %self.info.dst, gateway = %self.info.gateway,
-            ?protocol, ?method, ?target, ?decision, ?reason, "gateway decision"
+            ?protocol, ?method, ?target, ?decision, ?reason, ?agent_id, "gateway decision"
         );
         self.shared.events.emit(DecisionEvent {
             gateway: self.info.gateway.clone(),
             rule_id: self.info.rule_id,
             pid: self.info.pid,
+            agent_id,
             cgroup_id: self.info.cgroup_id,
             peer: self.peer,
             dst: self.info.dst,
@@ -72,21 +86,72 @@ impl Ctx {
         });
     }
 
-    fn deny(&self, protocol: Protocol, reason: Reason) {
-        self.emit(protocol, None, None, Decision::Deny, reason);
-    }
-
-    /// Inspect one frame and record the decision.
-    fn inspect(&self, protocol: Protocol, frame: &[u8]) -> Inspection {
-        let policy = self.policy();
-        let i = jsonrpc::inspect(policy.as_deref(), frame, self.shared.cfg.max_frame());
+    fn emit_inspection(&self, protocol: Protocol, i: &Inspection) {
         self.emit(
             protocol,
             i.method.clone(),
             i.target.clone(),
             i.decision,
             i.reason,
+            i.agent_id.clone(),
         );
+    }
+
+    fn deny(&self, protocol: Protocol, reason: Reason) {
+        self.emit(protocol, None, None, Decision::Deny, reason, None);
+    }
+
+    /// Check identity for a flow without a JSON-RPC body (TLS, WS handshake, SSE open).
+    /// Returns the authenticated agent id, or `None` when authentication is not required.
+    fn authorize(
+        &self,
+        protocol: Protocol,
+        creds: &Credentials,
+    ) -> Result<Option<String>, AuthFailure> {
+        let r = identities::resolve_agent(self.shared.policies.as_ref(), &self.info.gateway, creds);
+        if let Err(e) = r {
+            self.deny(
+                protocol,
+                match e {
+                    AuthFailure::Unauthenticated => Reason::Unauthenticated,
+                    AuthFailure::Disabled => Reason::AgentDisabled,
+                },
+            );
+        }
+        r
+    }
+
+    /// Inspect one frame, resolve its agent, and charge its budget.
+    fn inspect(&self, protocol: Protocol, frame: &[u8], creds: &Credentials) -> Inspection {
+        let policy = self.policy();
+        let mut i = jsonrpc::inspect(policy.as_deref(), frame, self.shared.cfg.max_frame());
+        match identities::resolve_agent(self.shared.policies.as_ref(), &self.info.gateway, creds) {
+            Ok(id) => {
+                i.agent_id = id.clone();
+                if i.decision == Decision::Allow && i.method.as_deref() == Some("tools/call") {
+                    let agent_policy = id
+                        .as_deref()
+                        .and_then(|id| identities::policy_for(self.shared.policies.as_ref(), id));
+                    if let Some(p) = agent_policy
+                        && !self
+                            .shared
+                            .budgets
+                            .charge(id.as_deref().unwrap_or_default(), &p)
+                    {
+                        i.decision = Decision::Deny;
+                        i.reason = Reason::Budget;
+                    }
+                }
+            }
+            Err(e) => {
+                i.decision = Decision::Deny;
+                i.reason = match e {
+                    AuthFailure::Unauthenticated => Reason::Unauthenticated,
+                    AuthFailure::Disabled => Reason::AgentDisabled,
+                };
+            }
+        }
+        self.emit_inspection(protocol, &i);
         i
     }
 
@@ -104,6 +169,23 @@ impl Ctx {
         let _ = s.set_nodelay(true);
         Ok(s)
     }
+}
+
+/// Ask the optional resolver only when some agent policy can use a SPIFFE ID. Without a
+/// resolver (standalone proxy), SPIFFE authentication is simply unavailable.
+fn resolve_spiffe(shared: &Shared, info: &OrigInfo) -> Option<String> {
+    let needs = shared
+        .policies
+        .agents()
+        .iter()
+        .any(|(_, p)| !p.spiffe_id.is_empty());
+    if !needs {
+        return None;
+    }
+    shared
+        .agent_resolver
+        .as_ref()?
+        .spiffe_id(info.cgroup_id, info.pid)
 }
 
 /// Read more bytes into `buf` (appending). `Ok(0)` is EOF; a timeout is an error.
@@ -144,12 +226,20 @@ pub(super) async fn handle(shared: Arc<Shared>, mut client: TcpStream, peer: Soc
                 gateway: String::new(),
                 cgroup_id: 0,
                 pid: 0,
+                agent_id: None,
             },
+            spiffe: None,
         };
         ctx.deny(Protocol::Unknown, Reason::NoOrigDst);
         return;
     };
-    let ctx = Ctx { shared, peer, info };
+    let spiffe = resolve_spiffe(&shared, &info);
+    let ctx = Ctx {
+        shared,
+        peer,
+        info,
+        spiffe,
+    };
     let mut buf = Vec::new();
     let Some(kind) = sniff(&mut client, &mut buf, ctx.shared.cfg.header_timeout()).await else {
         return;
@@ -220,6 +310,10 @@ async fn tls(ctx: &Ctx, mut client: TcpStream, mut buf: Vec<u8>) {
             Err(_) => break None,
         }
     };
+    let agent = match ctx.authorize(Protocol::Tls, &ctx.credentials(None)) {
+        Ok(id) => id,
+        Err(_) => return,
+    };
     let policy = ctx.policy();
     let mode = policy.as_ref().map(|p| p.tls);
     tracing::info!(peer = %ctx.peer, dst = %ctx.info.dst, sni = ?sni, ?mode, "TLS flow at gateway");
@@ -231,7 +325,14 @@ async fn tls(ctx: &Ctx, mut client: TcpStream, mut buf: Vec<u8>) {
     } else {
         (Decision::Deny, Reason::Tls)
     };
-    ctx.emit(Protocol::Tls, Some("tls".into()), sni, decision, reason);
+    ctx.emit(
+        Protocol::Tls,
+        Some("tls".into()),
+        sni,
+        decision,
+        reason,
+        agent,
+    );
     if !pass {
         return;
     }
@@ -365,6 +466,9 @@ async fn http_session(ctx: &Ctx, mut client: TcpStream, mut cbuf: Vec<u8>) {
             }
         };
         cbuf.drain(..head.head_len);
+        // A keep-alive connection can carry several requests from different agents: resolve the
+        // bearer token from *this* head, never from a previous one.
+        let creds = ctx.credentials(head.header("authorization"));
         if head.expect_continue
             && head.framing != Framing::None
             && send(&mut client, b"HTTP/1.1 100 Continue\r\n\r\n", ctx.idle())
@@ -393,7 +497,7 @@ async fn http_session(ctx: &Ctx, mut client: TcpStream, mut cbuf: Vec<u8>) {
         }
 
         if !body.is_empty() {
-            let i = ctx.inspect(Protocol::Http, &body);
+            let i = ctx.inspect(Protocol::Http, &body, &creds);
             if i.decision == Decision::Deny {
                 let close = i.reason.is_malformed() || head.close;
                 let json = jsonrpc::error_body(&i, &ctx.info.gateway, ctx.info.rule_id);
@@ -412,7 +516,7 @@ async fn http_session(ctx: &Ctx, mut client: TcpStream, mut cbuf: Vec<u8>) {
                 continue;
             }
         } else if matches!(head.method.as_str(), "POST" | "PUT" | "PATCH") {
-            let i = ctx.inspect(Protocol::Http, b"");
+            let i = ctx.inspect(Protocol::Http, b"", &creds);
             let json = jsonrpc::error_body(&i, &ctx.info.gateway, ctx.info.rule_id);
             let r = http::simple_response(400, "Bad Request", "application/json", &json, true);
             return respond(&mut client, ctx, &r).await;
@@ -421,16 +525,25 @@ async fn http_session(ctx: &Ctx, mut client: TcpStream, mut cbuf: Vec<u8>) {
             let r = http::simple_response(403, "Forbidden", "text/plain", b"", true);
             return respond(&mut client, ctx, &r).await;
         } else {
+            let protocol = if head.websocket {
+                Protocol::WebSocket
+            } else {
+                Protocol::Http
+            };
+            let agent = match ctx.authorize(protocol, &creds) {
+                Ok(id) => id,
+                Err(_) => {
+                    let r = http::simple_response(403, "Forbidden", "text/plain", b"", true);
+                    return respond(&mut client, ctx, &r).await;
+                }
+            };
             ctx.emit(
-                if head.websocket {
-                    Protocol::WebSocket
-                } else {
-                    Protocol::Http
-                },
+                protocol,
                 Some(head.method.clone()),
                 Some(head.target.clone()),
                 Decision::Allow,
                 Reason::NoFrame,
+                agent,
             );
         }
 
@@ -459,7 +572,9 @@ async fn http_session(ctx: &Ctx, mut client: TcpStream, mut cbuf: Vec<u8>) {
                 }
                 upstream = Some((up, ubuf));
             }
-            Ok(Outcome::Upgraded) => return ws_session(ctx, client, cbuf, up, ubuf).await,
+            Ok(Outcome::Upgraded) => {
+                return ws_session(ctx, client, cbuf, up, ubuf, &creds).await;
+            }
             Err(RelayError::BeforeHead) => {
                 let r = http::simple_response(502, "Bad Gateway", "text/plain", b"", true);
                 return respond(&mut client, ctx, &r).await;
@@ -718,10 +833,18 @@ async fn framed<F, Fut>(
     }
 }
 
-async fn ws_session(ctx: &Ctx, client: TcpStream, cbuf: Vec<u8>, up: TcpStream, ubuf: Vec<u8>) {
+async fn ws_session(
+    ctx: &Ctx,
+    client: TcpStream,
+    cbuf: Vec<u8>,
+    up: TcpStream,
+    ubuf: Vec<u8>,
+    creds: &Credentials,
+) {
     let boundary = Boundary::Ws(FrameTracker::default());
+    let creds = creds.clone();
     framed(ctx, client, up, ubuf, boundary, |cr, uw, tx| {
-        ws_client_loop(ctx, cr, cbuf, uw, tx)
+        ws_client_loop(ctx, cr, cbuf, uw, tx, creds)
     })
     .await;
 }
@@ -732,6 +855,7 @@ async fn ws_client_loop(
     mut cbuf: Vec<u8>,
     mut uw: OwnedWriteHalf,
     tx: mpsc::Sender<Inject>,
+    creds: Credentials,
 ) -> OwnedWriteHalf {
     let idle = ctx.idle();
     let mut asm = Assembler::new(ctx.shared.cfg.max_frame());
@@ -794,7 +918,7 @@ async fn ws_client_loop(
                 return uw;
             }
             Ok(Step::Text { text, raw }) => {
-                let i = ctx.inspect(Protocol::WebSocket, &text);
+                let i = ctx.inspect(Protocol::WebSocket, &text, &creds);
                 if i.decision == Decision::Allow {
                     if send(&mut uw, &raw, idle).await.is_err() {
                         return uw;
@@ -823,6 +947,12 @@ async fn ndjson_session(ctx: &Ctx, client: TcpStream, cbuf: Vec<u8>) {
     if ctx.policy().is_none() {
         return ctx.deny(Protocol::RawJsonRpc, Reason::NoPolicy);
     }
+    // Raw NDJSON has no headers: only a SPIFFE ID (or a caller that wraps the stream in HTTP)
+    // can identify an agent here. Authorization is still checked for every frame below.
+    let creds = ctx.credentials(None);
+    if ctx.authorize(Protocol::RawJsonRpc, &creds).is_err() {
+        return;
+    }
     let Ok(up) = ctx.connect().await else {
         return;
     };
@@ -832,7 +962,7 @@ async fn ndjson_session(ctx: &Ctx, client: TcpStream, cbuf: Vec<u8>) {
         up,
         Vec::new(),
         Boundary::Lines(true),
-        |cr, uw, tx| ndjson_client_loop(ctx, cr, cbuf, uw, tx),
+        |cr, uw, tx| ndjson_client_loop(ctx, cr, cbuf, uw, tx, creds),
     )
     .await;
 }
@@ -843,6 +973,7 @@ async fn ndjson_client_loop(
     mut cbuf: Vec<u8>,
     mut uw: OwnedWriteHalf,
     tx: mpsc::Sender<Inject>,
+    creds: Credentials,
 ) -> OwnedWriteHalf {
     let idle = ctx.idle();
     let max = ctx.shared.cfg.max_frame();
@@ -851,7 +982,7 @@ async fn ndjson_client_loop(
         let Some(p) = cbuf[scanned..].iter().position(|&b| b == b'\n') else {
             scanned = cbuf.len();
             if cbuf.len() > max {
-                let i = ctx.inspect(Protocol::RawJsonRpc, &cbuf);
+                let i = ctx.inspect(Protocol::RawJsonRpc, &cbuf, &creds);
                 let mut r = jsonrpc::error_body(&i, &ctx.info.gateway, ctx.info.rule_id);
                 r.push(b'\n');
                 let _ = tx
@@ -875,7 +1006,7 @@ async fn ndjson_client_loop(
         if frame.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
-        let i = ctx.inspect(Protocol::RawJsonRpc, frame);
+        let i = ctx.inspect(Protocol::RawJsonRpc, frame, &creds);
         if i.decision == Decision::Allow {
             if send(&mut uw, &line, idle).await.is_err() {
                 return uw;
