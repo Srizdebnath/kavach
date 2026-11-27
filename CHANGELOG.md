@@ -4,7 +4,7 @@ All notable changes to Kavach. The format follows [Keep a Changelog](https://kee
 and the project uses [Semantic Versioning](https://semver.org/). Release milestones (v0.1 … v0.5
 in the README) describe *scope*; version numbers describe *releases*.
 
-## [Unreleased]
+## [0.4.0] - 2026-11-27
 
 ### Added
 - Named L7 gateway policies in kavach.toml (`[gateway.<name>]`: `allow_tools`, `deny_tools`,
@@ -25,12 +25,25 @@ in the README) describe *scope*; version numbers describe *releases*.
   renews a liveness deadline only while the listener is up, so a dead gateway falls back to
   each rule's fail mode within 3 s. `kavachctl doctor` reports whether the redirect can run.
 
+- Native packages for Arch (`packaging/arch/PKGBUILD`) and Alpine (`packaging/alpine/APKBUILD`,
+  with an OpenRC init script). They repackage the static musl release tarball, so no Rust
+  toolchain is needed on the host. All packages — `.deb`, `.rpm`, tarball, PKGBUILD and
+  APKBUILD — now ship `kavach-gateway` alongside `kavachd` and `kavachctl`.
+- `kavach-gateway --version` / `--help` for package and install-test probing.
+- Reproducible release builds driven by `SOURCE_DATE_EPOCH` from the tagged commit, with the
+  build/install matrix and verification commands in `docs/RELEASING.md`.
+
 ### Changed
 - Kernel ABI v3 (pins under `/sys/fs/bpf/kavach/v3`; upgrades retire v2). `Rule` carries the
   punt rule's gateway index in former reserved bytes.
 - The AF_XDP backend keeps consuming frames on its selected ports, now documented as
   deliberate: AF_XDP cannot hand frames back to the stack, and a TAP re-inject would bypass
   policy. Punted flows do not use it.
+- `kavach.ko` is kernel-version-specific and is **not** shipped in distro packages. Its source
+  lives in [`kernel/kavach-ko/`](kernel/kavach-ko/) and is built and self-tested per kernel by
+  [`.github/workflows/kavach-ko.yml`](.github/workflows/kavach-ko.yml) (including syzkaller).
+  Install it from source for the running kernel with `make -C kernel/kavach-ko` (`make install`);
+  see `docs/RELEASING.md`.
 
 ## [0.3.1] - 2026-11-23
 
@@ -93,5 +106,6 @@ Scope v0.1–v0.3, built and kernel-tested (source only, no packages).
 - `no_std` reference engine (`kavach-core`) differentially tested against the kernel; TLS
   ClientHello, JA4 and DNS parsers; fuzz targets; Miri in CI.
 
+[0.4.0]: https://github.com/Srizdebnath/kavach/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/Srizdebnath/kavach/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/Srizdebnath/kavach/releases/tag/v0.3.0

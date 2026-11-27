@@ -13,7 +13,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.1"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.88"
 license = "Apache-2.0 OR MIT"
@@ -30,12 +30,12 @@ dbg_macro = "deny"
 todo = "warn"
 
 [workspace.dependencies]
-kavach-common = { path = "crates/kavach-common", version = "0.3.1" }
-kavach-core = { path = "crates/kavach-core", version = "0.3.1" }
-kavach-policy = { path = "crates/kavach-policy", version = "0.3.1" }
-kavach-api = { path = "crates/kavach-api", version = "0.3.1" }
-kavach-gateway = { path = "crates/kavach-gateway", version = "0.3.1" }
-kavach-parsers = { path = "crates/kavach-parsers", version = "0.3.1", default-features = false }
+kavach-common = { path = "crates/kavach-common", version = "0.4.0" }
+kavach-core = { path = "crates/kavach-core", version = "0.4.0" }
+kavach-policy = { path = "crates/kavach-policy", version = "0.4.0" }
+kavach-api = { path = "crates/kavach-api", version = "0.4.0" }
+kavach-gateway = { path = "crates/kavach-gateway", version = "0.4.0" }
+kavach-parsers = { path = "crates/kavach-parsers", version = "0.4.0", default-features = false }
 anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }

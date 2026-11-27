@@ -1,7 +1,9 @@
 name: release
 # Tag v<semver> on main -> test, build static binaries + .deb + .rpm + tarball for x86_64 and
-# aarch64, then publish them with SHA256SUMS, a keyless Sigstore signature and SLSA build
-# provenance. No long-lived signing key exists anywhere.
+# aarch64, install-test every artifact in containers (Debian, Ubuntu, Fedora, openSUSE, Arch,
+# Alpine), then publish them with SHA256SUMS, a keyless Sigstore signature and SLSA build
+# provenance. No long-lived signing key exists anywhere. Builds are reproducible via
+# SOURCE_DATE_EPOCH from the tagged commit (see docs/RELEASING.md).
 on:
   push:
     tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
@@ -45,12 +47,20 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-deb,cargo-generate-rpm
+      # SR-7: one timestamp for every asset in this job, taken from the tagged commit rather
+      # than the wall clock. cargo-deb, cargo-generate-rpm and tar all honour this environment.
+      - name: reproducible build timestamp
+        run: |
+          echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+          echo "TZ=UTC" >> "$GITHUB_ENV"
       - name: static binaries
-        run: cargo build --release --locked --target "$TARGET" -p kavachd -p kavachctl
+        run: cargo build --release --locked --target "$TARGET" -p kavachd -p kavachctl -p kavach-gateway
       - name: smoke-test the binaries
         run: |
-          file target/$TARGET/release/kavachd | grep -q 'static'
-          target/$TARGET/release/kavachd --version
+          for bin in kavachd kavachctl kavach-gateway; do
+            file target/$TARGET/release/$bin | grep -q 'static'
+            target/$TARGET/release/$bin --version
+          done
           target/$TARGET/release/kavachctl doctor || true
           target/$TARGET/release/kavachctl compile examples/kavach.toml
       - name: .deb
@@ -62,19 +72,22 @@ jobs:
           v=${GITHUB_REF_NAME#v}
           d=kavach-$v-${{ matrix.arch }}-linux-musl
           mkdir -p "$d/bin" "$d/etc" "$d/systemd" "$d/doc/examples"
-          cp target/$TARGET/release/kavachd target/$TARGET/release/kavachctl "$d/bin/"
+          cp target/$TARGET/release/kavachd target/$TARGET/release/kavachctl \
+             target/$TARGET/release/kavach-gateway "$d/bin/"
           cp examples/kavachd.toml "$d/etc/"
           cp packaging/systemd/kavachd.service "$d/systemd/"
           cp packaging/install.sh "$d/"
           cp README.md CHANGELOG.md docs/INSTALL.md docs/ARCHITECTURE.md LICENSE* "$d/doc/" 2>/dev/null || true
           cp -r LICENSES "$d/doc/"
           cp examples/kavach.toml "$d/doc/examples/"
-          tar --owner=0 --group=0 --sort=name --mtime="@$(git log -1 --format=%ct)" \
-            -czf "dist/$d.tar.gz" "$d"
+          tar --owner=0 --group=0 --sort=name --mtime="@$SOURCE_DATE_EPOCH" \
+            --format=gnu -czf "dist/$d.tar.gz" "$d"
       - name: install-test the .deb
         run: |
           sudo apt-get install -y ./dist/*.deb
-          kavachctl --version || kavachctl --help >/dev/null
+          kavachd --version
+          kavachctl --version
+          kavach-gateway --version
           systemctl cat kavachd >/dev/null
           sudo test -f /etc/kavach/kavachd.toml       # /etc/kavach is 0750 root on purpose
           [ "$(sudo stat -c %a /etc/kavach)" = 750 ]
@@ -86,8 +99,36 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
-  publish:
+  install-test:
+    # Install each artifact in a real container: binaries, service definition, config, removal.
+    # Arch and Alpine build the native packages from the static tarball via the shipped
+    # PKGBUILD / APKBUILD, which is the same path a user takes.
     needs: build
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { distro: debian }
+          - { distro: ubuntu }
+          - { distro: fedora }
+          - { distro: opensuse }
+          - { distro: arch }
+          - { distro: alpine }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+      - name: install / verify / remove (${{ matrix.distro }})
+        run: |
+          v=${GITHUB_REF_NAME#v}; v=${v%%-*}
+          KAVACH_VERSION="$v" ./scripts/install-test.sh "${{ matrix.distro }}" dist
+
+  publish:
+    needs: [build, install-test]
     runs-on: ubuntu-24.04
     permissions:
       contents: write       # create the release
@@ -100,7 +141,18 @@ jobs:
           pattern: dist-*
           path: dist
           merge-multiple: true
-      - run: cd dist && sha256sum -- * > SHA256SUMS && cat SHA256SUMS
+      - name: native package manifests (ships as release assets too)
+        run: |
+          cp packaging/arch/PKGBUILD packaging/arch/kavach.install \
+             packaging/alpine/APKBUILD packaging/alpine/kavachd.initd dist/
+      - name: checksums (exclude the checksum list and its signature)
+        run: |
+          cd dist
+          for f in *; do
+            case "$f" in SHA256SUMS*) continue ;; esac
+            sha256sum "$f"
+          done > SHA256SUMS
+          cat SHA256SUMS
       - uses: actions/attest-build-provenance@v2
         with:
           subject-path: dist/*

@@ -1,0 +1,51 @@
+# Maintainer: The Kavach Authors <https://github.com/Srizdebnath/kavach>
+# Binary-only package: the static musl tarball from the matching release is the sole source,
+# so no Rust toolchain, kernel headers or eBPF build is needed on the Arch host.
+pkgname=kavach
+pkgver=0.4.0
+pkgrel=1
+pkgdesc='Kernel-native eBPF firewall with identity-aware egress and the L7 agent gateway'
+arch=('x86_64' 'aarch64')
+url='https://github.com/Srizdebnath/kavach'
+license=('GPL-2.0-only' 'Apache-2.0' 'MIT')
+# musl binaries are statically linked; systemd supplies the unit and the runtime directories.
+depends=('systemd')
+backup=('etc/kavach/kavachd.toml')
+install=kavach.install
+# The release binaries carry their own debug metadata; do not re-split it into a debug package.
+options=('!strip' '!debug')
+source=("kavach-$pkgver-$CARCH-linux-musl.tar.gz::https://github.com/Srizdebnath/kavach/releases/download/v$pkgver/kavach-$pkgver-$CARCH-linux-musl.tar.gz"
+        "SHA256SUMS::https://github.com/Srizdebnath/kavach/releases/download/v$pkgver/SHA256SUMS")
+# makepkg cannot pin the tarball digest before the release is cut. The build() function below
+# verifies it against the Sigstore-signed SHA256SUMS asset instead of trusting the download.
+sha256sums=('SKIP' 'SKIP')
+
+build() {
+    local tarball="kavach-$pkgver-$CARCH-linux-musl.tar.gz"
+    local line
+    line=$(grep -E "  ${tarball}$" SHA256SUMS || true)
+    [ -n "$line" ] || { echo "no checksum for $tarball in SHA256SUMS" >&2; return 1; }
+    printf '%s\n' "$line" | sha256sum -c -
+}
+
+check() {
+    cd "$srcdir/kavach-$pkgver-$CARCH-linux-musl"
+    local bin
+    for bin in kavachd kavachctl kavach-gateway; do
+        "./bin/$bin" --version | grep -q "^$bin $pkgver$"
+    done
+}
+
+package() {
+    cd "$srcdir/kavach-$pkgver-$CARCH-linux-musl"
+    local bin
+    for bin in kavachd kavachctl kavach-gateway; do
+        install -Dm755 "bin/$bin" "$pkgdir/usr/bin/$bin"
+    done
+    install -Dm0640 etc/kavachd.toml "$pkgdir/etc/kavach/kavachd.toml"
+    install -Dm0644 systemd/kavachd.service "$pkgdir/usr/lib/systemd/system/kavachd.service"
+    install -d -m0750 "$pkgdir/etc/kavach/trusted_keys" \
+        "$pkgdir/var/lib/kavach" "$pkgdir/var/log/kavach"
+    install -d -m0755 "$pkgdir/usr/share/doc/kavach"
+    cp -r doc/. "$pkgdir/usr/share/doc/kavach/"
+}

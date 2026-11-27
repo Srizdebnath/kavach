@@ -49,9 +49,14 @@ Every [release](https://github.com/Srizdebnath/kavach/releases) has these assets
 |---|---|
 | `kavach_<ver>-1_amd64.deb`, `kavach_<ver>-1_arm64.deb` | Debian, Ubuntu, Mint, Pop!_OS |
 | `kavach-<ver>-1.x86_64.rpm`, `kavach-<ver>-1.aarch64.rpm` | Fedora, RHEL/Rocky/Alma, openSUSE |
-| `kavach-<ver>-x86_64-linux-musl.tar.gz`, `…-aarch64-linux-musl.tar.gz` | any distro (Arch, Alpine, NixOS, Gentoo, …): static binaries + `install.sh` |
+| `kavach-<ver>-x86_64-linux-musl.tar.gz`, `…-aarch64-linux-musl.tar.gz` | any distro: static binaries + `install.sh`; also the source for the Arch and Alpine packages below |
+| `packaging/arch/PKGBUILD`, `packaging/alpine/APKBUILD` (+ `kavachd.initd`) | Arch / Manjaro (`makepkg`), Alpine / postmarketOS (`abuild`): repackage the static tarball natively, no Rust toolchain needed |
 | `SHA256SUMS`, `SHA256SUMS.sigstore.json` | checksums + keyless Sigstore signature |
 | `Source code (zip / tar.gz)` | added by GitHub automatically; only needed to build from source |
+
+`kavach.ko` is not in these packages: it must be built from
+[`kernel/kavach-ko/`](../kernel/kavach-ko/) for your running kernel (CI does this per kernel in
+`.github/workflows/kavach-ko.yml`). Maintainers: see [RELEASING.md](RELEASING.md).
 
 ## 3. Verify the download
 
@@ -60,7 +65,7 @@ tagged commit. Two independent checks are available:
 
 ```sh
 # a) GitHub build-provenance attestation (SLSA): proves which workflow + commit built the file
-gh attestation verify kavach_0.3.1-1_amd64.deb --repo Srizdebnath/kavach
+gh attestation verify kavach_0.4.0-1_amd64.deb --repo Srizdebnath/kavach
 
 # b) Sigstore signature over the checksum list, then the checksums
 cosign verify-blob SHA256SUMS \
@@ -78,25 +83,45 @@ GitHub's OIDC token and recorded in the public Rekor transparency log.
 **Debian / Ubuntu**
 
 ```sh
-sudo apt install ./kavach_0.3.1-1_amd64.deb
+sudo apt install ./kavach_0.4.0-1_amd64.deb
 ```
 
 **Fedora / RHEL / openSUSE**
 
 ```sh
-sudo dnf install ./kavach-0.3.1-1.x86_64.rpm      # zypper install ./… on openSUSE
+sudo dnf install ./kavach-0.4.0-1.x86_64.rpm      # zypper install ./… on openSUSE
+```
+
+**Arch / Manjaro (native package)**
+
+```sh
+curl -LO https://github.com/Srizdebnath/kavach/releases/download/v0.4.0/PKGBUILD
+curl -LO https://github.com/Srizdebnath/kavach/releases/download/v0.4.0/kavach.install
+makepkg                           # downloads the static tarball; no Rust build
+sudo pacman -U kavach-0.4.0-1-*.pkg.tar.zst
+```
+
+**Alpine / postmarketOS (native package)**
+
+```sh
+curl -LO https://github.com/Srizdebnath/kavach/releases/download/v0.4.0/APKBUILD
+curl -LO https://github.com/Srizdebnath/kavach/releases/download/v0.4.0/kavachd.initd
+abuild checksum && abuild -r      # downloads the static tarball; no Rust build
+sudo apk add kavach               # then: sudo rc-service kavachd start when ready
 ```
 
 **Any distro (tarball)**
 
 ```sh
-tar xzf kavach-0.3.1-x86_64-linux-musl.tar.gz
-cd kavach-0.3.1-x86_64-linux-musl
+tar xzf kavach-0.4.0-x86_64-linux-musl.tar.gz
+cd kavach-0.4.0-x86_64-linux-musl
 sudo ./install.sh                 # PREFIX=/usr/local by default
 ```
 
-All three install `kavachd`, `kavachctl`, the systemd unit `kavachd.service` (installed, **not
-enabled or started**), and `/etc/kavach/kavachd.toml`. An existing config is never overwritten.
+All packages install `kavachd`, `kavachctl` and `kavach-gateway` (the v0.4 L7 agent gateway),
+the service definition (`kavachd.service` on systemd, `/etc/init.d/kavachd` on OpenRC; installed,
+**not enabled or started**), and `/etc/kavach/kavachd.toml`. An existing config is never
+overwritten.
 
 Layout after install:
 
@@ -250,7 +275,7 @@ want them gone.
 # toolchain: Rust (stable, see rust-version in Cargo.toml), clang ≥ 14, bpftool
 git clone https://github.com/Srizdebnath/kavach && cd kavach
 cargo xtask build-bpf            # compiles bpf/*.c to target/bpf/kavach.bpf.o (CO-RE)
-cargo build --release -p kavachd -p kavachctl
+cargo build --release -p kavachd -p kavachctl -p kavach-gateway
 cargo test --workspace           # unprivileged suite
 sudo scripts/priv-test.sh        # verifier + real-kernel suite (needs root)
 ```

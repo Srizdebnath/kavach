@@ -1,0 +1,24 @@
+#!/sbin/openrc-run
+# Kavach host daemon for OpenRC. Enforcement lives in the kernel, so stopping the daemon
+# does not detach programs; use `kavachctl kill-switch --yes` for that.
+
+description="Kavach kernel-native eBPF firewall"
+command="/usr/bin/kavachd"
+command_args="--config /etc/kavach/kavachd.toml"
+command_background="true"
+pidfile="/run/kavach/kavachd.pid"
+output_log="/var/log/kavach/kavachd.log"
+error_log="/var/log/kavach/kavachd.log"
+
+depend() {
+	need localmount
+	before network firewall
+	after sysfs
+}
+
+start_pre() {
+	checkpath -d -q -m 0750 -o root:root /run/kavach
+	checkpath -d -q -m 0750 -o root:root /etc/kavach/trusted_keys
+	checkpath -d -q -m 0750 -o root:root /var/lib/kavach
+	checkpath -d -q -m 0750 -o root:root /var/log/kavach
+}
