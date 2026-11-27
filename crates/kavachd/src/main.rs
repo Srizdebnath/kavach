@@ -228,24 +228,31 @@ async fn main() -> Result<()> {
     });
 
     // The in-process L7 proxy. kavachd's own tgid is exempt from redirection, so the proxy's
-    // upstream connects are never looped back to itself. Decisions go to the audit log.
+    // upstream connects are never looped back to itself. The proxy emits decisions into a
+    // channel (never blocking its data path); the daemon task writes each one to flow_cache
+    // (FR-GW-5) under the state lock and records it in the audit log.
     let proxy_stop = Arc::new(Notify::new());
     if let Some(g) = &_gateway {
         let (etx, mut erx) = mpsc::channel::<kavach_gateway::DecisionEvent>(4096);
         let sink: Arc<dyn kavach_gateway::EventSink> =
             Arc::new(kavach_gateway::proxy::ChannelSink::new(etx));
         let st = state.clone();
+        let orig = g.orig.clone();
         tokio::spawn(async move {
             let mut throttle = kavachd::gateway::AuditThrottle::new(10);
             while let Some(ev) = erx.recv().await {
-                if !throttle.admit(&ev) {
-                    continue;
-                }
                 if let Ok(mut s) = st.lock() {
-                    s.audit.record(
-                        "gateway_decision",
-                        serde_json::to_value(&ev).unwrap_or_default(),
-                    );
+                    if let Some(k) = s.kernel.as_mut() {
+                        kavachd::gateway::write_decision_verdict(k, &orig, &ev);
+                    }
+                    // Every deny and up to 10 allows/s are audited; all decisions, including
+                    // the sampled-out ones, are written back above.
+                    if throttle.admit(&ev) {
+                        s.audit.record(
+                            "gateway_decision",
+                            serde_json::to_value(&ev).unwrap_or_default(),
+                        );
+                    }
                 }
             }
         });

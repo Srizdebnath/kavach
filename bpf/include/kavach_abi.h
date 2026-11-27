@@ -162,6 +162,21 @@
 #define KV_FLOW_F_INGRESS (1 << 1)
 
 /**
+ * [`FlowVal::l7_verdict`]: no L7 decision (the entry's L3/L4 verdict applies).
+ */
+#define KV_L7_VERDICT_NONE 0
+
+/**
+ * [`FlowVal::l7_verdict`]: the L7 gateway allowed the flow.
+ */
+#define KV_L7_VERDICT_ALLOW 1
+
+/**
+ * [`FlowVal::l7_verdict`]: the L7 gateway denied the flow; TC drops it.
+ */
+#define KV_L7_VERDICT_DROP 2
+
+/**
  * IPv6 sources are rate-limited per /64 (an attacker controls a whole /64).
  */
 #define KV_RATE_V6_PREFIX 64
@@ -368,7 +383,12 @@ struct kv_flow_key {
 };
 
 /**
- * Cached decision for a flow. 48 bytes.
+ * Cached decision for a flow. 56 bytes.
+ *
+ * The `verdict`/`generation`/`rule_id` triple is the L3/L4 decision made by TC. The `l7_*`
+ * triple is the L7 gateway's write-back (FR-GW-5): TC only honours it when `l7_generation`
+ * matches the active policy generation, so entries from an older generation are misses
+ * (FR-HS-4). `l7_verdict == 0` leaves existing L3/L4 behaviour unchanged.
  */
 struct kv_flow_val {
   /**
@@ -388,7 +408,20 @@ struct kv_flow_val {
    * `KV_FLOW_F_*`.
    */
   __u8 flags;
-  __u8 _pad[6];
+  /**
+   * `KV_L7_VERDICT_*` (0 = none).
+   */
+  __u8 l7_verdict;
+  __u8 _pad[1];
+  /**
+   * Generation of the punt record the L7 decision was made for.
+   */
+  __u32 l7_generation;
+  /**
+   * Rule id of the L7 decision (the punting egress rule).
+   */
+  __u32 l7_rule_id;
+  __u8 _pad2[4];
   __u64 last_seen_ns;
   __u64 pkts;
   __u64 bytes;
@@ -784,7 +817,7 @@ struct kv_orig_key {
 
 /* Layout must match crates/kavach-common (checked at compile time). */
 _Static_assert(sizeof(struct kv_flow_key) == 40, "ABI drift: kv_flow_key");
-_Static_assert(sizeof(struct kv_flow_val) == 48, "ABI drift: kv_flow_val");
+_Static_assert(sizeof(struct kv_flow_val) == 56, "ABI drift: kv_flow_val");
 _Static_assert(sizeof(struct kv_block_key) == 20, "ABI drift: kv_block_key");
 _Static_assert(sizeof(struct kv_block_val) == 16, "ABI drift: kv_block_val");
 _Static_assert(sizeof(struct kv_src_key) == 16, "ABI drift: kv_src_key");

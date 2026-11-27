@@ -10,14 +10,21 @@
 //!   map, and records the gateway's connection-level verdict ([`PinnedOrigDst::record_verdict`]).
 //!
 //! # Verdict write-back semantics
-//! The gateway sits in the path of every redirected connection and decides per JSON-RPC frame,
-//! so it enforces its own decisions (forward, refuse, close). The client leg runs over loopback,
-//! where TC (and so `flow_cache`) is not attached, and the upstream leg is an ordinary
-//! connection owned by the gateway's identity (exempt from re-punting, at the LSM and at TC
-//! re-evaluation). There is therefore no `flow_cache` entry that could carry the L7 verdict.
-//! `record_verdict` stores the latest connection-level verdict in the `orig_dst` entry
-//! (`KV_PUNT_F_DECIDED`) for observability; it never changes what the kernel lets through, and
-//! it disappears with the entry when the client socket closes.
+//! Every JSON-RPC frame is enforced in-path by the proxy (forward, refuse, close). Its decision
+//! is also written back to the kernel `flow_cache` (FR-GW-5):
+//! [`PinnedOrigDst`] recovers the punting record from `orig_dst`, and
+//! [`write_decision_verdict`] calls [`crate::kernel::Kernel::write_flow_verdict`] from the
+//! daemon's decision task. Both the forward and reply 5-tuples of the original (pre-redirect)
+//! connection are seeded with `l7_verdict`, `l7_generation` and `l7_rule_id`, so TC egress and
+//! TC ingress can drop a denied flow in O(1) without asking user space again. TC honours the
+//! L7 verdict only while its generation matches the active policy (FR-HS-4); a swap makes
+//! stale entries misses and they are re-judged at L3/L4.
+//!
+//! The client leg still runs over loopback and the upstream leg still belongs to the gateway's
+//! exempt identity: the write-back is what makes the L7 decision visible to TC on the original
+//! client flow, which is the flow the agent's packets actually use. `record_verdict` keeps its
+//! informational `KV_PUNT_F_DECIDED` update of `orig_dst` for observability; it lives only as
+//! long as that connection.
 
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -37,6 +44,7 @@ use tracing::{info, warn};
 
 use crate::config::GatewayConfig;
 use crate::gateway_policies::{GatewayPolicies, GatewaySnapshot};
+use crate::kernel::Kernel;
 
 /// How often the heartbeat checks the listener and renews the deadline.
 pub const TICK: Duration = Duration::from_secs(1);
@@ -215,8 +223,32 @@ impl PinnedOrigDst {
         m.get(&orig_key(peer, local), 0).ok()
     }
 
-    /// Record the gateway's connection-level verdict (see the module docs: informational, the
-    /// gateway enforces in-path). `Ok(false)` when the connection's entry is gone (closed).
+    /// Find the `orig_dst` record from what a [`DecisionEvent`] carries: the client address
+    /// (`peer`) and the original destination (`dst`). The gateway listener address is not part
+    /// of the event, so the client side and the original destination identify the connection.
+    pub fn record_for_peer(
+        &self,
+        peer: SocketAddr,
+        dst: SocketAddr,
+    ) -> Option<(OrigKey, PuntRecord)> {
+        let m = self.orig.lock().ok()?;
+        let client = to_words(to_mapped(peer.ip()));
+        let client_port = peer.port().to_be();
+        let want_dst = to_words(to_mapped(dst.ip()));
+        let want_dport = dst.port().to_be();
+        m.iter().find_map(|item| {
+            let Ok((k, r)) = item else { return None };
+            (k.client == client
+                && k.client_port == client_port
+                && r.dst == want_dst
+                && r.dport == want_dport)
+                .then_some((k, r))
+        })
+    }
+
+    /// Record the gateway's connection-level verdict in `orig_dst` for observability. The
+    /// kernel-enforced write-back is [`write_decision_verdict`]; this flag never changes what
+    /// TC lets through. `Ok(false)` when the connection's entry is gone (closed).
     pub fn record_verdict(
         &self,
         peer: SocketAddr,
@@ -463,6 +495,43 @@ pub async fn serve_proxy(
     }
 }
 
+/// Write one proxy decision to the kernel flow verdict cache (FR-GW-5). Called from the
+/// daemon's decision task, which already holds the state lock, so the write cannot race with
+/// policy swaps and the in-process proxy never takes that lock on its data path (it emits
+/// into a channel). Returns `false` when the connection's `orig_dst` entry is already gone.
+pub fn write_decision_verdict(
+    kernel: &mut Kernel,
+    orig: &PinnedOrigDst,
+    ev: &DecisionEvent,
+) -> bool {
+    let Some((k, r)) = orig.record_for_peer(ev.peer, ev.dst) else {
+        return false;
+    };
+    let verdict = decision_verdict(ev.decision);
+    // Keep the informational, connection-scoped update too (nothing regresses).
+    let local = SocketAddr::new(
+        from_mapped(from_words(r.target)),
+        u16::from_be(r.target_port),
+    );
+    if let Err(e) = orig.record_verdict(ev.peer, local, verdict) {
+        warn!(error = %e, "could not record L7 verdict in orig_dst");
+    }
+    if let Err(e) = kernel.write_flow_verdict(&r, &k, verdict) {
+        warn!(
+            error = %format!("{e:#}"),
+            "could not write L7 verdict to flow_cache"
+        );
+    }
+    true
+}
+
+fn decision_verdict(decision: Decision) -> Verdict {
+    match decision {
+        Decision::Allow => Verdict::Allow,
+        Decision::Deny => Verdict::Drop,
+    }
+}
+
 /// Which gateway decisions go to the audit log: every deny, and allows up to `allows_per_sec`
 /// per second (the rest are counted).
 #[derive(Debug)]
@@ -602,6 +671,12 @@ punt = { to = "203.0.113.0/24", port = 443, proto = "tcp", gateway = "other" }
         );
         assert!(src_.policy_for(&info(1, "")).is_none());
         assert!(src_.policy_for(&info(7, "mcp")).is_none());
+    }
+
+    #[test]
+    fn decisions_map_to_kernel_verdicts() {
+        assert_eq!(decision_verdict(Decision::Allow), Verdict::Allow);
+        assert_eq!(decision_verdict(Decision::Deny), Verdict::Drop);
     }
 
     #[test]

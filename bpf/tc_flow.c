@@ -26,6 +26,24 @@ static __always_inline void kv_flow_touch(struct kv_flow_val *v, __u32 len)
 	v->last_seen_ns = bpf_ktime_get_boot_ns();
 }
 
+/*
+ * FR-GW-5: the L7 gateway writes its verdict into flow_cache. A verdict is only live while the
+ * policy generation it was decided under is still active (FR-HS-4); l7_verdict == 0 leaves the
+ * L3/L4 decision in charge, so flows that were never punted behave exactly as before.
+ */
+static __always_inline bool kv_l7_drop(const struct kv_flow_val *v, __u32 gen, bool have_policy)
+{
+	return have_policy && v->l7_verdict == KV_L7_VERDICT_DROP && v->l7_generation == gen;
+}
+
+/* An old entry re-judged at L3/L4 must not carry a stale L7 verdict into the new generation. */
+static __always_inline void kv_l7_clear(struct kv_flow_val *v)
+{
+	v->l7_verdict = KV_L7_VERDICT_NONE;
+	v->l7_generation = 0;
+	v->l7_rule_id = 0;
+}
+
 /* Identity mask of the local socket for the current slot (egress only). */
 static __always_inline __u64 kv_skb_mask(struct __sk_buff *skb, const struct kv_snapshot *s,
 					 __u64 *identity_out)
@@ -170,13 +188,15 @@ int kavach_tc_egress(struct __sk_buff *skb)
 		v->rule_id = d.rule_id;
 		v->identity = mask;
 		v->generation = s.gen;
+		kv_l7_clear(v);
 		kv_count(KV_STAT_FLOW_CACHE_STALE);
 	} else {
 		kv_count(KV_STAT_FLOW_CACHE_HIT);
 	}
 
 	kv_flow_touch(v, skb->len);
-	if (v->verdict == KV_VERDICT_DROP) {
+	if (v->verdict == KV_VERDICT_DROP ||
+	    kv_l7_drop(v, have_policy ? s.gen : 0, have_policy)) {
 		kv_count(KV_STAT_EGRESS_DROP);
 		return TC_ACT_SHOT;
 	}
@@ -210,21 +230,28 @@ int kavach_tc_ingress(struct __sk_buff *skb)
 	if (kv_parse(data, data_end, &p) != KV_PARSE_OK)
 		return TC_ACT_OK;
 
+	int have_policy = kv_snapshot_get(&s) == 0;
 	struct kv_flow_val *v = bpf_map_lookup_elem(&flow_cache, &p.key);
 	if (v && (v->flags & KV_FLOW_F_REPLY)) {
 		/* Return traffic of a flow we originated (verdict re-judged at egress). */
 		kv_flow_touch(v, skb->len);
 		kv_count(KV_STAT_FLOW_CACHE_HIT);
-		return v->verdict == KV_VERDICT_DROP ? TC_ACT_SHOT : TC_ACT_OK;
+		if (v->verdict == KV_VERDICT_DROP ||
+		    kv_l7_drop(v, have_policy ? s.gen : 0, have_policy)) {
+			kv_count(KV_STAT_INGRESS_DROP);
+			return TC_ACT_SHOT;
+		}
+		return TC_ACT_OK;
 	}
 
-	if (kv_snapshot_get(&s))
+	if (!have_policy)
 		return TC_ACT_OK; /* no policy: observe only */
 
 	if (v && v->generation == s.gen) {
 		kv_flow_touch(v, skb->len);
 		kv_count(KV_STAT_FLOW_CACHE_HIT);
-		if (v->verdict == KV_VERDICT_DROP) {
+		if (v->verdict == KV_VERDICT_DROP ||
+		    kv_l7_drop(v, s.gen, true)) {
 			kv_count(KV_STAT_INGRESS_DROP);
 			return TC_ACT_SHOT;
 		}

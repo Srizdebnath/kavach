@@ -99,6 +99,13 @@ pub const KV_FLOW_F_REPLY: u8 = 1 << 0;
 /// Entry was produced by the ingress rule scan.
 pub const KV_FLOW_F_INGRESS: u8 = 1 << 1;
 
+/// [`FlowVal::l7_verdict`]: no L7 decision (the entry's L3/L4 verdict applies).
+pub const KV_L7_VERDICT_NONE: u8 = 0;
+/// [`FlowVal::l7_verdict`]: the L7 gateway allowed the flow.
+pub const KV_L7_VERDICT_ALLOW: u8 = 1;
+/// [`FlowVal::l7_verdict`]: the L7 gateway denied the flow; TC drops it.
+pub const KV_L7_VERDICT_DROP: u8 = 2;
+
 /// IPv6 sources are rate-limited per /64 (an attacker controls a whole /64).
 pub const KV_RATE_V6_PREFIX: u32 = 64;
 
@@ -189,7 +196,12 @@ pub struct FlowKey {
     pub dst: [u32; 4],
 }
 
-/// Cached decision for a flow. 48 bytes.
+/// Cached decision for a flow. 56 bytes.
+///
+/// The `verdict`/`generation`/`rule_id` triple is the L3/L4 decision made by TC. The `l7_*`
+/// triple is the L7 gateway's write-back (FR-GW-5): TC only honours it when `l7_generation`
+/// matches the active policy generation, so entries from an older generation are misses
+/// (FR-HS-4). `l7_verdict == 0` leaves existing L3/L4 behaviour unchanged.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
 pub struct FlowVal {
@@ -202,7 +214,14 @@ pub struct FlowVal {
     pub verdict: u8,
     /// `KV_FLOW_F_*`.
     pub flags: u8,
-    pub _pad: [u8; 6],
+    /// `KV_L7_VERDICT_*` (0 = none).
+    pub l7_verdict: u8,
+    pub _pad: [u8; 1],
+    /// Generation of the punt record the L7 decision was made for.
+    pub l7_generation: u32,
+    /// Rule id of the L7 decision (the punting egress rule).
+    pub l7_rule_id: u32,
+    pub _pad2: [u8; 4],
     pub last_seen_ns: u64,
     pub pkts: u64,
     pub bytes: u64,
@@ -590,7 +609,7 @@ macro_rules! assert_size {
     };
 }
 assert_size!(FlowKey, 40);
-assert_size!(FlowVal, 48);
+assert_size!(FlowVal, 56);
 assert_size!(BlockKey, 20);
 assert_size!(BlockVal, 16);
 assert_size!(SrcKey, 16);
@@ -610,6 +629,10 @@ assert_size!(GatewayCfg, 48);
 assert_size!(PuntRecord, 72);
 assert_size!(OrigKey, 36);
 const _: () = assert!(core::mem::offset_of!(Rule, gateway) == 32);
+const _: () = assert!(core::mem::offset_of!(FlowVal, l7_verdict) == 18);
+const _: () = assert!(core::mem::offset_of!(FlowVal, l7_generation) == 20);
+const _: () = assert!(core::mem::offset_of!(FlowVal, l7_rule_id) == 24);
+const _: () = assert!(core::mem::offset_of!(FlowVal, last_seen_ns) == 32);
 const _: () = assert!(core::mem::offset_of!(FlowKey, src) == 8);
 const _: () = assert!(core::mem::offset_of!(Event, key) == 16);
 const _: () = assert!(core::mem::offset_of!(Event, comm) == 88);
@@ -638,3 +661,46 @@ pub const LAYOUT: &[(&str, usize)] = &[
     ("kv_punt_record", core::mem::size_of::<PuntRecord>()),
     ("kv_orig_key", core::mem::size_of::<OrigKey>()),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::mem::{offset_of, size_of};
+
+    #[test]
+    fn flow_val_layout_carries_l7_verdict_without_padding_gaps() {
+        assert_eq!(size_of::<FlowVal>(), 56);
+        assert_eq!(offset_of!(FlowVal, verdict), 16);
+        assert_eq!(offset_of!(FlowVal, flags), 17);
+        assert_eq!(offset_of!(FlowVal, l7_verdict), 18);
+        assert_eq!(offset_of!(FlowVal, l7_generation), 20);
+        assert_eq!(offset_of!(FlowVal, l7_rule_id), 24);
+        assert_eq!(offset_of!(FlowVal, last_seen_ns), 32);
+        assert_eq!(offset_of!(FlowVal, bytes), 48);
+        assert_eq!(KV_L7_VERDICT_NONE, 0);
+        assert_eq!(KV_L7_VERDICT_ALLOW, 1);
+        assert_eq!(KV_L7_VERDICT_DROP, 2);
+
+        // Every byte of a zeroed FlowVal is a valid value, including the new fields
+        // (bytemuck::Pod is implemented for it).
+        let zero = FlowVal::zeroed();
+        assert_eq!(zero.l7_verdict, KV_L7_VERDICT_NONE);
+        assert_eq!(zero.l7_generation, 0);
+        assert_eq!(zero.l7_rule_id, 0);
+        assert_eq!(bytemuck::bytes_of(&zero).len(), 56);
+    }
+
+    /// Same FNV-1a as `kavachd::kernel::layout_fingerprint`; the pinned value changes only
+    /// with an intentional map-layout bump (the BPF map ABI, not the signed bundle format).
+    #[test]
+    fn layout_fingerprint_tracks_the_generated_header() {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for (name, size) in LAYOUT {
+            for b in name.bytes().chain((*size as u64).to_le_bytes()) {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x0100_0000_01b3);
+            }
+        }
+        assert_eq!(h, 12_833_100_214_913_540_361);
+    }
+}

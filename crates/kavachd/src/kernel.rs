@@ -17,11 +17,12 @@ use kavach_common::addr::{from_mapped, mapped_prefix, mask_addr, to_mapped};
 use tracing::{info, warn};
 
 /// Bump whenever a map layout changes: pins live under `/sys/fs/bpf/kavach/v<ABI_VERSION>`.
-pub const ABI_VERSION: u32 = 3;
+pub const ABI_VERSION: u32 = 4;
 
 /// Fingerprint of every shared struct size (`kavach_common::abi::LAYOUT`) that `ABI_VERSION`
 /// was last bumped for; the test below fails when the layout changes without a bump.
-pub const ABI_LAYOUT_FINGERPRINT: u64 = 1359382574871012577;
+/// v4 adds the L7 verdict fields to `FlowVal` (FR-GW-5); bundle format 3 is unchanged.
+pub const ABI_LAYOUT_FINGERPRINT: u64 = 12_833_100_214_913_540_361;
 
 /// FNV-1a over (name, size) of every ABI type.
 pub fn layout_fingerprint() -> u64 {
@@ -94,7 +95,13 @@ impl Evaluator {
 
 #[cfg(test)]
 mod abi_tests {
-    use super::{Evaluator, OBJECT, evaluator_from};
+    use super::{
+        Evaluator, KV_AF_INET, KV_AF_INET6, KV_PROTO_TCP, OBJECT, OrigKey, PuntRecord,
+        evaluator_from, flow_keys_from_punt,
+    };
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    use kavach_common::addr::{to_mapped, to_words};
 
     #[test]
     fn evaluator_reports_the_module_only_when_its_btf_exists() {
@@ -130,6 +137,55 @@ mod abi_tests {
             super::ABI_LAYOUT_FINGERPRINT,
             "map layout changed: bump ABI_VERSION and record the new fingerprint"
         );
+    }
+
+    /// The gateway has only the punt record and the `orig_dst` key: both TC keys must come out
+    /// in wire (network) byte order and with the punted family, not the listener's.
+    #[test]
+    fn flow_keys_are_derived_from_punt_and_orig_dst() {
+        let v4 = |a: [u8; 4]| to_words(to_mapped(IpAddr::V4(Ipv4Addr::from(a))));
+        let pun = PuntRecord {
+            dst: v4([198, 51, 100, 7]),
+            dport: 443u16.to_be(),
+            generation: 9,
+            rule_id: 42,
+            family: KV_AF_INET,
+            ..Default::default()
+        };
+        let orig = OrigKey {
+            client: v4([10, 1, 2, 3]),
+            gateway: v4([127, 0, 0, 1]),
+            client_port: 40000u16.to_be(),
+            gateway_port: 15001u16.to_be(),
+        };
+        let (fwd, rep) = flow_keys_from_punt(&pun, &orig);
+        assert_eq!(fwd.family, KV_AF_INET);
+        assert_eq!(fwd.proto, KV_PROTO_TCP);
+        assert_eq!(fwd.src, orig.client);
+        assert_eq!(fwd.sport, orig.client_port);
+        assert_eq!(fwd.dst, pun.dst);
+        assert_eq!(fwd.dport, pun.dport);
+        assert_eq!(rep.family, KV_AF_INET);
+        assert_eq!(rep.proto, KV_PROTO_TCP);
+        assert_eq!(rep.src, pun.dst);
+        assert_eq!(rep.sport, pun.dport);
+        assert_eq!(rep.dst, orig.client);
+        assert_eq!(rep.dport, orig.client_port);
+        // Ports are already on the wire: no extra byte-swap in user space.
+        assert_eq!(fwd.sport.to_ne_bytes(), 40000u16.to_be_bytes());
+        assert_eq!(fwd.dport.to_ne_bytes(), 443u16.to_be_bytes());
+
+        let pun6 = PuntRecord {
+            dst: to_words(to_mapped(IpAddr::V6(
+                "2001:db8::1".parse::<Ipv6Addr>().unwrap(),
+            ))),
+            family: KV_AF_INET6,
+            ..pun
+        };
+        let (fwd6, rep6) = flow_keys_from_punt(&pun6, &orig);
+        assert_eq!((fwd6.family, rep6.family), (KV_AF_INET6, KV_AF_INET6));
+        assert_eq!(fwd6.dst, pun6.dst);
+        assert_eq!(rep6.src, pun6.dst);
     }
 }
 
@@ -812,6 +868,51 @@ impl Kernel {
         Ok(out)
     }
 
+    /// Read a `flow_cache` entry (used by the privileged BPF suite to verify write-back).
+    pub fn flow_verdict(&mut self, key: &FlowKey) -> Result<Option<FlowVal>> {
+        let m: HashMap<_, FlowKey, FlowVal> = HashMap::try_from(self.map("flow_cache")?)?;
+        Ok(m.get(key, 0).ok())
+    }
+
+    /// Write the L7 gateway's decision into the kernel `flow_cache` for the original client
+    /// flow (FR-GW-5). The two keys are the forward 5-tuple (client → original destination)
+    /// and its reply, which is the key TC egress looks up and TC ingress sees on return
+    /// traffic. Seeding both keeps those lookups O(1). The generation comes from the punt
+    /// record, so an L7 verdict made under an older policy is ignored by TC (FR-HS-4).
+    ///
+    /// Existing L3/L4 fields (identity, verdict, counters) are preserved: an L7 allow can
+    /// never override a packet-level drop. Entries with no L7 decision (`l7_verdict == 0`)
+    /// keep their previous behaviour.
+    pub fn write_flow_verdict(
+        &mut self,
+        pun: &PuntRecord,
+        orig: &OrigKey,
+        verdict: Verdict,
+    ) -> Result<()> {
+        let l7 = match verdict {
+            Verdict::Drop => KV_L7_VERDICT_DROP,
+            _ => KV_L7_VERDICT_ALLOW,
+        };
+        let (forward, reply) = flow_keys_from_punt(pun, orig);
+        let mut m: HashMap<_, FlowKey, FlowVal> = HashMap::try_from(self.map("flow_cache")?)?;
+        for (key, flags) in [(forward, 0u8), (reply, KV_FLOW_F_REPLY)] {
+            let mut v = m.get(&key, 0).unwrap_or_default();
+            if v.last_seen_ns == 0 {
+                // A brand-new entry: the punt itself had allowed the connect.
+                v.verdict = Verdict::Allow as u8;
+                v.rule_id = pun.rule_id;
+            }
+            v.flags |= flags;
+            v.generation = pun.generation;
+            v.l7_verdict = l7;
+            v.l7_generation = pun.generation;
+            v.l7_rule_id = pun.rule_id;
+            v.last_seen_ns = boot_ns();
+            m.insert(&key, &v, 0)?;
+        }
+        Ok(())
+    }
+
     /// Independent handles on `orig_dst` / `gw_cfg` (from their pins) for the gateway proxy and
     /// the liveness heartbeat, which must not take the daemon lock.
     pub fn gateway_maps(&self) -> Result<crate::gateway::GatewayMaps> {
@@ -909,6 +1010,36 @@ fn update_class_map<K: aya::Pod + Eq + std::hash::Hash + Copy>(
         }
     }
     Ok(())
+}
+
+/// Flow keys of the original (pre-redirect) client connection, derived from a punt record
+/// and its `orig_dst` key. Ports stay in network byte order, as `FlowKey` requires; the
+/// gateway listener address in `OrigKey::gateway` is deliberately not used. The reply key
+/// is exactly what `kv_flow_reverse` produces in TC, so both datapath directions hit.
+pub fn flow_keys_from_punt(pun: &PuntRecord, orig: &OrigKey) -> (FlowKey, FlowKey) {
+    let forward = FlowKey {
+        family: if pun.family == KV_AF_INET6 {
+            KV_AF_INET6
+        } else {
+            KV_AF_INET
+        },
+        proto: KV_PROTO_TCP,
+        _pad: [0; 2],
+        sport: orig.client_port,
+        dport: pun.dport,
+        src: orig.client,
+        dst: pun.dst,
+    };
+    let reply = FlowKey {
+        family: forward.family,
+        proto: forward.proto,
+        _pad: [0; 2],
+        sport: forward.dport,
+        dport: forward.sport,
+        src: forward.dst,
+        dst: forward.src,
+    };
+    (forward, reply)
 }
 
 pub fn key_to_net(prefix: u32, addr: [u8; 16]) -> IpNet {

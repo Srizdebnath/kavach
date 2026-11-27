@@ -61,7 +61,7 @@ serves both families.
 | Type | Size | Notes |
 |---|---|---|
 | `FlowKey` | 40 | family, proto, ports (network order), src, dst |
-| `FlowVal` | 48 | identity mask, rule_id, **u32 generation** Δ, verdict, flags (REPLY/INGRESS), counters |
+| `FlowVal` | 56 | identity mask, rule_id, **u32 generation** Δ, verdict, flags (REPLY/INGRESS), L7 verdict/generation/rule id (FR-GW-5), counters |
 | `ExeKey` | 24 | `{inode pointer, i_ino, s_dev, i_generation}` of the live kernel inode Δ |
 | `ExeClass` | 32 | `mask[2]` (one per policy slot) + `nonce` of the key request |
 | `KeyReq` | 16 | one-shot `{nonce, tid}` armed by kavachd |
@@ -76,7 +76,7 @@ entry look current.
 
 ## 4. BPF maps
 
-All maps except `sync_*` are pinned `LIBBPF_PIN_BY_NAME` under `/sys/fs/bpf/kavach/v<ABI_VERSION>` (currently `v3`)
+All maps except `sync_*` are pinned `LIBBPF_PIN_BY_NAME` under `/sys/fs/bpf/kavach/v<ABI_VERSION>` (currently `v4`)
 (versioned so an incompatible layout never re-adopts old pins).
 
 | Map | Type | Key → Value | Writer | Reader |
@@ -284,10 +284,12 @@ the reference semantics:
    - On first sight, insert the reply key with the socket's identity.
    - On a hit whose generation is stale, re-evaluate egress with the socket's identity
      (recomputed for the new slot). An established flow newly denied by a policy swap is cut
-     (FR-HS-4).
+     (FR-HS-4); a stale L7 verdict is cleared with it.
+   - A current-generation L7 drop write-back (FR-GW-5) cuts the flow; a L7 allow passes, and
+     a packet-level drop still wins over it.
 4. **TC ingress**:
    - A reply-flow hit uses the cached verdict. An ingress-flow hit is used only if its
-     generation is current.
+     generation is current. A matching-generation L7 drop write-back also drops it.
    - The always-pass list (ICMP errors, ICMPv6 other than echo request, DHCP replies, non-first
      fragments) is never dropped.
    - Mid-stream TCP with no state passes unless `strict_ingress` is set.
@@ -508,12 +510,19 @@ getpeername ─► cgroup/getpeername4|6: the client still sees dst
   while something listens on `listen` (`/proc/net/tcp*`). A stopped, crashed or unbound
   gateway lets the deadline lapse and punts fall back to their fail mode: a fail-open rule
   never becomes "connection refused" because the proxy is down. Clean exit zeroes it at once.
-* **Verdict write-back.** The proxy is in the path and enforces its own per-frame decisions.
-  The client leg runs over loopback, where TC and `flow_cache` are not attached, and the
-  upstream leg belongs to the gateway's identity, so no `flow_cache` entry could carry an L7
-  verdict. `PinnedOrigDst::record_verdict` stores the latest connection-level verdict in the
-  `orig_dst` entry (`KV_PUNT_F_DECIDED`) for observability only; decisions are also audited
-  (`gateway_decision`: every deny, allows sampled at 10/s).
+* **Verdict write-back (FR-GW-5).** The proxy enforces each per-frame decision in path and the
+  daemon's decision task also writes it into the pinned `flow_cache`:
+  `Kernel::write_flow_verdict` derives the original client connection's forward and reply
+  5-tuples from the punt record plus its `orig_dst` key, and sets `l7_verdict` (1 allow /
+  2 drop), `l7_generation` (from the punt) and `l7_rule_id` on both. TC egress and ingress
+  drop a flow whose L7 verdict is `drop` and whose generation matches the active policy;
+  `l7_verdict == 0` leaves the old L3/L4 behaviour untouched, and an L3/L4 drop is never
+  overridden by an L7 allow. After a policy swap an old-generation L7 entry is ignored and
+  re-judged at L3/L4 (FR-HS-4). The proxy itself never takes the daemon lock: it emits
+  `DecisionEvent`s into a channel, whose consumer writes the verdict and audits the decision
+  (`gateway_decision`: every deny, allows sampled at 10/s). `PinnedOrigDst::record_verdict`
+  still stores the connection-level verdict in `orig_dst` (`KV_PUNT_F_DECIDED`) for
+  observability; that flag alone never changed enforcement.
 * **Not redirected.** UDP/ICMP punts, punt rules naming no gateway, and `IPV6_V6ONLY` sockets
   when no `listen6` is configured keep the fail mode (`gw_stats` says which).
 

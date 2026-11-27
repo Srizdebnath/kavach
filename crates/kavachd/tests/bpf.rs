@@ -13,7 +13,7 @@ use aya::maps::{MapData, RingBuf};
 use aya::programs::{ProgramError, SchedClassifier, TestRun, TestRunOptions, Xdp};
 use ipnet::IpNet;
 use kavach_common::abi::*;
-use kavach_common::addr::to_mapped;
+use kavach_common::addr::{to_mapped, to_words};
 use kavach_core::{FlowQuery, Snapshot};
 use kavach_policy::kernel::{Facts, OfflineTables};
 use kavachd::config::Config;
@@ -209,6 +209,34 @@ fn syn(src: [u8; 4], dport: u16) -> Vec<u8> {
         TCP_SYN,
         &[],
     )
+}
+
+/// Punt record + `orig_dst` key for a redirected TCP connection (all addresses IPv4-mapped,
+/// ports network order), as the L7 write-back sees them.
+fn l7_flow(
+    dst: Ipv4Addr,
+    dport: u16,
+    client: Ipv4Addr,
+    client_port: u16,
+    generation: u32,
+) -> (PuntRecord, OrigKey) {
+    let pun = PuntRecord {
+        dst: to_words(to_mapped(dst.into())),
+        target: to_words(to_mapped(Ipv4Addr::LOCALHOST.into())),
+        dport: dport.to_be(),
+        target_port: 15001u16.to_be(),
+        family: KV_AF_INET,
+        generation,
+        rule_id: 1,
+        ..Default::default()
+    };
+    let orig = OrigKey {
+        client: to_words(to_mapped(client.into())),
+        gateway: to_words(to_mapped(Ipv4Addr::LOCALHOST.into())),
+        client_port: client_port.to_be(),
+        gateway_port: 15001u16.to_be(),
+    };
+    (pun, orig)
 }
 
 fn enable_xdp(f: &mut Fixture, flags: u32, pps: u64, burst: u64) {
@@ -447,6 +475,69 @@ fn hot_swap_reevaluates_cached_flows() {
     let hdr = f.k().policy_header(active).unwrap();
     assert_eq!(hdr.generation, g1 + 1);
     assert_eq!(f.k().generation().unwrap(), g1 + 1);
+}
+
+/// FR-GW-5: a gateway decision written into the real `flow_cache` map is enforced by TC on
+/// both directions of the original client flow, and an old-generation write is a miss.
+#[test]
+#[ignore = "needs root: scripts/priv-test.sh"]
+fn tc_honours_l7_verdict_writeback_and_ignores_old_generation() {
+    let mut f = Fixture::new();
+    f.apply_toml(
+        r#"
+version = 1
+[defaults]
+egress = "allow"
+ingress = "allow"
+"#,
+    );
+    let policy_gen = f.d().generation;
+    let remote = Ipv4Addr::new(198, 51, 100, 7);
+    let client = Ipv4Addr::new(10, 1, 2, 3);
+    let dport = 443u16;
+
+    // Baseline: no L7 verdict yet, both directions pass.
+    let reply = |cport| v4_pkt(remote, client, 6, dport, cport, TCP_ACK, &[]);
+    let forward = |cport| v4_pkt(client, remote, 6, cport, dport, TCP_SYN, &[]);
+    assert_eq!(f.tc("kavach_tc_ingress", &reply(40000)), TC_OK);
+    assert_eq!(f.tc("kavach_tc_egress", &forward(40000)), TC_OK);
+
+    // A current-generation drop from the gateway cuts both TC directions.
+    let (pun, orig) = l7_flow(remote, dport, client, 40000, policy_gen);
+    f.k()
+        .write_flow_verdict(&pun, &orig, Verdict::Drop)
+        .unwrap();
+    let (_, reply_key) = kernel::flow_keys_from_punt(&pun, &orig);
+    let v = f
+        .k()
+        .flow_verdict(&reply_key)
+        .unwrap()
+        .expect("write-back created the reply entry");
+    assert_eq!(v.l7_verdict, KV_L7_VERDICT_DROP);
+    assert_eq!(v.l7_generation, policy_gen);
+    assert_eq!(v.l7_rule_id, pun.rule_id);
+    assert_eq!(f.tc("kavach_tc_ingress", &reply(40000)), TC_SHOT);
+    assert_eq!(f.tc("kavach_tc_egress", &forward(40000)), TC_SHOT);
+
+    // An L7 allow on another flow passes (it does not override an L4 drop, which there is none).
+    let (allow_pun, allow_orig) = l7_flow(remote, dport, client, 40002, policy_gen);
+    f.k()
+        .write_flow_verdict(&allow_pun, &allow_orig, Verdict::Allow)
+        .unwrap();
+    assert_eq!(f.tc("kavach_tc_ingress", &reply(40002)), TC_OK);
+
+    // The same drop written for an older generation is ignored (FR-HS-4) until it is re-sent
+    // with the active generation.
+    let (old_pun, old_orig) = l7_flow(remote, dport, client, 40001, policy_gen.saturating_sub(1));
+    f.k()
+        .write_flow_verdict(&old_pun, &old_orig, Verdict::Drop)
+        .unwrap();
+    assert_eq!(f.tc("kavach_tc_ingress", &reply(40001)), TC_OK);
+    let (current_pun, current_orig) = l7_flow(remote, dport, client, 40001, policy_gen);
+    f.k()
+        .write_flow_verdict(&current_pun, &current_orig, Verdict::Drop)
+        .unwrap();
+    assert_eq!(f.tc("kavach_tc_ingress", &reply(40001)), TC_SHOT);
 }
 
 /// Differential test (T69): the C program and kavach-core must agree on every flow.
