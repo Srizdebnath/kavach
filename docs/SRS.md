@@ -36,7 +36,7 @@ signed, version-controlled policy (`kavach.toml`).
 * **v0.1** XDP blocklist + per-source rate limiting (C, loaded from Rust with Aya).
 * **v0.2** Identity-aware egress via BPF-LSM + cgroup identity.
 * **v0.3** `kavach.toml` policy-as-code, signed bundles, A/B hot-swap, `kavachctl`.
-* **v0.4** (specified, not built) agent gateway: MCP / A2A / WebSocket policy; `kavach.ko` Rust kfunc core.
+* **v0.4** (released 2026-11-27) agent gateway: MCP / A2A / WebSocket policy; `kavach.ko` Rust kfunc core.
 * **v0.5** (specified, not built) FreeBSD pfil shim, macOS Network Extension.
 
 ### 1.4 Definitions
